@@ -8,16 +8,55 @@
  ✓ Compiled successfully
    Skipping linting
    Checking validity of types ...
-Failed to compile.
+   Collecting page data ...
+Database initialized successfully
+Database initialized successfully
+Database initialized successfully
+   Generating static pages (0/16) ...
+Database initialized successfully
+API error: ex [Error]: Dynamic server usage: Page couldn't be rendered statically because it used `headers`. See more info here: https://nextjs.org/docs/messages/dynamic-server-error
+    at eP (C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@14.1.0_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\compiled\next-server\app-route.runtime.prod.js:6:29358)
+    at Module.eE (C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@14.1.0_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\compiled\next-server\app-route.runtime.prod.js:6:29694)
+Database initialized successfully
+    at i (C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@14.1.0_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\compiled\next-server\app-route.runtime.prod.js:6:34572)
+    at Object.get (C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@14.1.0_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\compiled\next-server\app-route.runtime.prod.js:6:34788)
+   Generating static pages (4/16) 
+   Generating static pages (8/16) 
+    at a.getIdentifier (C:\Users\User1\Downloads\TradingBot\apps\frontend\.next\server\app\api\performance\route.js:38:3112)
+    at a.check (C:\Users\User1\Downloads\TradingBot\apps\frontend\.next\server\app\api\performance\route.js:38:2737)
+    at f (C:\Users\User1\Downloads\TradingBot\apps\frontend\.next\server\app\api\performance\route.js:1:2511)
+    at C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@14.1.0_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\compiled\next-server\app-route.runtime.prod.js:6:42490
+    at C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@14.1.0_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\server\lib\trace\tracer.js:133:36
+    at NoopContextManager.with (C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@14.1.0_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\compiled\@opentelemetry\api\index.js:1:7062) {
+  description: "Page couldn't be rendered statically because it used `headers`. See more info here: https://nextjs.org/docs/messages/dynamic-server-error",
+  digest: 'DYNAMIC_SERVER_USAGE'
+}
+   Generating static pages (12/16) 
+ ✓ Generating static pages (16/16) 
+   Finalizing page optimization ...
+   Collecting build traces ...
 
-./src/app/api/performance/route.ts:515:21
-Type error: Cannot find name 'supabase'.
+Route (app)                              Size     First Load JS
+┌ ○ /                                    635 B          84.8 kB
+├ ○ /_not-found                          883 B          85.1 kB
+├ λ /api/auth/login                      0 B                0 B
+├ λ /api/bots                            0 B                0 B
+├ λ /api/performance                     0 B                0 B
+├ λ /api/risk                            0 B                0 B
+├ λ /api/trades                          0 B                0 B
+├ λ /api/wallets                         0 B                0 B
+├ ○ /dashboard                           1.7 kB         85.9 kB
+├ ○ /dashboard/arbitrage                 1.01 kB        85.2 kB
+├ ○ /dashboard/copy-trader               1.1 kB         85.3 kB
+├ ○ /dashboard/sandwich                  1.15 kB        85.3 kB
+├ ○ /login                               1.24 kB        85.4 kB
+└ ○ /wallets                             1.26 kB        85.4 kB
++ First Load JS shared by all            84.2 kB
+  ├ chunks/14720756-8b469c39ab952a51.js  53.4 kB
+  ├ chunks/726-71be7be3d00e37da.js       28.9 kB
+  └ other shared chunks (total)          1.9 kB
 
-[0m [90m 513 |[39m   [36mtry[39m {[0m
-[0m [90m 514 |[39m     [90m// Get user's historical performance for comparison[39m[0m
-[0m[31m[1m>[22m[39m[90m 515 |[39m     [36mlet[39m userQuery [33m=[39m supabase[0m
-[0m [90m     |[39m                     [31m[1m^[22m[39m[0m
-[0m [90m 516 |[39m       [33m.[39m[36mfrom[39m([32m'trade_history'[39m)[0m
-[0m [90m 517 |[39m       [33m.[39mselect([32m`[39m[0m
-[0m [90m 518 |[39m [32m        profit_loss_usd,[39m[0m
- ELIFECYCLE  Command failed with exit code 1.
+
+○  (Static)   prerendered as static content
+λ  (Dynamic)  server-rendered on demand using Node.js
+

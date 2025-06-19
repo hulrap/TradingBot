@@ -22,26 +22,19 @@
       "static/chunks/main-app-831de06fea9174bf.js",
       "static/chunks/app/dashboard/arbitrage/page-cb52132ded306af2.js"
     ],
-    "/dashboard/sandwich/page": [
-      "static/chunks/webpack-b3575aae578821ea.js",
-      "static/chunks/14720756-8b469c39ab952a51.js",
-      "static/chunks/726-71be7be3d00e37da.js",
-      "static/chunks/main-app-831de06fea9174bf.js",
-      "static/chunks/app/dashboard/sandwich/page-60d515d3a4fc0163.js"
-    ],
-    "/dashboard/page": [
-      "static/chunks/webpack-b3575aae578821ea.js",
-      "static/chunks/14720756-8b469c39ab952a51.js",
-      "static/chunks/726-71be7be3d00e37da.js",
-      "static/chunks/main-app-831de06fea9174bf.js",
-      "static/chunks/app/dashboard/page-0fd4de1210f4cdc6.js"
-    ],
     "/dashboard/copy-trader/page": [
       "static/chunks/webpack-b3575aae578821ea.js",
       "static/chunks/14720756-8b469c39ab952a51.js",
       "static/chunks/726-71be7be3d00e37da.js",
       "static/chunks/main-app-831de06fea9174bf.js",
       "static/chunks/app/dashboard/copy-trader/page-c84c5c76276f489c.js"
+    ],
+    "/dashboard/sandwich/page": [
+      "static/chunks/webpack-b3575aae578821ea.js",
+      "static/chunks/14720756-8b469c39ab952a51.js",
+      "static/chunks/726-71be7be3d00e37da.js",
+      "static/chunks/main-app-831de06fea9174bf.js",
+      "static/chunks/app/dashboard/sandwich/page-60d515d3a4fc0163.js"
     ],
     "/page": [
       "static/chunks/webpack-b3575aae578821ea.js",
@@ -50,12 +43,12 @@
       "static/chunks/main-app-831de06fea9174bf.js",
       "static/chunks/app/page-25e311cd5ba37423.js"
     ],
-    "/login/page": [
+    "/dashboard/page": [
       "static/chunks/webpack-b3575aae578821ea.js",
       "static/chunks/14720756-8b469c39ab952a51.js",
       "static/chunks/726-71be7be3d00e37da.js",
       "static/chunks/main-app-831de06fea9174bf.js",
-      "static/chunks/app/login/page-feae0ac02539c900.js"
+      "static/chunks/app/dashboard/page-0fd4de1210f4cdc6.js"
     ],
     "/wallets/page": [
       "static/chunks/webpack-b3575aae578821ea.js",
@@ -63,6 +56,13 @@
       "static/chunks/726-71be7be3d00e37da.js",
       "static/chunks/main-app-831de06fea9174bf.js",
       "static/chunks/app/wallets/page-9f2f808b614ed896.js"
+    ],
+    "/login/page": [
+      "static/chunks/webpack-b3575aae578821ea.js",
+      "static/chunks/14720756-8b469c39ab952a51.js",
+      "static/chunks/726-71be7be3d00e37da.js",
+      "static/chunks/main-app-831de06fea9174bf.js",
+      "static/chunks/app/login/page-feae0ac02539c900.js"
     ]
   }
 }
