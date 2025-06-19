@@ -1,20 +1,37 @@
 {
   "name": "@trading-bot/chain-client",
-  "version": "0.0.0",
-  "private": true,
-  "main": "./index.ts",
-  "types": "./index.ts",
+  "version": "1.0.0",
+  "description": "Multi-chain client abstraction with RPC management",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "scripts": {
-    "lint": "eslint . --ext .ts,.tsx"
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "clean": "rm -rf dist",
+    "type-check": "tsc --noEmit"
   },
   "dependencies": {
+    "ethers": "^6.11.1",
     "@solana/web3.js": "^1.91.4",
-    "ethers": "^6.11.1"
+    "axios": "^1.6.7",
+    "ws": "^8.16.0",
+    "winston": "^3.11.0",
+    "p-queue": "^8.0.1",
+    "p-retry": "^6.2.0"
   },
   "devDependencies": {
-    "@trading-bot/config": "workspace:*",
-    "@trading-bot/types": "workspace:*",
-    "eslint": "^8.57.0",
-    "typescript": "latest"
-  }
+    "typescript": "^5.3.3",
+    "tsup": "^8.0.2",
+    "@types/ws": "^8.5.10"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ]
 } 

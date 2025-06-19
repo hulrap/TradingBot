@@ -1,50 +1,6 @@
 
-> @trading-bot/frontend@0.1.0 build C:\Users\User1\Downloads\TradingBot\apps\frontend
+
+> @trading-bot/frontend@0.1.0 build /workspace/apps/frontend
 > next build
 
-   ▲ Next.js 15.3.4
-
-   Creating an optimized production build ...
-Failed to compile.
-
-src\app\layout.tsx
-An error occurred in `next/font`.
-
-Error: Cannot find module 'autoprefixer'
-Require stack:
-- C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@15.3.4_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\build\webpack\config\blocks\css\plugins.js
-- C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@15.3.4_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\build\webpack\config\blocks\css\index.js
-- C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@15.3.4_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\build\webpack\config\index.js
-- C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@15.3.4_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\build\webpack-config.js
-- C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@15.3.4_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\build\webpack-build\impl.js
-- C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@15.3.4_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\compiled\jest-worker\processChild.js
-    at Module._resolveFilename (node:internal/modules/cjs/loader:1225:15)
-    at C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@15.3.4_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\server\require-hook.js:55:36
-    at Function.resolve (node:internal/modules/helpers:190:19)
-    at loadPlugin (C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@15.3.4_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\build\webpack\config\blocks\css\plugins.js:53:32)
-    at C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@15.3.4_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\build\webpack\config\blocks\css\plugins.js:185:56
-    at Array.map (<anonymous>)
-    at getPostCssPlugins (C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@15.3.4_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\build\webpack\config\blocks\css\plugins.js:185:47)
-    at async C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@15.3.4_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\build\webpack\config\blocks\css\index.js:125:36
-    at async C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@15.3.4_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\build\webpack\loaders\next-font-loader\index.js:94:33
-    at async Span.traceAsyncFn (C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@15.3.4_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\trace\trace.js:157:20)
-
-../../node_modules/.pnpm/@solana+web3.js@1.91.4/node_modules/@solana/web3.js/lib/index.esm.js
-Module not found: Can't resolve 'rpc-websockets/dist/lib/client'
-
-https://nextjs.org/docs/messages/module-not-found
-
-Import trace for requested module:
-./src/app/api/wallets/route.ts
-
-../../node_modules/.pnpm/@solana+web3.js@1.91.4/node_modules/@solana/web3.js/lib/index.esm.js
-Module not found: Can't resolve 'rpc-websockets/dist/lib/client/websocket'
-
-https://nextjs.org/docs/messages/module-not-found
-
-Import trace for requested module:
-./src/app/api/wallets/route.ts
-
-
-> Build failed because of webpack errors
- ELIFECYCLE  Command failed with exit code 1.
+[41m[30m ELIFECYCLE [39m[49m [31mCommand failed.[39m

@@ -1,0 +1,695 @@
+import { ethers } from 'ethers';
+import { EventEmitter } from 'events';
+import WebSocket from 'ws';
+import { Connection, VersionedTransaction } from '@solana/web3.js';
+
+export interface SandwichOpportunity {
+  victimTxHash: string;
+  victimTransaction: ethers.TransactionRequest | VersionedTransaction;
+  chain: 'ethereum' | 'bsc' | 'solana';
+  dexType: 'uniswap-v2' | 'uniswap-v3' | 'pancakeswap' | 'raydium' | 'orca' | 'jupiter';
+  tokenIn: string;
+  tokenOut: string;
+  amountIn: string;
+  expectedAmountOut: string;
+  poolAddress: string;
+  poolLiquidity: string;
+  gasPrice: string;
+  priorityFee?: string;
+  estimatedProfit: string;
+  profitability: number; // Profit as % of trade value
+  confidence: number; // 0-1 confidence score
+  timeToExpiry: number; // Milliseconds until opportunity expires
+  slippage: number;
+  mevScore: number; // Overall MEV attractiveness score
+}
+
+export interface TokenInfo {
+  address: string;
+  symbol: string;
+  decimals: number;
+  price: number; // USD price
+  liquidity: string;
+  volume24h: string;
+  isHoneypot: boolean;
+  taxBuy: number;
+  taxSell: number;
+  verified: boolean;
+}
+
+export interface PoolInfo {
+  address: string;
+  token0: string;
+  token1: string;
+  reserve0: string;
+  reserve1: string;
+  totalSupply: string;
+  fee: number;
+  dexType: string;
+  lastUpdate: number;
+}
+
+export interface MempoolConfig {
+  chains: string[];
+  minTradeValue: string; // Minimum trade value to consider
+  maxGasPrice: string; // Maximum gas price to consider profitable
+  minLiquidity: string; // Minimum pool liquidity required
+  blacklistedTokens: string[]; // Tokens to ignore
+  whitelistedDexes: string[]; // Only monitor these DEXes
+  maxSlippage: number; // Maximum slippage to consider
+  profitabilityThreshold: number; // Minimum profit percentage
+}
+
+export class SandwichDetector extends EventEmitter {
+  private config: MempoolConfig;
+  private providers: Map<string, ethers.Provider> = new Map();
+  private solanaConnection?: Connection;
+  private websockets: Map<string, WebSocket> = new Map();
+  private poolCache: Map<string, PoolInfo> = new Map();
+  private tokenCache: Map<string, TokenInfo> = new Map();
+  private isMonitoring = false;
+  private pendingTransactions = new Set<string>();
+
+  // DEX router addresses by chain
+  private readonly DEX_ROUTERS = {
+    ethereum: {
+      'uniswap-v2': '0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D',
+      'uniswap-v3': '0xE592427A0AEce92De3Edee1F18E0157C05861564',
+      'sushiswap': '0xd9e1cE17f2641f24aE83637ab66a2cca9C378B9F'
+    },
+    bsc: {
+      'pancakeswap': '0x10ED43C718714eb63d5aA57B78B54704E256024E',
+      'pancakeswap-v3': '0x1b81D678ffb9C0263b24A97847620C99d213eB14'
+    },
+    solana: {
+      'raydium': '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8',
+      'orca': '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM',
+      'jupiter': 'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4'
+    }
+  };
+
+  // Popular token addresses
+  private readonly WRAPPED_TOKENS = {
+    ethereum: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2', // WETH
+    bsc: '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c', // WBNB
+    solana: 'So11111111111111111111111111111111111111112' // SOL
+  };
+
+  constructor(config: MempoolConfig) {
+    super();
+    this.config = config;
+  }
+
+  async initialize(providers: { [chain: string]: ethers.Provider | Connection }): Promise<void> {
+    try {
+      // Initialize providers
+      for (const [chain, provider] of Object.entries(providers)) {
+        if (chain === 'solana') {
+          this.solanaConnection = provider as Connection;
+        } else {
+          this.providers.set(chain, provider as ethers.Provider);
+        }
+      }
+
+      // Initialize pool and token data
+      await this.loadInitialData();
+
+      this.emit('initialized');
+      console.log('Sandwich detector initialized for chains:', this.config.chains);
+    } catch (error) {
+      console.error('Failed to initialize sandwich detector:', error);
+      this.emit('error', error);
+      throw error;
+    }
+  }
+
+  async startMonitoring(): Promise<void> {
+    if (this.isMonitoring) {
+      console.warn('Sandwich detector is already monitoring');
+      return;
+    }
+
+    try {
+      this.isMonitoring = true;
+
+      // Start monitoring each enabled chain
+      for (const chain of this.config.chains) {
+        if (chain === 'ethereum' || chain === 'bsc') {
+          await this.startEthereumLikeMonitoring(chain);
+        } else if (chain === 'solana') {
+          await this.startSolanaMonitoring();
+        }
+      }
+
+      this.emit('monitoringStarted');
+      console.log('Started mempool monitoring for chains:', this.config.chains);
+    } catch (error) {
+      console.error('Failed to start monitoring:', error);
+      this.isMonitoring = false;
+      this.emit('error', error);
+      throw error;
+    }
+  }
+
+  private async startEthereumLikeMonitoring(chain: string): Promise<void> {
+    const provider = this.providers.get(chain);
+    if (!provider) {
+      throw new Error(`Provider not found for chain: ${chain}`);
+    }
+
+    // Listen for pending transactions
+    provider.on('pending', async (txHash: string) => {
+      if (this.pendingTransactions.has(txHash)) return;
+      this.pendingTransactions.add(txHash);
+
+      try {
+        const opportunity = await this.analyzePendingTransaction(txHash, chain);
+        if (opportunity) {
+          this.emit('opportunityFound', opportunity);
+        }
+      } catch (error) {
+        // Silently handle errors for individual transactions
+        // Most pending transactions won't be valid opportunities
+      } finally {
+        // Clean up after processing
+        setTimeout(() => this.pendingTransactions.delete(txHash), 30000);
+      }
+    });
+
+    console.log(`Started pending transaction monitoring for ${chain}`);
+  }
+
+  private async startSolanaMonitoring(): Promise<void> {
+    if (!this.solanaConnection) {
+      throw new Error('Solana connection not initialized');
+    }
+
+    // Monitor Solana signature notifications
+    this.solanaConnection.onSignature(
+      'all',
+      (signatureResult, context) => {
+        // Process Solana transactions
+        this.processSolanaTransaction(signatureResult, context);
+      },
+      'processed'
+    );
+
+    console.log('Started Solana transaction monitoring');
+  }
+
+  private async analyzePendingTransaction(txHash: string, chain: string): Promise<SandwichOpportunity | null> {
+    const provider = this.providers.get(chain);
+    if (!provider) return null;
+
+    try {
+      // Get transaction details
+      const tx = await provider.getTransaction(txHash);
+      if (!tx || !tx.to) return null;
+
+      // Check if transaction is targeting a known DEX router
+      const dexType = this.identifyDexRouter(tx.to, chain);
+      if (!dexType) return null;
+
+      // Decode transaction data
+      const decodedTx = await this.decodeSwapTransaction(tx, dexType, chain);
+      if (!decodedTx) return null;
+
+      // Analyze for sandwich potential
+      const opportunity = await this.evaluateSandwichOpportunity(decodedTx, tx, chain, dexType);
+      return opportunity;
+
+    } catch (error) {
+      // Transaction might be invalid or not yet available
+      return null;
+    }
+  }
+
+  private identifyDexRouter(routerAddress: string, chain: string): string | null {
+    const routers = this.DEX_ROUTERS[chain as keyof typeof this.DEX_ROUTERS] || {};
+    
+    for (const [dexType, address] of Object.entries(routers)) {
+      if (address.toLowerCase() === routerAddress.toLowerCase()) {
+        return dexType;
+      }
+    }
+    
+    return null;
+  }
+
+  private async decodeSwapTransaction(
+    tx: ethers.TransactionResponse, 
+    dexType: string, 
+    chain: string
+  ): Promise<any | null> {
+    try {
+      if (dexType.includes('uniswap-v2') || dexType.includes('pancakeswap')) {
+        return this.decodeUniswapV2Transaction(tx);
+      } else if (dexType.includes('uniswap-v3')) {
+        return this.decodeUniswapV3Transaction(tx);
+      }
+      
+      return null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  private decodeUniswapV2Transaction(tx: ethers.TransactionResponse): any | null {
+    const uniswapV2ABI = [
+      'function swapExactETHForTokens(uint amountOutMin, address[] calldata path, address to, uint deadline) external payable',
+      'function swapExactTokensForETH(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) external',
+      'function swapExactTokensForTokens(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) external'
+    ];
+
+    try {
+      const iface = new ethers.Interface(uniswapV2ABI);
+      const decoded = iface.parseTransaction({ data: tx.data, value: tx.value });
+      
+      if (!decoded) return null;
+
+      const functionName = decoded.name;
+      const args = decoded.args;
+
+      if (functionName === 'swapExactETHForTokens') {
+        const chainKey = Number(tx.chainId) === 1 ? 'ethereum' : 'bsc';
+        return {
+          type: 'exactInput',
+          tokenIn: this.WRAPPED_TOKENS[chainKey],
+          tokenOut: args.path[args.path.length - 1],
+          amountIn: tx.value?.toString() || '0',
+          amountOutMin: args.amountOutMin.toString(),
+          path: args.path,
+          deadline: args.deadline.toString()
+        };
+      } else if (functionName === 'swapExactTokensForETH') {
+        const chainKey = Number(tx.chainId) === 1 ? 'ethereum' : 'bsc';
+        return {
+          type: 'exactInput',
+          tokenIn: args.path[0],
+          tokenOut: this.WRAPPED_TOKENS[chainKey],
+          amountIn: args.amountIn.toString(),
+          amountOutMin: args.amountOutMin.toString(),
+          path: args.path,
+          deadline: args.deadline.toString()
+        };
+      } else if (functionName === 'swapExactTokensForTokens') {
+        return {
+          type: 'exactInput',
+          tokenIn: args.path[0],
+          tokenOut: args.path[args.path.length - 1],
+          amountIn: args.amountIn.toString(),
+          amountOutMin: args.amountOutMin.toString(),
+          path: args.path,
+          deadline: args.deadline.toString()
+        };
+      }
+
+      return null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  private decodeUniswapV3Transaction(tx: ethers.TransactionResponse): any | null {
+    const uniswapV3ABI = [
+      'function exactInputSingle((address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 deadline, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96)) external payable',
+      'function exactInput((bytes path, address recipient, uint256 deadline, uint256 amountIn, uint256 amountOutMinimum)) external payable'
+    ];
+
+    try {
+      const iface = new ethers.Interface(uniswapV3ABI);
+      const decoded = iface.parseTransaction({ data: tx.data, value: tx.value });
+      
+      if (!decoded) return null;
+
+      const functionName = decoded.name;
+      const args = decoded.args;
+
+      if (functionName === 'exactInputSingle') {
+        const params = args[0];
+        return {
+          type: 'exactInputSingle',
+          tokenIn: params.tokenIn,
+          tokenOut: params.tokenOut,
+          fee: params.fee,
+          amountIn: params.amountIn.toString(),
+          amountOutMin: params.amountOutMinimum.toString(),
+          deadline: params.deadline.toString()
+        };
+      } else if (functionName === 'exactInput') {
+        const params = args[0];
+        // Decode path for multi-hop swaps
+        const path = this.decodePath(params.path);
+        return {
+          type: 'exactInput',
+          path: path,
+          amountIn: params.amountIn.toString(),
+          amountOutMin: params.amountOutMinimum.toString(),
+          deadline: params.deadline.toString(),
+          tokenIn: path[0],
+          tokenOut: path[path.length - 1]
+        };
+      }
+
+      return null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  private decodePath(encodedPath: string): string[] {
+    // Simplified path decoding for Uniswap V3
+    // In production, this would properly decode the packed path
+    return [];
+  }
+
+  private async evaluateSandwichOpportunity(
+    decodedTx: any,
+    tx: ethers.TransactionResponse,
+    chain: string,
+    dexType: string
+  ): Promise<SandwichOpportunity | null> {
+    try {
+      // Get token information
+      const tokenIn = await this.getTokenInfo(decodedTx.tokenIn, chain);
+      const tokenOut = await this.getTokenInfo(decodedTx.tokenOut, chain);
+      
+      if (!tokenIn || !tokenOut) return null;
+
+      // Check if tokens are blacklisted or honeypots
+      if (this.isTokenBlacklisted(tokenIn.address) || 
+          this.isTokenBlacklisted(tokenOut.address) ||
+          tokenIn.isHoneypot || tokenOut.isHoneypot) {
+        return null;
+      }
+
+      // Get pool information
+      const poolInfo = await this.getPoolInfo(tokenIn.address, tokenOut.address, dexType, chain);
+      if (!poolInfo) return null;
+
+      // Check minimum liquidity requirement
+      const poolLiquidity = parseFloat(poolInfo.totalSupply);
+      const minLiquidity = parseFloat(this.config.minLiquidity);
+      if (poolLiquidity < minLiquidity) return null;
+
+      // Calculate trade impact and potential profit
+      const tradeAnalysis = await this.calculateTradeImpact(decodedTx, poolInfo, tokenIn, tokenOut);
+      if (!tradeAnalysis.isProfitable) return null;
+
+      // Check gas price constraints
+      const gasPrice = tx.gasPrice || tx.maxFeePerGas;
+      if (gasPrice && parseFloat(ethers.formatUnits(gasPrice, 'gwei')) > parseFloat(this.config.maxGasPrice)) {
+        return null;
+      }
+
+      // Calculate MEV score
+      const mevScore = this.calculateMevScore(tradeAnalysis, tokenIn, tokenOut, poolInfo);
+      
+      const opportunity: SandwichOpportunity = {
+        victimTxHash: tx.hash,
+        victimTransaction: tx,
+        chain: chain as any,
+        dexType: dexType as any,
+        tokenIn: tokenIn.address,
+        tokenOut: tokenOut.address,
+        amountIn: decodedTx.amountIn,
+        expectedAmountOut: decodedTx.amountOutMin,
+        poolAddress: poolInfo.address,
+        poolLiquidity: poolInfo.totalSupply,
+        gasPrice: gasPrice ? ethers.formatUnits(gasPrice, 'gwei') : '0',
+        estimatedProfit: tradeAnalysis.estimatedProfit,
+        profitability: tradeAnalysis.profitability,
+        confidence: tradeAnalysis.confidence,
+        timeToExpiry: this.calculateTimeToExpiry(decodedTx.deadline),
+        slippage: tradeAnalysis.slippage,
+        mevScore
+      };
+
+      // Final profitability check
+      if (opportunity.profitability >= this.config.profitabilityThreshold) {
+        return opportunity;
+      }
+
+      return null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  private async calculateTradeImpact(
+    decodedTx: any,
+    poolInfo: PoolInfo,
+    tokenIn: TokenInfo,
+    tokenOut: TokenInfo
+  ): Promise<{
+    isProfitable: boolean;
+    estimatedProfit: string;
+    profitability: number;
+    confidence: number;
+    slippage: number;
+  }> {
+    try {
+      // Get current pool reserves
+      const reserve0 = parseFloat(poolInfo.reserve0);
+      const reserve1 = parseFloat(poolInfo.reserve1);
+      const amountIn = parseFloat(decodedTx.amountIn) / Math.pow(10, tokenIn.decimals);
+
+      // Calculate price impact using constant product formula (x * y = k)
+      let reserveIn, reserveOut;
+      if (poolInfo.token0.toLowerCase() === tokenIn.address.toLowerCase()) {
+        reserveIn = reserve0;
+        reserveOut = reserve1;
+      } else {
+        reserveIn = reserve1;
+        reserveOut = reserve0;
+      }
+
+      // Calculate output amount with fees
+      const fee = poolInfo.fee / 10000; // Convert to decimal
+      const amountInWithFee = amountIn * (1 - fee);
+      const amountOut = (reserveOut * amountInWithFee) / (reserveIn + amountInWithFee);
+      
+      // Calculate price impact
+      const priceImpact = (amountIn / reserveIn) * 100;
+      
+      // Estimate front-run and back-run amounts
+      const frontRunAmount = amountIn * 0.4; // 40% of victim trade
+      const frontRunOut = (reserveOut * frontRunAmount * (1 - fee)) / (reserveIn + frontRunAmount * (1 - fee));
+      
+      // New reserves after front-run
+      const newReserveIn = reserveIn + frontRunAmount;
+      const newReserveOut = reserveOut - frontRunOut;
+      
+      // Victim trade in new state
+      const victimOut = (newReserveOut * amountInWithFee) / (newReserveIn + amountInWithFee);
+      
+      // Final reserves after victim trade
+      const finalReserveIn = newReserveIn + amountIn;
+      const finalReserveOut = newReserveOut - victimOut;
+      
+      // Back-run (sell tokens acquired in front-run)
+      const backRunOut = (finalReserveIn * frontRunOut * (1 - fee)) / (finalReserveOut + frontRunOut * (1 - fee));
+      
+      // Calculate profit
+      const profit = backRunOut - frontRunAmount;
+      const profitUsd = profit * tokenIn.price;
+      
+      // Estimate gas costs (simplified)
+      const gasLimit = 300000; // Conservative estimate for sandwich
+      const gasPrice = 30; // 30 gwei
+      const gasCostEth = (gasLimit * gasPrice) / 1e9;
+      const gasCostUsd = gasCostEth * tokenIn.price; // Assuming ETH price for simplification
+      
+      const netProfitUsd = profitUsd - gasCostUsd;
+      const profitability = (netProfitUsd / (amountIn * tokenIn.price)) * 100;
+      
+      // Calculate confidence based on liquidity and price impact
+      let confidence = 1.0;
+      if (priceImpact > 5) confidence *= 0.7;
+      if (priceImpact > 10) confidence *= 0.5;
+      if (reserveIn < 100000) confidence *= 0.8; // Low liquidity penalty
+      
+      return {
+        isProfitable: netProfitUsd > 0 && profitability > 1.0,
+        estimatedProfit: ethers.parseEther(profit.toString()).toString(),
+        profitability,
+        confidence,
+        slippage: priceImpact
+      };
+    } catch (error) {
+      return {
+        isProfitable: false,
+        estimatedProfit: '0',
+        profitability: 0,
+        confidence: 0,
+        slippage: 0
+      };
+    }
+  }
+
+  private calculateMevScore(
+    tradeAnalysis: any,
+    tokenIn: TokenInfo,
+    tokenOut: TokenInfo,
+    poolInfo: PoolInfo
+  ): number {
+    let score = 0;
+    
+    // Base score from profitability
+    score += Math.min(tradeAnalysis.profitability * 10, 50);
+    
+    // Liquidity bonus
+    const liquidity = parseFloat(poolInfo.totalSupply);
+    if (liquidity > 1000000) score += 20;
+    else if (liquidity > 100000) score += 10;
+    
+    // Token quality bonus
+    if (tokenIn.verified && tokenOut.verified) score += 15;
+    
+    // Volume bonus
+    const volume24h = parseFloat(tokenIn.volume24h) + parseFloat(tokenOut.volume24h);
+    if (volume24h > 1000000) score += 10;
+    else if (volume24h > 100000) score += 5;
+    
+    // Confidence penalty
+    score *= tradeAnalysis.confidence;
+    
+    return Math.min(score, 100);
+  }
+
+  private calculateTimeToExpiry(deadline?: string): number {
+    if (!deadline) return 600000; // 10 minutes default
+    
+    const deadlineMs = parseInt(deadline) * 1000;
+    const now = Date.now();
+    return Math.max(0, deadlineMs - now);
+  }
+
+  private async getTokenInfo(address: string, chain: string): Promise<TokenInfo | null> {
+    const cacheKey = `${chain}:${address}`;
+    
+    if (this.tokenCache.has(cacheKey)) {
+      return this.tokenCache.get(cacheKey)!;
+    }
+
+    try {
+      // In production, this would fetch from token info APIs
+      // For now, return mock data
+      const tokenInfo: TokenInfo = {
+        address,
+        symbol: 'TOKEN',
+        decimals: 18,
+        price: 1.0,
+        liquidity: '1000000',
+        volume24h: '100000',
+        isHoneypot: false,
+        taxBuy: 0,
+        taxSell: 0,
+        verified: true
+      };
+
+      this.tokenCache.set(cacheKey, tokenInfo);
+      return tokenInfo;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  private async getPoolInfo(
+    token0: string,
+    token1: string,
+    dexType: string,
+    chain: string
+  ): Promise<PoolInfo | null> {
+    const cacheKey = `${chain}:${dexType}:${token0}:${token1}`;
+    
+    if (this.poolCache.has(cacheKey)) {
+      return this.poolCache.get(cacheKey)!;
+    }
+
+    try {
+      // In production, this would fetch real pool data
+      const poolInfo: PoolInfo = {
+        address: '0x1234567890123456789012345678901234567890',
+        token0,
+        token1,
+        reserve0: '1000000000000000000000',
+        reserve1: '2000000000000000000000',
+        totalSupply: '1000000000000000000000',
+        fee: 300, // 0.3%
+        dexType,
+        lastUpdate: Date.now()
+      };
+
+      this.poolCache.set(cacheKey, poolInfo);
+      return poolInfo;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  private isTokenBlacklisted(address: string): boolean {
+    return this.config.blacklistedTokens.includes(address.toLowerCase());
+  }
+
+  private async loadInitialData(): Promise<void> {
+    // Load popular token and pool data
+    console.log('Loading initial token and pool data...');
+    
+    // In production, this would:
+    // 1. Load token lists from trusted sources
+    // 2. Cache popular pool data
+    // 3. Initialize price feeds
+    // 4. Load blacklists and security data
+  }
+
+  private processSolanaTransaction(signatureResult: any, context: any): void {
+    // Process Solana transactions for MEV opportunities
+    // This would decode Solana DEX transactions (Raydium, Orca, Jupiter)
+    console.log('Processing Solana transaction:', signatureResult);
+  }
+
+  async stopMonitoring(): Promise<void> {
+    if (!this.isMonitoring) return;
+
+    this.isMonitoring = false;
+
+    // Remove all listeners
+    for (const provider of this.providers.values()) {
+      provider.removeAllListeners('pending');
+    }
+
+    // Close WebSocket connections
+    for (const ws of this.websockets.values()) {
+      ws.close();
+    }
+    this.websockets.clear();
+
+    this.emit('monitoringStopped');
+    console.log('Stopped mempool monitoring');
+  }
+
+  getStats(): {
+    isMonitoring: boolean;
+    chainsMonitored: string[];
+    pendingTransactions: number;
+    opportunitiesFound: number;
+    poolsCached: number;
+    tokensCached: number;
+  } {
+    return {
+      isMonitoring: this.isMonitoring,
+      chainsMonitored: this.config.chains,
+      pendingTransactions: this.pendingTransactions.size,
+      opportunitiesFound: this.listenerCount('opportunityFound'),
+      poolsCached: this.poolCache.size,
+      tokensCached: this.tokenCache.size
+    };
+  }
+
+  clearCache(): void {
+    this.poolCache.clear();
+    this.tokenCache.clear();
+    console.log('Cleared detector cache');
+  }
+}
