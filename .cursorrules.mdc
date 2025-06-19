@@ -1,0 +1,27 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+This is our rough project outlier:
+├── apps/
+│   ├── frontend/      # Next.js user-facing website and API layer
+│   └── bots/          # The backend bot runner applications
+│       ├── arbitrage/   # Node.js process for the arbitrage bot
+│       ├── copy-trader/ # Node.js process for the copy-trading bot
+│       └── sandwich/    # Node.js process for the sandwich attack bot
+├── packages/
+│   ├── ui/            # Optional: Shared React components for the frontend
+│   ├── config/        # Shared configurations (ESLint, Prettier, tsconfig)
+│   ├── chain-client/  # CRITICAL: Abstraction layer for blockchain interactions
+│   └── types/         # Shared TypeScript types for API, bots, and database models
+├── package.json
+├── pnpm-workspace.yaml
+└── turbo.json
+
+
+
+Follow the modern best practices for typescript and deployment, considering things such as use-client directives and more.
+
+
+You do not have access to my .env files of any kind, but you may maintain .env.example or similar files to put variables, but always assume I have the correct variables set in my file you dont have access to. 

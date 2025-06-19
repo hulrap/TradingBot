@@ -1,0 +1,20 @@
+{
+  "name": "@trading-bot/chain-client",
+  "version": "0.0.0",
+  "private": true,
+  "main": "./index.ts",
+  "types": "./index.ts",
+  "scripts": {
+    "lint": "eslint . --ext .ts,.tsx"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.91.4",
+    "ethers": "^6.11.1"
+  },
+  "devDependencies": {
+    "@trading-bot/config": "workspace:*",
+    "@trading-bot/types": "workspace:*",
+    "eslint": "^8.57.0",
+    "typescript": "latest"
+  }
+} 

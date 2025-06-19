@@ -1,0 +1,14 @@
+{
+  "/api/auth/login/route": "app/api/auth/login/route.js",
+  "/api/bots/route": "app/api/bots/route.js",
+  "/api/trades/route": "app/api/trades/route.js",
+  "/_not-found/page": "app/_not-found/page.js",
+  "/api/wallets/route": "app/api/wallets/route.js",
+  "/dashboard/copy-trader/page": "app/dashboard/copy-trader/page.js",
+  "/dashboard/page": "app/dashboard/page.js",
+  "/dashboard/arbitrage/page": "app/dashboard/arbitrage/page.js",
+  "/page": "app/page.js",
+  "/dashboard/sandwich/page": "app/dashboard/sandwich/page.js",
+  "/login/page": "app/login/page.js",
+  "/wallets/page": "app/wallets/page.js"
+}

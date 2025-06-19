@@ -1,0 +1,16 @@
+{
+  "name": "@trading-bot/config",
+  "version": "0.0.0",
+  "private": true,
+  "files": [
+    "eslint-preset.js",
+    "tsconfig.base.json"
+  ],
+  "devDependencies": {
+    "@vercel/style-guide": "latest",
+    "eslint": "^8.57.0",
+    "eslint-config-next": "latest",
+    "eslint-config-prettier": "latest",
+    "eslint-plugin-turbo": "latest"
+  }
+} 

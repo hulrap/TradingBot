@@ -1,0 +1,27 @@
+{
+  "name": "@trading-bot/arbitrage-bot",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.ts",
+  "scripts": {
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "lint": "eslint . --ext .ts"
+  },
+  "dependencies": {
+    "@trading-bot/chain-client": "workspace:*",
+    "@trading-bot/types": "workspace:*",
+    "axios": "^1.7.2",
+    "better-sqlite3": "^10.0.0",
+    "ethers": "^6.11.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.10",
+    "@types/node": "^20",
+    "eslint": "^8.57.0",
+    "@trading-bot/config": "workspace:*",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5"
+  }
+} 
