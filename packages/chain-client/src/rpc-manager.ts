@@ -6,6 +6,7 @@ import winston from 'winston';
 export interface RPCProvider {
   id: string;
   name: string;
+  chain: string;
   tier: 'premium' | 'standard' | 'fallback';
   url: string;
   wsUrl?: string;
@@ -43,6 +44,7 @@ export interface RPCRequest {
   timestamp: number;
   retryCount: number;
   maxRetries: number;
+  preferredProvider?: string;
 }
 
 export interface RPCResponse {
@@ -81,6 +83,11 @@ export interface ProviderMetrics {
   blacklistedUntil?: number;
   lastHealthCheck: number;
   isHealthy: boolean;
+  requests: number;
+  errors: number;
+  latency: number;
+  cost: number;
+  successRate: number;
 }
 
 export interface RPCManagerConfig {
@@ -129,7 +136,12 @@ export class RPCManager extends EventEmitter {
         averageLatency: provider.latency,
         costToday: 0,
         lastHealthCheck: Date.now(),
-        isHealthy: true
+        isHealthy: true,
+        requests: 0,
+        errors: 0,
+        latency: 0,
+        cost: 0,
+        successRate: 0
       });
 
       // Initialize HTTP client
@@ -144,14 +156,21 @@ export class RPCManager extends EventEmitter {
         }
       });
 
-      // Add response interceptor for metrics
+      // Add response/error interceptors for metrics
+      httpClient.interceptors.request.use(config => {
+        (config as any).startTime = Date.now();
+        return config;
+      });
+
       httpClient.interceptors.response.use(
         response => {
-          this.updateMetrics(provider.id, true, response.config.metadata?.startTime);
+          const startTime = (response.config as any).startTime;
+          this.updateMetrics(provider.id, true, startTime);
           return response;
         },
         error => {
-          this.updateMetrics(provider.id, false, error.config?.metadata?.startTime);
+          const startTime = (error.config as any)?.startTime;
+          this.updateMetrics(provider.id, false, startTime);
           return Promise.reject(error);
         }
       );
@@ -209,7 +228,7 @@ export class RPCManager extends EventEmitter {
   private startHealthChecks(): void {
     this.healthCheckInterval = setInterval(async () => {
       await this.performHealthChecks();
-    }, this.config.healthCheckInterval);
+    }, this.config.healthCheckInterval) as NodeJS.Timeout;
   }
 
   private async performHealthChecks(): Promise<void> {
@@ -336,7 +355,8 @@ export class RPCManager extends EventEmitter {
       priority: 'medium',
       timestamp: Date.now(),
       retryCount: 0,
-      maxRetries: options.retries || this.config.maxRetries
+      maxRetries: options.retries || this.config.maxRetries,
+      preferredProvider: options.preferredProvider
     };
 
     return this.executeRequest(request, options);
@@ -361,17 +381,12 @@ export class RPCManager extends EventEmitter {
     try {
       const client = this.axiosInstances.get(targetProvider.id)!;
       
-      // Add metadata for metrics
-      const config: AxiosRequestConfig = {
-        metadata: { startTime }
-      };
-
       const response = await client.post('', {
         jsonrpc: '2.0',
         method: request.method,
         params: request.params,
         id: request.id
-      }, config);
+      });
 
       const latency = Date.now() - startTime;
 
@@ -423,18 +438,9 @@ export class RPCManager extends EventEmitter {
 
   public getProviderMetrics(providerId?: string): ProviderMetrics | Map<string, ProviderMetrics> {
     if (providerId) {
-      const metrics = this.metrics.get(providerId);
-      if (!metrics) throw new Error(`Provider ${providerId} not found`);
-      return metrics;
+      return this.metrics.get(providerId)!;
     }
     return new Map(this.metrics);
-  }
-
-  public getProviderStatus(): Array<{ provider: RPCProvider; metrics: ProviderMetrics }> {
-    return Array.from(this.providers.values()).map(provider => ({
-      provider,
-      metrics: this.metrics.get(provider.id)!
-    }));
   }
 
   public async addProvider(provider: RPCProvider): Promise<void> {
@@ -448,7 +454,12 @@ export class RPCManager extends EventEmitter {
       averageLatency: provider.latency,
       costToday: 0,
       lastHealthCheck: Date.now(),
-      isHealthy: true
+      isHealthy: true,
+      requests: 0,
+      errors: 0,
+      latency: 0,
+      cost: 0,
+      successRate: 0
     });
 
     // Initialize HTTP client
@@ -814,11 +825,12 @@ export class RPCManager extends EventEmitter {
 
     // Log metrics every 5 minutes
     setInterval(() => {
+      const aggregatedMetrics = this.getMetrics();
       this.logger.info('RPC Metrics Summary', {
-        totalRequests: this.metrics.totalRequests,
-        successRate: this.metrics.successRate.toFixed(2) + '%',
-        averageLatency: this.metrics.averageLatency.toFixed(0) + 'ms',
-        costToday: '$' + this.metrics.costToday.toFixed(6),
+        totalRequests: aggregatedMetrics.totalRequests,
+        successRate: aggregatedMetrics.successRate.toFixed(2) + '%',
+        averageLatency: aggregatedMetrics.averageLatency.toFixed(0) + 'ms',
+        costToday: '$' + aggregatedMetrics.costToday.toFixed(6),
         healthyProviders: Array.from(this.endpoints.values()).filter(e => e.isHealthy).length,
         blacklistedProviders: Array.from(this.endpoints.values()).filter(e => e.isBlacklisted).length
       });
@@ -901,22 +913,47 @@ export class RPCManager extends EventEmitter {
 
   // Public API methods
   getMetrics(): RPCMetrics {
+    // Aggregate metrics from all providers
+    let totalRequests = 0;
+    let successfulRequests = 0;
+    let failedRequests = 0;
+    let avgLatency = 0;
+    let totalCostToday = 0;
+    let successRateSum = 0;
+    
+    const providerStats = new Map<string, {
+      requests: number;
+      errors: number;
+      latency: number;
+      cost: number;
+    }>();
+
+    this.metrics.forEach((metrics, providerId) => {
+      totalRequests += metrics.totalRequests;
+      successfulRequests += metrics.successfulRequests;
+      failedRequests += metrics.failedRequests;
+      avgLatency += metrics.averageLatency;
+      totalCostToday += metrics.costToday;
+      successRateSum += metrics.successRate;
+      
+      providerStats.set(providerId, {
+        requests: metrics.requests,
+        errors: metrics.errors,
+        latency: metrics.latency,
+        cost: metrics.cost
+      });
+    });
+
+    const providerCount = this.metrics.size;
+    
     return {
-      totalRequests: this.metrics.totalRequests,
-      successfulRequests: this.metrics.successfulRequests,
-      failedRequests: this.metrics.failedRequests,
-      averageLatency: this.metrics.averageLatency,
-      successRate: this.metrics.successRate,
-      costToday: this.metrics.costToday,
-      providerStats: new Map(this.metrics.map(metrics => [
-        metrics.id,
-        {
-          requests: metrics.requests,
-          errors: metrics.errors,
-          latency: metrics.latency,
-          cost: metrics.cost
-        }
-      ]))
+      totalRequests,
+      successfulRequests,
+      failedRequests,
+      averageLatency: providerCount > 0 ? avgLatency / providerCount : 0,
+      successRate: providerCount > 0 ? successRateSum / providerCount : 0,
+      costToday: totalCostToday,
+      providerStats
     };
   }
 
@@ -942,7 +979,9 @@ export class RPCManager extends EventEmitter {
         params: [],
         chain,
         priority: 'low',
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        retryCount: 0,
+        maxRetries: 1
       };
 
       const startTime = Date.now();

@@ -1,6 +1,23 @@
 
-
-> @trading-bot/frontend@0.1.0 build /workspace/apps/frontend
+> @trading-bot/frontend@0.1.0 build C:\Users\User1\Downloads\TradingBot\apps\frontend
 > next build
 
-[41m[30m ELIFECYCLE [39m[49m [31mCommand failed.[39m
+   ▲ Next.js 14.1.0
+
+   Creating an optimized production build ...
+ ✓ Compiled successfully
+   Skipping linting
+   Checking validity of types ...
+Failed to compile.
+
+./src/app/api/performance/route.ts:515:21
+Type error: Cannot find name 'supabase'.
+
+[0m [90m 513 |[39m   [36mtry[39m {[0m
+[0m [90m 514 |[39m     [90m// Get user's historical performance for comparison[39m[0m
+[0m[31m[1m>[22m[39m[90m 515 |[39m     [36mlet[39m userQuery [33m=[39m supabase[0m
+[0m [90m     |[39m                     [31m[1m^[22m[39m[0m
+[0m [90m 516 |[39m       [33m.[39m[36mfrom[39m([32m'trade_history'[39m)[0m
+[0m [90m 517 |[39m       [33m.[39mselect([32m`[39m[0m
+[0m [90m 518 |[39m [32m        profit_loss_usd,[39m[0m
+ ELIFECYCLE  Command failed with exit code 1.

@@ -438,16 +438,16 @@ export class DEXAggregator extends EventEmitter {
 
   private async validateQuoteRequest(request: SwapQuoteRequest): Promise<void> {
     // Validate chain
-    if (!this.chainAbstraction.getSupportedChains().includes(request.chain)) {
+    if (!this.chainAbstraction.getSupportedChains().includes(request.chain as any)) {
       throw new Error(`Unsupported chain: ${request.chain}`);
     }
 
     // Validate addresses
-    if (!this.chainAbstraction.isValidAddress(request.chain, request.inputToken)) {
+    if (!this.chainAbstraction.isValidAddress(request.chain as any, request.inputToken)) {
       throw new Error(`Invalid input token address: ${request.inputToken}`);
     }
 
-    if (!this.chainAbstraction.isValidAddress(request.chain, request.outputToken)) {
+    if (!this.chainAbstraction.isValidAddress(request.chain as any, request.outputToken)) {
       throw new Error(`Invalid output token address: ${request.outputToken}`);
     }
 
@@ -558,6 +558,7 @@ export class DEXAggregator extends EventEmitter {
       gasEstimate: {
         gasLimit: quote.estimatedGas.toString(),
         gasPrice: quote.gasPrice?.toString() || '0',
+        estimatedCost: quote.estimatedGas.toString(),
         totalCost: quote.estimatedGas.toString(),
         totalCostFormatted: '0 ETH'
       },
@@ -598,6 +599,7 @@ export class DEXAggregator extends EventEmitter {
       gasEstimate: {
         gasLimit: '200000', // Solana compute units
         gasPrice: '5000',
+        estimatedCost: '1000000',
         totalCost: '1000000',
         totalCostFormatted: '0.001 SOL'
       },
@@ -631,6 +633,7 @@ export class DEXAggregator extends EventEmitter {
       gasEstimate: {
         gasLimit: '150000',
         gasPrice: '20000000000',
+        estimatedCost: '3000000000000000',
         totalCost: '3000000000000000',
         totalCostFormatted: '0.003 ETH'
       },
@@ -671,6 +674,7 @@ export class DEXAggregator extends EventEmitter {
       gasEstimate: {
         gasLimit: '120000',
         gasPrice: '20000000000',
+        estimatedCost: '2400000000000000',
         totalCost: '2400000000000000',
         totalCostFormatted: '0.0024 ETH'
       },
@@ -702,9 +706,9 @@ export class DEXAggregator extends EventEmitter {
 
     // If not in token list, try to fetch from chain
     try {
-      const balance = await this.chainAbstraction.getBalance(chain, address, address);
-      if (balance.token) {
-        return balance.token;
+      const tokenInfo = await this.chainAbstraction.getTokenInfo(chain as any, address);
+      if (tokenInfo) {
+        return tokenInfo;
       }
     } catch (error) {
       // Fallback

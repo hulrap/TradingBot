@@ -1,19 +1,18 @@
 
-
-> @trading-bot/chain-client@0.0.0 build /workspace/packages/chain-client
-> tsup src/index.ts --format cjs,esm --dts
+> @trading-bot/chain-client@1.0.0 build C:\Users\User1\Downloads\TradingBot\packages\chain-client
+> tsup
 
 [34mCLI[39m Building entry: src/index.ts
 [34mCLI[39m Using tsconfig: tsconfig.json
-[34mCLI[39m tsup v8.0.0
-[34mCLI[39m Target: es2021
+[34mCLI[39m tsup v8.0.2
+[34mCLI[39m Using tsup config: C:\Users\User1\Downloads\TradingBot\packages\chain-client\tsup.config.ts
+[34mCLI[39m Target: node18
+[34mCLI[39m Cleaning output folder
 [34mCJS[39m Build start
 [34mESM[39m Build start
-[32mESM[39m [1mdist/index.mjs [22m[32m5.46 KB[39m
-[32mESM[39m ⚡️ Build success in 19ms
-[32mCJS[39m [1mdist/index.js [22m[32m7.81 KB[39m
-[32mCJS[39m ⚡️ Build success in 20ms
-[34mDTS[39m Build start
-[32mDTS[39m ⚡️ Build success in 753ms
-[32mDTS[39m [1mdist/index.d.ts  [22m[32m5.29 KB[39m
-[32mDTS[39m [1mdist/index.d.mts [22m[32m5.29 KB[39m
+[32mCJS[39m [1mdist\index.js     [22m[32m82.72 KB[39m
+[32mCJS[39m [1mdist\index.js.map [22m[32m171.06 KB[39m
+[32mCJS[39m ⚡️ Build success in 754ms
+[32mESM[39m [1mdist\index.mjs     [22m[32m82.08 KB[39m
+[32mESM[39m [1mdist\index.mjs.map [22m[32m171.06 KB[39m
+[32mESM[39m ⚡️ Build success in 755ms

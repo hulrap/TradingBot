@@ -67,7 +67,7 @@ export interface RiskRecommendation {
 
 export interface RiskAlert {
   id: string;
-  type: 'risk_limit' | 'correlation' | 'concentration' | 'drawdown' | 'stress_test';
+  type: 'risk_limit' | 'correlation' | 'concentration' | 'drawdown' | 'stress_test' | 'emergency_stop';
   severity: 'info' | 'warning' | 'error' | 'critical';
   message: string;
   timestamp: string;
@@ -239,10 +239,14 @@ export class RiskManager extends EventEmitter {
       timestamp,
       portfolioRisk,
       killSwitchStatus,
-      stressTestResults,
       recommendations,
       alerts
     };
+
+    // Only add stressTestResults if they exist
+    if (stressTestResults) {
+      report.stressTestResults = stressTestResults;
+    }
     
     this.riskReports.push(report);
     
@@ -434,7 +438,7 @@ export class RiskManager extends EventEmitter {
     }
   }
 
-  private validateNewPosition(symbol: string, positionResult: PositionResult, portfolioRisk: PortfolioRisk): void {
+  private validateNewPosition(_symbol: string, positionResult: PositionResult, portfolioRisk: PortfolioRisk): void {
     // Check if new position would exceed concentration limits
     const newConcentration = (positionResult.positionSize / this.portfolioValue) * 100;
     if (newConcentration > this.config.portfolioLimits.maxSectorConcentration) {

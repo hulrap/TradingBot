@@ -5,14 +5,20 @@
   "main": "./index.tsx",
   "types": "./index.tsx",
   "scripts": {
+    "build": "tsc",
     "lint": "eslint . --ext .ts,.tsx"
+  },
+  "dependencies": {
+    "react": "^18.2.0"
   },
   "devDependencies": {
     "@trading-bot/config": "workspace:*",
     "@types/react": "latest",
     "@types/react-dom": "latest",
     "eslint": "^8.57.0",
-    "react": "^18.2.0",
     "typescript": "latest"
+  },
+  "peerDependencies": {
+    "react": "^18.2.0"
   }
 } 

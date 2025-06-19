@@ -7,6 +7,10 @@ import { ethers } from 'ethers';
 // Dynamic import for Solana to avoid browser compatibility issues
 async function getSolanaKeypair() {
   try {
+    // Only import on server-side and when actually needed
+    if (typeof window !== 'undefined') {
+      throw new Error('Solana not available on client side');
+    }
     const { Keypair } = await import('@solana/web3.js');
     return { Keypair };
   } catch (error) {
@@ -166,15 +170,86 @@ export async function DELETE(request: NextRequest): Promise<NextResponse<ApiResp
   }
 }
 
-// Get decrypted private key (for internal bot use only)
-export async function getDecryptedPrivateKey(walletId: string): Promise<string | null> {
+export async function PUT(request: NextRequest): Promise<NextResponse<ApiResponse<{ privateKey?: string; address: string }>>> {
   try {
-    const wallet = walletDb.findById(walletId);
-    if (!wallet) return null;
+    const { walletId, userId, operation } = await request.json();
     
-    return decrypt(wallet.encryptedPrivateKey);
+    if (!walletId || !userId) {
+      return NextResponse.json({ 
+        success: false, 
+        error: 'Wallet ID and User ID are required' 
+      }, { status: 400 });
+    }
+    
+    // Find the wallet
+    const wallets = walletDb.findByUserId(userId);
+    const wallet = wallets.find(w => w.id === walletId);
+    
+    if (!wallet) {
+      return NextResponse.json({ 
+        success: false, 
+        error: 'Wallet not found' 
+      }, { status: 404 });
+    }
+    
+    // Handle different operations
+    if (operation === 'getPrivateKey') {
+      // This is a sensitive operation - in production, add additional security checks
+      // such as 2FA, rate limiting, audit logging, etc.
+      console.log(`Decrypting private key for wallet ${walletId} by user ${userId}`);
+      
+      try {
+        const decryptedPrivateKey = decrypt(wallet.encryptedPrivateKey);
+        
+        // Return the decrypted private key (use with extreme caution)
+        return NextResponse.json({ 
+          success: true, 
+          data: { 
+            privateKey: decryptedPrivateKey,
+            address: wallet.address
+          }
+        });
+      } catch (error) {
+        console.error('Failed to decrypt private key:', error);
+        return NextResponse.json({ 
+          success: false, 
+          error: 'Failed to decrypt private key' 
+        }, { status: 500 });
+      }
+    } else if (operation === 'validateKey') {
+      // Validate that the stored encrypted key can be decrypted and matches expected address
+      try {
+        const decryptedPrivateKey = decrypt(wallet.encryptedPrivateKey);
+        const derivedAddress = await getWalletAddress(decryptedPrivateKey, wallet.chain);
+        
+        const isValid = derivedAddress.toLowerCase() === wallet.address.toLowerCase();
+        
+        return NextResponse.json({ 
+          success: true, 
+          data: { 
+            address: wallet.address,
+            isValid
+          }
+        });
+      } catch (error) {
+        console.error('Failed to validate wallet key:', error);
+        return NextResponse.json({ 
+          success: false, 
+          error: 'Failed to validate wallet key' 
+        }, { status: 500 });
+      }
+    } else {
+      return NextResponse.json({ 
+        success: false, 
+        error: 'Invalid operation. Supported operations: getPrivateKey, validateKey' 
+      }, { status: 400 });
+    }
+    
   } catch (error) {
-    console.error('Error decrypting private key:', error);
-    return null;
+    console.error('Error in wallet operation:', error);
+    return NextResponse.json({ 
+      success: false, 
+      error: 'Failed to perform wallet operation' 
+    }, { status: 500 });
   }
 } 

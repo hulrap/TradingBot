@@ -16,7 +16,7 @@ dotenv.config();
 
 // Configure logger
 const logger = winston.createLogger({
-  level: process.env.LOG_LEVEL || 'info',
+  level: process.env['LOG_LEVEL'] || 'info',
   format: winston.format.combine(
     winston.format.timestamp(),
     winston.format.errors({ stack: true }),
@@ -55,7 +55,7 @@ class AdvancedMevSandwichBot {
   
   // Advanced sandwich components
   private sandwichDetector?: SandwichDetector;
-  private profitCalculator: ProfitCalculator;
+  private profitCalculator!: ProfitCalculator;
   private executionEngine?: SandwichExecutionEngine;
   private riskManager?: RiskManager;
   private performanceOptimizer?: PerformanceOptimizer;
@@ -71,23 +71,22 @@ class AdvancedMevSandwichBot {
 
   constructor() {
     this.config = this.loadConfiguration();
-    this.profitCalculator = new ProfitCalculator();
     this.initializeProviders();
   }
 
   private loadConfiguration(): MevBotConfig {
     return {
-      enabledChains: (process.env.ENABLED_CHAINS?.split(',') as any[]) || ['ethereum'],
+      enabledChains: (process.env['ENABLED_CHAINS']?.split(',') as any[]) || ['ethereum'],
       minProfitThresholds: {
-        ethereum: process.env.MIN_PROFIT_ETH || '0.01',
-        solana: process.env.MIN_PROFIT_SOL || '0.1',
-        bsc: process.env.MIN_PROFIT_BNB || '0.05'
+        ethereum: process.env['MIN_PROFIT_ETH'] || '0.01',
+        solana: process.env['MIN_PROFIT_SOL'] || '0.1',
+        bsc: process.env['MIN_PROFIT_BNB'] || '0.05'
       },
-      maxConcurrentBundles: parseInt(process.env.MAX_CONCURRENT_BUNDLES || '5'),
-      globalKillSwitch: process.env.GLOBAL_KILL_SWITCH === 'true',
-      paperTradingMode: process.env.PAPER_TRADING_MODE === 'true',
-      enableRiskManagement: process.env.ENABLE_RISK_MANAGEMENT !== 'false',
-      enablePerformanceOptimization: process.env.ENABLE_PERFORMANCE_OPTIMIZATION !== 'false'
+      maxConcurrentBundles: parseInt(process.env['MAX_CONCURRENT_BUNDLES'] || '5'),
+      globalKillSwitch: process.env['GLOBAL_KILL_SWITCH'] === 'true',
+      paperTradingMode: process.env['PAPER_TRADING_MODE'] === 'true',
+      enableRiskManagement: process.env['ENABLE_RISK_MANAGEMENT'] !== 'false',
+      enablePerformanceOptimization: process.env['ENABLE_PERFORMANCE_OPTIMIZATION'] !== 'false'
     };
   }
 
@@ -95,14 +94,14 @@ class AdvancedMevSandwichBot {
     // Initialize Ethereum provider
     if (this.config.enabledChains.includes('ethereum')) {
       this.ethProvider = new ethers.JsonRpcProvider(
-        process.env.ETH_RPC_URL || 'https://eth-mainnet.alchemyapi.io/v2/your-api-key'
+        process.env['ETH_RPC_URL'] || 'https://eth-mainnet.alchemyapi.io/v2/your-api-key'
       );
     }
 
     // Initialize Solana connection
     if (this.config.enabledChains.includes('solana')) {
       this.solConnection = new Connection(
-        process.env.SOL_RPC_URL || 'https://api.mainnet-beta.solana.com',
+        process.env['SOL_RPC_URL'] || 'https://api.mainnet-beta.solana.com',
         'confirmed'
       );
     }
@@ -110,7 +109,7 @@ class AdvancedMevSandwichBot {
     // Initialize BSC provider
     if (this.config.enabledChains.includes('bsc')) {
       this.bscProvider = new ethers.JsonRpcProvider(
-        process.env.BSC_RPC_URL || 'https://bsc-dataseed1.binance.org'
+        process.env['BSC_RPC_URL'] || 'https://bsc-dataseed1.binance.org'
       );
     }
   }
@@ -148,13 +147,16 @@ class AdvancedMevSandwichBot {
   }
 
   private async initializeComponents(): Promise<void> {
-    const privateKey = process.env.MEV_PRIVATE_KEY;
+    const privateKey = process.env['MEV_PRIVATE_KEY'];
     if (!privateKey) {
       throw new Error('MEV_PRIVATE_KEY environment variable is required');
     }
 
     // Initialize MEV clients
     await this.initializeMevClients(privateKey);
+    
+    // Initialize profit calculator
+    this.initializeProfitCalculator();
     
     // Initialize sandwich detector
     await this.initializeSandwichDetector();
@@ -173,16 +175,21 @@ class AdvancedMevSandwichBot {
     }
   }
 
+  private initializeProfitCalculator(): void {
+    this.profitCalculator = new ProfitCalculator();
+    logger.info('Profit calculator initialized');
+  }
+
   private async initializeMevClients(privateKey: string): Promise<void> {
     // Initialize Flashbots client for Ethereum
     if (this.config.enabledChains.includes('ethereum') && this.ethProvider) {
       const flashbotsConfig: FlashbotsConfig = {
-        relayUrl: process.env.FLASHBOTS_RELAY_URL || 'https://relay.flashbots.net',
-        authKey: process.env.FLASHBOTS_AUTH_KEY || privateKey,
-        maxBaseFeeInFutureBlock: process.env.MAX_BASE_FEE || '100',
-        maxPriorityFeePerGas: process.env.MAX_PRIORITY_FEE || '5',
+        relayUrl: process.env['FLASHBOTS_RELAY_URL'] || 'https://relay.flashbots.net',
+        authKey: process.env['FLASHBOTS_AUTH_KEY'] || privateKey,
+        maxBaseFeeInFutureBlock: process.env['MAX_BASE_FEE'] || '100',
+        maxPriorityFeePerGas: process.env['MAX_PRIORITY_FEE'] || '5',
         minProfitWei: ethers.parseEther(this.config.minProfitThresholds.ethereum).toString(),
-        reputationBonus: parseFloat(process.env.REPUTATION_BONUS || '0')
+        reputationBonus: parseFloat(process.env['REPUTATION_BONUS'] || '0')
       };
 
       this.flashbotsClient = new FlashbotsClient(this.ethProvider, privateKey, flashbotsConfig);
@@ -192,12 +199,12 @@ class AdvancedMevSandwichBot {
     // Initialize Jito client for Solana
     if (this.config.enabledChains.includes('solana') && this.solConnection) {
       const jitoConfig: JitoConfig = {
-        blockEngineUrl: process.env.JITO_BLOCK_ENGINE_URL || 'https://mainnet.block-engine.jito.wtf',
-        relayerUrl: process.env.JITO_RELAYER_URL || 'https://mainnet.relayer.jito.wtf',
-        tipAccount: process.env.JITO_TIP_ACCOUNT || 'Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY',
-        maxTipLamports: parseInt(process.env.MAX_TIP_LAMPORTS || '100000'),
-        minProfitLamports: parseInt(process.env.MIN_PROFIT_LAMPORTS || '1000000'),
-        validatorPreferences: process.env.PREFERRED_VALIDATORS?.split(',') || []
+        blockEngineUrl: process.env['JITO_BLOCK_ENGINE_URL'] || 'https://mainnet.block-engine.jito.wtf',
+        relayerUrl: process.env['JITO_RELAYER_URL'] || 'https://mainnet.relayer.jito.wtf',
+        tipAccount: process.env['JITO_TIP_ACCOUNT'] || 'Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY',
+        maxTipLamports: parseInt(process.env['MAX_TIP_LAMPORTS'] || '100000'),
+        minProfitLamports: parseInt(process.env['MIN_PROFIT_LAMPORTS'] || '1000000'),
+        validatorPreferences: process.env['PREFERRED_VALIDATORS']?.split(',') || []
       };
 
       this.jitoClient = new JitoClient(this.solConnection, jitoConfig);
@@ -207,13 +214,13 @@ class AdvancedMevSandwichBot {
     // Initialize BSC MEV client
     if (this.config.enabledChains.includes('bsc') && this.bscProvider) {
       const bscMevConfig: BscMevConfig = {
-        provider: (process.env.BSC_MEV_PROVIDER as any) || 'bloxroute',
-        apiKey: process.env.BSC_MEV_API_KEY || '',
-        endpoint: process.env.BSC_MEV_ENDPOINT || '',
-        maxGasPrice: process.env.BSC_MAX_GAS_PRICE || '20',
+        provider: (process.env['BSC_MEV_PROVIDER'] as any) || 'bloxroute',
+        apiKey: process.env['BSC_MEV_API_KEY'] || '',
+        endpoint: process.env['BSC_MEV_ENDPOINT'] || '',
+        maxGasPrice: process.env['BSC_MAX_GAS_PRICE'] || '20',
         minProfitBnb: this.config.minProfitThresholds.bsc,
-        preferredValidators: process.env.BSC_PREFERRED_VALIDATORS?.split(',') || [],
-        mempoolSubscription: process.env.BSC_MEMPOOL_SUBSCRIPTION === 'true'
+        preferredValidators: process.env['BSC_PREFERRED_VALIDATORS']?.split(',') || [],
+        mempoolSubscription: process.env['BSC_MEMPOOL_SUBSCRIPTION'] === 'true'
       };
 
       this.bscMevClient = new BscMevClient(this.bscProvider, privateKey, bscMevConfig);
@@ -224,13 +231,13 @@ class AdvancedMevSandwichBot {
   private async initializeSandwichDetector(): Promise<void> {
     const mempoolConfig: MempoolConfig = {
       chains: this.config.enabledChains,
-      minTradeValue: process.env.MIN_TRADE_VALUE || '1000',
-      maxGasPrice: process.env.MAX_GAS_PRICE || '100',
-      minLiquidity: process.env.MIN_LIQUIDITY || '100000',
-      blacklistedTokens: process.env.BLACKLISTED_TOKENS?.split(',') || [],
-      whitelistedDexes: process.env.WHITELISTED_DEXES?.split(',') || [],
-      maxSlippage: parseFloat(process.env.MAX_SLIPPAGE || '5'),
-      profitabilityThreshold: parseFloat(process.env.PROFITABILITY_THRESHOLD || '1')
+      minTradeValue: process.env['MIN_TRADE_VALUE'] || '1000',
+      maxGasPrice: process.env['MAX_GAS_PRICE'] || '100',
+      minLiquidity: process.env['MIN_LIQUIDITY'] || '100000',
+      blacklistedTokens: process.env['BLACKLISTED_TOKENS']?.split(',') || [],
+      whitelistedDexes: process.env['WHITELISTED_DEXES']?.split(',') || [],
+      maxSlippage: parseFloat(process.env['MAX_SLIPPAGE'] || '5'),
+      profitabilityThreshold: parseFloat(process.env['PROFITABILITY_THRESHOLD'] || '1')
     };
 
     this.sandwichDetector = new SandwichDetector(mempoolConfig);
@@ -247,37 +254,38 @@ class AdvancedMevSandwichBot {
   private async initializeExecutionEngine(): Promise<void> {
     this.executionEngine = new SandwichExecutionEngine(this.config.maxConcurrentBundles);
     
-    await this.executionEngine.initialize({
-      flashbots: this.flashbotsClient,
-      jito: this.jitoClient,
-      bscMev: this.bscMevClient
-    });
+    const clients: { flashbots?: FlashbotsClient; jito?: JitoClient; bscMev?: BscMevClient; } = {};
+    if (this.flashbotsClient) clients.flashbots = this.flashbotsClient;
+    if (this.jitoClient) clients.jito = this.jitoClient;
+    if (this.bscMevClient) clients.bscMev = this.bscMevClient;
+    
+    await this.executionEngine.initialize(clients);
     
     this.setupExecutionEngineEvents();
   }
 
   private async initializeRiskManager(): Promise<void> {
     const riskConfig: RiskConfig = {
-      maxPositionSizeEth: process.env.MAX_POSITION_SIZE_ETH || '1.0',
-      maxPositionSizeBnb: process.env.MAX_POSITION_SIZE_BNB || '5.0',
-      maxPositionSizeSol: process.env.MAX_POSITION_SIZE_SOL || '10.0',
-      maxDailyVolume: process.env.MAX_DAILY_VOLUME || '100.0',
-      maxConcurrentPositions: parseInt(process.env.MAX_CONCURRENT_POSITIONS || '3'),
-      maxSlippageTolerance: parseFloat(process.env.MAX_SLIPPAGE_TOLERANCE || '5'),
-      maxPriceImpact: parseFloat(process.env.MAX_PRICE_IMPACT || '10'),
-      minLiquidityUsd: parseFloat(process.env.MIN_LIQUIDITY_USD || '50000'),
-      maxGasPriceGwei: parseFloat(process.env.MAX_GAS_PRICE_GWEI || '100'),
-      minProfitUsd: parseFloat(process.env.MIN_PROFIT_USD || '10'),
-      maxPositionDuration: parseInt(process.env.MAX_POSITION_DURATION || '300000'),
-      cooldownPeriod: parseInt(process.env.COOLDOWN_PERIOD || '5000'),
-      maxTradesPerHour: parseInt(process.env.MAX_TRADES_PER_HOUR || '20'),
-      maxFailuresPerHour: parseInt(process.env.MAX_FAILURES_PER_HOUR || '10'),
-      maxPortfolioValue: process.env.MAX_PORTFOLIO_VALUE || '1000.0',
-      maxDrawdownPercent: parseFloat(process.env.MAX_DRAWDOWN_PERCENT || '20'),
-      stopLossPercent: parseFloat(process.env.STOP_LOSS_PERCENT || '10'),
-      emergencyStopLoss: parseFloat(process.env.EMERGENCY_STOP_LOSS || '500'),
-      consecutiveFailureLimit: parseInt(process.env.CONSECUTIVE_FAILURE_LIMIT || '5'),
-      gasEfficiencyThreshold: parseFloat(process.env.GAS_EFFICIENCY_THRESHOLD || '0.001')
+      maxPositionSizeEth: process.env['MAX_POSITION_SIZE_ETH'] || '1.0',
+      maxPositionSizeBnb: process.env['MAX_POSITION_SIZE_BNB'] || '5.0',
+      maxPositionSizeSol: process.env['MAX_POSITION_SIZE_SOL'] || '10.0',
+      maxDailyVolume: process.env['MAX_DAILY_VOLUME'] || '100.0',
+      maxConcurrentPositions: parseInt(process.env['MAX_CONCURRENT_POSITIONS'] || '3'),
+      maxSlippageTolerance: parseFloat(process.env['MAX_SLIPPAGE_TOLERANCE'] || '5'),
+      maxPriceImpact: parseFloat(process.env['MAX_PRICE_IMPACT'] || '10'),
+      minLiquidityUsd: parseFloat(process.env['MIN_LIQUIDITY_USD'] || '50000'),
+      maxGasPriceGwei: parseFloat(process.env['MAX_GAS_PRICE_GWEI'] || '100'),
+      minProfitUsd: parseFloat(process.env['MIN_PROFIT_USD'] || '10'),
+      maxPositionDuration: parseInt(process.env['MAX_POSITION_DURATION'] || '300000'),
+      cooldownPeriod: parseInt(process.env['COOLDOWN_PERIOD'] || '5000'),
+      maxTradesPerHour: parseInt(process.env['MAX_TRADES_PER_HOUR'] || '20'),
+      maxFailuresPerHour: parseInt(process.env['MAX_FAILURES_PER_HOUR'] || '10'),
+      maxPortfolioValue: process.env['MAX_PORTFOLIO_VALUE'] || '1000.0',
+      maxDrawdownPercent: parseFloat(process.env['MAX_DRAWDOWN_PERCENT'] || '20'),
+      stopLossPercent: parseFloat(process.env['STOP_LOSS_PERCENT'] || '10'),
+      emergencyStopLoss: parseFloat(process.env['EMERGENCY_STOP_LOSS'] || '500'),
+      consecutiveFailureLimit: parseInt(process.env['CONSECUTIVE_FAILURE_LIMIT'] || '5'),
+      gasEfficiencyThreshold: parseFloat(process.env['GAS_EFFICIENCY_THRESHOLD'] || '0.001')
     };
 
     this.riskManager = new RiskManager(riskConfig);
@@ -286,21 +294,21 @@ class AdvancedMevSandwichBot {
 
   private async initializePerformanceOptimizer(): Promise<void> {
     const performanceConfig: PerformanceConfig = {
-      maxMempoolLatency: parseInt(process.env.MAX_MEMPOOL_LATENCY || '200'),
-      maxExecutionLatency: parseInt(process.env.MAX_EXECUTION_LATENCY || '5000'),
-      precomputeThreshold: parseFloat(process.env.PRECOMPUTE_THRESHOLD || '70'),
-      maxConcurrentOpportunities: parseInt(process.env.MAX_CONCURRENT_OPPORTUNITIES || '10'),
-      maxConcurrentSimulations: parseInt(process.env.MAX_CONCURRENT_SIMULATIONS || '5'),
-      maxConcurrentExecutions: parseInt(process.env.MAX_CONCURRENT_EXECUTIONS || '3'),
-      poolDataCacheTime: parseInt(process.env.POOL_DATA_CACHE_TIME || '300000'),
-      tokenDataCacheTime: parseInt(process.env.TOKEN_DATA_CACHE_TIME || '600000'),
-      gasEstimateCacheTime: parseInt(process.env.GAS_ESTIMATE_CACHE_TIME || '30000'),
-      minSuccessRate: parseFloat(process.env.MIN_SUCCESS_RATE || '0.3'),
-      targetLatencyMs: parseInt(process.env.TARGET_LATENCY_MS || '1000'),
-      maxMemoryUsageMb: parseInt(process.env.MAX_MEMORY_USAGE_MB || '512'),
-      gasEstimationBuffer: parseFloat(process.env.GAS_ESTIMATION_BUFFER || '20'),
-      priorityFeeBoost: parseFloat(process.env.PRIORITY_FEE_BOOST || '50'),
-      enableGasPrecompute: process.env.ENABLE_GAS_PRECOMPUTE !== 'false'
+      maxMempoolLatency: parseInt(process.env['MAX_MEMPOOL_LATENCY'] || '200'),
+      maxExecutionLatency: parseInt(process.env['MAX_EXECUTION_LATENCY'] || '5000'),
+      precomputeThreshold: parseFloat(process.env['PRECOMPUTE_THRESHOLD'] || '70'),
+      maxConcurrentOpportunities: parseInt(process.env['MAX_CONCURRENT_OPPORTUNITIES'] || '10'),
+      maxConcurrentSimulations: parseInt(process.env['MAX_CONCURRENT_SIMULATIONS'] || '5'),
+      maxConcurrentExecutions: parseInt(process.env['MAX_CONCURRENT_EXECUTIONS'] || '3'),
+      poolDataCacheTime: parseInt(process.env['POOL_DATA_CACHE_TIME'] || '300000'),
+      tokenDataCacheTime: parseInt(process.env['TOKEN_DATA_CACHE_TIME'] || '600000'),
+      gasEstimateCacheTime: parseInt(process.env['GAS_ESTIMATE_CACHE_TIME'] || '30000'),
+      minSuccessRate: parseFloat(process.env['MIN_SUCCESS_RATE'] || '0.3'),
+      targetLatencyMs: parseInt(process.env['TARGET_LATENCY_MS'] || '1000'),
+      maxMemoryUsageMb: parseInt(process.env['MAX_MEMORY_USAGE_MB'] || '512'),
+      gasEstimationBuffer: parseFloat(process.env['GAS_ESTIMATION_BUFFER'] || '20'),
+      priorityFeeBoost: parseFloat(process.env['PRIORITY_FEE_BOOST'] || '50'),
+      enableGasPrecompute: process.env['ENABLE_GAS_PRECOMPUTE'] !== 'false'
     };
 
     this.performanceOptimizer = new PerformanceOptimizer(performanceConfig);
@@ -410,6 +418,43 @@ class AdvancedMevSandwichBot {
 
   private async processSandwichOpportunity(opportunity: SandwichOpportunity): Promise<void> {
     try {
+      // Detailed profit calculation
+      const profitParams = {
+        victimAmountIn: opportunity.amountIn,
+        victimAmountOutMin: opportunity.expectedAmountOut,
+        tokenInAddress: opportunity.tokenIn,
+        tokenOutAddress: opportunity.tokenOut,
+        tokenInDecimals: 18, // Would need to fetch from contract
+        tokenOutDecimals: 18, // Would need to fetch from contract  
+        tokenInPrice: 1, // Would need to fetch from price oracle
+        tokenOutPrice: 1, // Would need to fetch from price oracle
+        poolReserve0: opportunity.poolLiquidity,
+        poolReserve1: opportunity.poolLiquidity,
+        poolFee: 300, // 0.3% - would extract from pool data
+        gasPrice: opportunity.gasPrice,
+        chain: opportunity.chain as 'ethereum' | 'bsc' | 'solana',
+        dexType: opportunity.dexType
+      };
+
+      const profitOptimization = await this.profitCalculator.calculateOptimalProfit(profitParams);
+      
+      if (profitOptimization.maxProfit <= '0' || profitOptimization.optimalProfitability < 1) {
+        logger.debug('Opportunity rejected - insufficient profit after detailed calculation', {
+          maxProfit: profitOptimization.maxProfit,
+          profitability: profitOptimization.optimalProfitability,
+          riskAdjustedReturn: profitOptimization.riskAdjustedReturn
+        });
+        return;
+      }
+
+      logger.info('Detailed profit calculation completed', {
+        maxProfit: profitOptimization.maxProfit,
+        optimalProfitability: profitOptimization.optimalProfitability,
+        gasEfficiency: profitOptimization.gasEfficiency,
+        riskAdjustedReturn: profitOptimization.riskAdjustedReturn,
+        optimalFrontRunAmount: profitOptimization.optimalFrontRunAmount
+      });
+
       // Performance optimization
       let optimizationResult;
       if (this.performanceOptimizer) {
@@ -481,7 +526,7 @@ class AdvancedMevSandwichBot {
             mevScore: opportunity.mevScore
           },
           frontRunAmount: opportunity.amountIn, // Could be adjusted by risk manager
-          maxGasPrice: process.env.MAX_GAS_PRICE || '100',
+          maxGasPrice: process.env['MAX_GAS_PRICE'] || '100',
           maxSlippage: 5,
           deadline: Date.now() + 60000, // 1 minute deadline
           minProfit: this.config.minProfitThresholds[opportunity.chain],

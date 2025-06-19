@@ -66,9 +66,10 @@ const PositionSizingConfigSchema = z.object({
 export class PositionSizingEngine {
   private config: PositionSizingConfig;
   private portfolioValue: number;
-  private currentPositions: Map<string, any> = new Map();
   private historicalReturns: number[] = [];
-  private volatilityCache: Map<string, number> = new Map();
+  // TODO: Implement position tracking and volatility caching
+  // private currentPositions: Map<string, any> = new Map();
+  // private volatilityCache: Map<string, number> = new Map();
 
   constructor(config: PositionSizingConfig, portfolioValue: number) {
     this.validateConfig(config);
@@ -166,7 +167,7 @@ export class PositionSizingEngine {
   /**
    * Kelly criterion position sizing
    */
-  private calculateKellySize(signal: TradeSignal, marketData: MarketData, baseAmount: number): number {
+  private calculateKellySize(signal: TradeSignal, _marketData: MarketData, _baseAmount: number): number {
     const winProbability = signal.confidence;
     const avgWin = signal.expectedReturn;
     const avgLoss = -signal.expectedReturn / signal.riskReward; // Assuming risk-reward ratio
@@ -185,7 +186,7 @@ export class PositionSizingEngine {
   /**
    * Adaptive position sizing based on recent performance
    */
-  private calculateAdaptiveSize(signal: TradeSignal, marketData: MarketData, baseAmount: number): number {
+  private calculateAdaptiveSize(signal: TradeSignal, _marketData: MarketData, baseAmount: number): number {
     // Adjust based on recent win rate and Sharpe ratio
     const recentPerformance = this.calculateRecentPerformance();
     const performanceMultiplier = Math.max(0.5, Math.min(2.0, recentPerformance));
@@ -219,8 +220,9 @@ export class PositionSizingEngine {
   /**
    * Calculate correlation adjustment factor
    */
-  private calculateCorrelationAdjustment(symbol: string, portfolioRisk: PortfolioRisk): number {
+  private calculateCorrelationAdjustment(_symbol: string, portfolioRisk: PortfolioRisk): number {
     // Reduce position size if portfolio is highly correlated
+    // TODO: Use symbol to calculate specific correlation with existing positions
     if (portfolioRisk.correlation > this.config.correlationThreshold) {
       const correlationPenalty = 1 - (portfolioRisk.correlation - this.config.correlationThreshold);
       return Math.max(0.3, correlationPenalty);
@@ -453,7 +455,7 @@ export class PositionSizingEngine {
 
   private validateConfig(config: PositionSizingConfig): void {
     const result = PositionSizingConfigSchema.safeParse(config);
-    if (!result.success) {
+    if (result.success === false) {
       throw new Error(`Invalid position sizing configuration: ${result.error.message}`);
     }
   }

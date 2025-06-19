@@ -158,14 +158,33 @@ export class JitoClient extends EventEmitter {
     // This is a simplified swap instruction
     // In production, you'd use proper DEX SDKs (Raydium, Orca, etc.)
     
+    // Determine swap direction based on type and opportunity
+    const isReversed = type === 'back-run';
+    const actualSwapDirection = isReversed 
+      ? (opportunity.swapDirection === 'a_to_b' ? 'b_to_a' : 'a_to_b')
+      : opportunity.swapDirection;
+    
+    // Use the amount parameter to set the swap amount
+    const swapAmount = amount > 0 ? amount : opportunity.amountIn;
+    
+    // Create instruction data based on swap parameters
+    const instructionBytes = new Uint8Array([
+      actualSwapDirection === 'a_to_b' ? 0x01 : 0x02, // Swap direction
+      ...new TextEncoder().encode(swapAmount.toString().padStart(8, '0')), // Amount (8 bytes)
+      ...new TextEncoder().encode(type === 'front-run' ? 'FR' : 'BR'), // Type identifier (2 bytes)
+    ]);
+    const instructionData = Buffer.from(instructionBytes);
+    
     // Example for a generic DEX swap
     const instruction = new TransactionInstruction({
       programId: new PublicKey(opportunity.programId),
       keys: [
         // Account keys would be specific to each DEX
         // This is just a placeholder structure
+        { pubkey: new PublicKey(opportunity.tokenMintA), isSigner: false, isWritable: true },
+        { pubkey: new PublicKey(opportunity.tokenMintB), isSigner: false, isWritable: true },
       ],
-      data: Buffer.from([]) // Instruction data would be DEX-specific
+      data: instructionData
     });
 
     return instruction;
@@ -209,7 +228,7 @@ export class JitoClient extends EventEmitter {
       } else {
         bundle.status = 'failed';
         bundle.failureReason = response.data.error?.message || 'Submission failed';
-        result.error = bundle.failureReason;
+        result.error = bundle.failureReason || 'Unknown error';
         this.emit('bundleFailed', bundle);
       }
 
@@ -246,7 +265,8 @@ export class JitoClient extends EventEmitter {
 
         // Check if any transaction from the bundle has been confirmed
         for (const tx of bundle.transactions) {
-          const signature = 'dummy-signature'; // Would extract actual signature
+          // Extract signature from transaction for monitoring
+          const signature = this.extractTransactionSignature(tx);
           const status = await this.connection.getSignatureStatus(signature);
           
           if (status.value?.confirmationStatus === 'finalized') {
@@ -270,6 +290,20 @@ export class JitoClient extends EventEmitter {
     };
 
     checkLanding();
+  }
+
+  private extractTransactionSignature(tx: VersionedTransaction): string {
+    // Extract signature from a signed transaction
+    // For monitoring purposes, we need to handle both signed and unsigned transactions
+    if (tx.signatures && tx.signatures.length > 0 && tx.signatures[0]) {
+      // Return the first signature if transaction is signed
+      return tx.signatures[0].toString();
+    }
+    
+    // For unsigned transactions, create a deterministic identifier based on transaction content
+    const txBuffer = tx.serialize();
+    const hash = require('crypto').createHash('sha256').update(txBuffer).digest('hex');
+    return `unsigned_${hash.substring(0, 16)}`;
   }
 
   private async calculateOptimalTip(opportunity: SolanaSandwichOpportunity): Promise<number> {

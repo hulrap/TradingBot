@@ -1,8 +1,18 @@
 
-
-> @trading-bot/paper-trading@0.0.0 build /workspace/packages/paper-trading
+> @trading-bot/paper-trading@0.0.0 build C:\Users\User1\Downloads\TradingBot\packages\paper-trading
 > tsup src/index.ts --format cjs,esm --dts
 
-sh: 1: tsup: not found
-[41m[30m ELIFECYCLE [39m[49m [31mCommand failed.[39m
-[43m[30m WARN [39m[49m  Local package.json exists, but node_modules missing, did you mean to install?
+[34mCLI[39m Building entry: src/index.ts
+[34mCLI[39m Using tsconfig: tsconfig.json
+[34mCLI[39m tsup v8.0.0
+[34mCLI[39m Target: es2022
+[34mCJS[39m Build start
+[34mESM[39m Build start
+[32mCJS[39m [1mdist\index.js [22m[32m10.76 KB[39m
+[32mCJS[39m ⚡️ Build success in 101ms
+[32mESM[39m [1mdist\index.mjs [22m[32m9.73 KB[39m
+[32mESM[39m ⚡️ Build success in 100ms
+[34mDTS[39m Build start
+[32mDTS[39m ⚡️ Build success in 1847ms
+[32mDTS[39m [1mdist\index.d.ts  [22m[32m2.92 KB[39m
+[32mDTS[39m [1mdist\index.d.mts [22m[32m2.92 KB[39m

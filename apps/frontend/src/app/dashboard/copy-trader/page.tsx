@@ -49,7 +49,7 @@ export default function CopyTraderConfigPage() {
                     {message && <p className="text-green-400 text-sm text-center mb-4">{message}</p>}
 
                     <div className="flex justify-end">
-                        <button type="submit" className="bg-blue-500 text-white px-4 py-2 rounded-md">Save Configuration</button>
+                        <Button type="submit">Save Configuration</Button>
                     </div>
                 </form>
             </div>

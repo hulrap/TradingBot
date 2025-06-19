@@ -1,5 +1,4 @@
 import { EventEmitter } from 'events';
-import WebSocket from 'ws';
 import { ethers } from 'ethers';
 
 export interface MempoolTransaction {
@@ -81,8 +80,8 @@ export class MempoolMonitor extends EventEmitter {
 
   private initializeInterfaces(): void {
     try {
-      this.interfaces.uniswapV2 = new ethers.Interface(this.routerABIs.uniswapV2);
-      this.interfaces.uniswapV3 = new ethers.Interface(this.routerABIs.uniswapV3);
+      this.interfaces['uniswapV2'] = new ethers.Interface(this.routerABIs['uniswapV2']);
+      this.interfaces['uniswapV3'] = new ethers.Interface(this.routerABIs['uniswapV3']);
     } catch (error) {
       console.error('Error initializing ABI interfaces:', error);
     }
@@ -160,7 +159,10 @@ export class MempoolMonitor extends EventEmitter {
 
       // Decode transaction data if enabled
       if (this.config.enableDecoding && tx.data && tx.data !== '0x') {
-        mempoolTx.decodedData = await this.decodeTransactionData(tx.to || '', tx.data);
+        const decodedData = await this.decodeTransactionData(tx.to || '', tx.data);
+        if (decodedData) {
+          mempoolTx.decodedData = decodedData;
+        }
       }
 
       // Emit transaction event

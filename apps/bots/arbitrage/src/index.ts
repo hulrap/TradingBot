@@ -8,16 +8,21 @@ import { ethers } from "ethers";
 const ARBITRAGE_CONFIG: ArbitrageBotConfig = {
   id: "1",
   userId: "user-123",
+  walletId: "wallet-123",
+  chain: "ETH",
   tokenPair: {
     tokenA: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", // Native token (ETH, BNB)
     tokenB: "0x6b175474e89094c44da98b954eedeac495271d0f", // DAI on Ethereum
   },
   minProfitThreshold: 0.1, // 0.1% profit
   tradeSize: 1, // e.g., 1 ETH
+  isActive: true,
+  createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
 };
 const CHAIN: Chain = "ETH";
-const RPC_URL = process.env.ETH_RPC_URL!; // IMPORTANT: Set in .env file
-const PRIVATE_KEY = process.env.PRIVATE_KEY!; // IMPORTANT: Set in .env file
+const RPC_URL = process.env['ETH_RPC_URL']!; // IMPORTANT: Set in .env file
+const PRIVATE_KEY = process.env['PRIVATE_KEY']!; // IMPORTANT: Set in .env file
 
 // --- Database Setup ---
 const db = new Database("arbitrage_bot.db");

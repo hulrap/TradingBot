@@ -26,6 +26,16 @@ export {
   type RiskAlert
 } from './risk-manager';
 
+// Import types for use in utility functions
+import type { KillSwitchConfig } from './global-kill-switch';
+import type { PositionSizingConfig } from './position-sizing';
+import type { 
+  StressTestScenario, 
+  RiskManagerConfig,
+  RiskAlert,
+  Position 
+} from './risk-manager';
+
 // Utility functions and helpers
 export const createDefaultKillSwitchConfig = (): KillSwitchConfig => ({
   enableAutoTrigger: true,
@@ -131,9 +141,10 @@ export const calculateVaR = (returns: number[], confidenceLevel: number = 0.95):
   if (returns.length === 0) return 0;
   
   const sortedReturns = [...returns].sort((a, b) => a - b);
-  const index = Math.floor((1 - confidenceLevel) * sortedReturns.length);
+  const index = Math.max(0, Math.min(sortedReturns.length - 1, 
+    Math.floor((1 - confidenceLevel) * sortedReturns.length)));
   
-  return sortedReturns[index] || 0;
+  return sortedReturns.at(index) ?? 0;
 };
 
 export const calculateCorrelation = (returns1: number[], returns2: number[]): number => {
@@ -147,12 +158,16 @@ export const calculateCorrelation = (returns1: number[], returns2: number[]): nu
   let sumSq2 = 0;
   
   for (let i = 0; i < returns1.length; i++) {
-    const diff1 = returns1[i] - mean1;
-    const diff2 = returns2[i] - mean2;
-    
-    numerator += diff1 * diff2;
-    sumSq1 += diff1 * diff1;
-    sumSq2 += diff2 * diff2;
+    const val1 = returns1[i];
+    const val2 = returns2[i];
+    if (val1 !== undefined && val2 !== undefined) {
+      const diff1 = val1 - mean1;
+      const diff2 = val2 - mean2;
+      
+      numerator += diff1 * diff2;
+      sumSq1 += diff1 * diff1;
+      sumSq2 += diff2 * diff2;
+    }
   }
   
   const denominator = Math.sqrt(sumSq1 * sumSq2);
@@ -250,25 +265,6 @@ export const analyzePortfolioHealth = (
     liquidityScore: Math.round(liquidityScore),
     overallHealth
   };
-};
-
-// Export types for external use
-export type {
-  KillSwitchConfig,
-  KillSwitchEvent,
-  KillSwitchStatus,
-  PositionSizingConfig,
-  MarketData,
-  TradeSignal,
-  PositionResult,
-  PortfolioRisk,
-  RiskManagerConfig,
-  StressTestScenario,
-  Position,
-  RiskReport,
-  StressTestResult,
-  RiskRecommendation,
-  RiskAlert
 };
 
 // Version export

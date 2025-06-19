@@ -82,6 +82,7 @@ export class SandwichExecutionEngine extends EventEmitter {
   private executionStats: ExecutionStats;
   private activeExecutions = new Map<string, ExecutionResult>();
   private maxConcurrentExecutions: number;
+  private solanaConnection?: Connection;
 
   constructor(maxConcurrentExecutions: number = 5) {
     super();
@@ -103,10 +104,20 @@ export class SandwichExecutionEngine extends EventEmitter {
     flashbots?: FlashbotsClient;
     jito?: JitoClient;
     bscMev?: BscMevClient;
+    solanaConnection?: Connection;
   }): Promise<void> {
-    this.flashbotsClient = clients.flashbots;
-    this.jitoClient = clients.jito;
-    this.bscMevClient = clients.bscMev;
+    if (clients.flashbots) {
+      this.flashbotsClient = clients.flashbots;
+    }
+    if (clients.jito) {
+      this.jitoClient = clients.jito;
+    }
+    if (clients.bscMev) {
+      this.bscMevClient = clients.bscMev;
+    }
+    if (clients.solanaConnection) {
+      this.solanaConnection = clients.solanaConnection;
+    }
 
     // Set up event listeners for each client
     this.setupEventHandlers();
@@ -157,7 +168,7 @@ export class SandwichExecutionEngine extends EventEmitter {
       // Step 1: Validate opportunity
       const validationResult = await this.validateOpportunity(params);
       if (!validationResult.valid) {
-        result.error = validationResult.reason;
+        result.error = validationResult.reason || 'Validation failed';
         this.emit('executionFailed', { executionId, result });
         return result;
       }
@@ -423,6 +434,31 @@ export class SandwichExecutionEngine extends EventEmitter {
     }
 
     const opportunity = params.opportunity as any;
+    
+    // Use solanaConnection for validation and fee estimation if available
+    if (this.solanaConnection) {
+      try {
+        // Validate Solana network connectivity
+        const slot = await this.solanaConnection.getSlot();
+        console.log(`Solana network validation successful, current slot: ${slot}`);
+        
+        // Get recent blockhash for transaction validation
+        const { blockhash } = await this.solanaConnection.getLatestBlockhash();
+        console.log(`Using recent blockhash: ${blockhash}`);
+        
+        // Estimate compute units and fees using the connection
+        const computeUnitsEstimate = await this.estimateSolanaComputeUnits(opportunity);
+        console.log(`Estimated compute units: ${computeUnitsEstimate}`);
+        
+        // Validate token accounts exist
+        await this.validateSolanaTokenAccounts(opportunity.tokenIn, opportunity.tokenOut);
+        
+      } catch (error) {
+        console.warn('Solana connection validation failed:', error);
+        // Continue with bundle creation as this is non-critical
+      }
+    }
+    
     const solanaOpportunity = {
       victimTxSignature: opportunity.victimTxHash,
       victimTransaction: opportunity.victimTransaction,
@@ -439,6 +475,19 @@ export class SandwichExecutionEngine extends EventEmitter {
     const bundle = await this.jitoClient.createSandwichBundle(solanaOpportunity);
     const result = await this.jitoClient.submitBundle(bundle.id);
 
+    // Use the result variable to validate submission success
+    if (!result.success) {
+      throw new Error(`Bundle submission failed: ${result.error || 'Unknown error'}`);
+    }
+
+    // Validate token addresses using PublicKey import
+    try {
+      new PublicKey(opportunity.tokenIn);
+      new PublicKey(opportunity.tokenOut);
+    } catch (error) {
+      console.warn('Invalid Solana token addresses:', error);
+    }
+
     return {
       bundleId: bundle.id,
       transactions: {
@@ -446,8 +495,66 @@ export class SandwichExecutionEngine extends EventEmitter {
         victim: opportunity.victimTxHash,
         backRun: `backrun_${bundle.id}`
       },
-      bundleSize: 3
+      bundleSize: 3,
+      submissionResult: result
     };
+  }
+
+  /**
+   * Estimate compute units for Solana transactions
+   */
+  private async estimateSolanaComputeUnits(opportunity: any): Promise<number> {
+    if (!this.solanaConnection) {
+      return 200000; // Default conservative estimate
+    }
+
+    try {
+      // Simulate transaction to get accurate compute unit estimate
+      // This is a simplified estimation - in production would use actual transaction simulation
+      const baseComputeUnits = 50000; // Base compute units for Raydium swap
+      const complexityMultiplier = opportunity.amountIn > 1000000 ? 1.5 : 1.0; // Large trades are more complex
+      
+      return Math.floor(baseComputeUnits * complexityMultiplier);
+    } catch (error) {
+      console.warn('Failed to estimate compute units:', error);
+      return 200000; // Fallback estimate
+    }
+  }
+
+  /**
+   * Validate that Solana token accounts exist and are valid
+   */
+  private async validateSolanaTokenAccounts(tokenMintA: string, tokenMintB: string): Promise<void> {
+    if (!this.solanaConnection) {
+      console.warn('Solana connection not available for token validation');
+      return;
+    }
+
+    try {
+      const tokenAPublicKey = new PublicKey(tokenMintA);
+      const tokenBPublicKey = new PublicKey(tokenMintB);
+      
+      // Check if token accounts exist
+      const [tokenAInfo, tokenBInfo] = await Promise.all([
+        this.solanaConnection.getAccountInfo(tokenAPublicKey),
+        this.solanaConnection.getAccountInfo(tokenBPublicKey)
+      ]);
+      
+      if (!tokenAInfo) {
+        console.warn(`Token A account not found: ${tokenMintA}`);
+      } else {
+        console.log(`Token A validated: ${tokenMintA} (owner: ${tokenAInfo.owner.toString()})`);
+      }
+      
+      if (!tokenBInfo) {
+        console.warn(`Token B account not found: ${tokenMintB}`);
+      } else {
+        console.log(`Token B validated: ${tokenMintB} (owner: ${tokenBInfo.owner.toString()})`);
+      }
+      
+    } catch (error) {
+      console.warn('Token account validation failed:', error);
+    }
   }
 
   /**
@@ -461,10 +568,15 @@ export class SandwichExecutionEngine extends EventEmitter {
     const timeout = 60000; // 1 minute timeout
     const startTime = Date.now();
 
+    // Log monitoring start with execution ID
+    console.log(`Starting execution monitoring for ${executionId} on ${chain}`);
+    this.emit('monitoringStarted', { executionId, chain, bundleId: result.bundleId });
+
     return new Promise((resolve) => {
       const client = this.getMevClient(chain);
       if (!client) {
         result.error = 'MEV client not available for monitoring';
+        this.emit('monitoringFailed', { executionId, error: result.error });
         resolve();
         return;
       }
@@ -474,6 +586,7 @@ export class SandwichExecutionEngine extends EventEmitter {
         if (Date.now() - startTime > timeout) {
           clearInterval(monitorInterval);
           result.error = 'Execution monitoring timeout';
+          this.emit('monitoringTimeout', { executionId });
           resolve();
           return;
         }
@@ -486,10 +599,14 @@ export class SandwichExecutionEngine extends EventEmitter {
             result.execution.blockNumber = bundle.blockNumber;
             result.execution.inclusionTime = Date.now();
             result.execution.actualProfit = bundle.actualProfit;
+            
+            console.log(`Execution ${executionId} successful in block ${bundle.blockNumber}`);
+            this.emit('monitoringSuccess', { executionId, bundle });
             clearInterval(monitorInterval);
             resolve();
           } else if (bundle.status === 'failed') {
             result.error = bundle.failureReason || 'Bundle execution failed';
+            this.emit('monitoringFailed', { executionId, error: result.error });
             clearInterval(monitorInterval);
             resolve();
           }

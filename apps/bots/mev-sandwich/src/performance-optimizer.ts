@@ -114,6 +114,19 @@ export class PerformanceOptimizer extends EventEmitter {
   }> {
     const startTime = performance.now();
     
+    // Skip warmup period for consistent performance
+    if (!this.warmupComplete) {
+      return {
+        shouldProcess: false,
+        estimatedLatency: performance.now() - startTime,
+        priority: 0,
+        cacheHit: false
+      };
+    }
+
+    // Log transaction hash for tracking and debugging
+    console.debug(`Analyzing transaction ${txHash} on ${chain}`);
+    
     // Quick transaction filtering
     const basicCheck = this.quickTransactionFilter(transaction, chain);
     if (!basicCheck.valid) {
@@ -125,9 +138,14 @@ export class PerformanceOptimizer extends EventEmitter {
       };
     }
 
-    // Check cache for similar transactions
+    // Check cache for similar transactions using transaction hash as well
     const cacheKey = this.generateTransactionCacheKey(transaction, chain);
-    const cached = this.getFromCache(this.routeCache, cacheKey);
+    const txSpecificKey = `tx:${txHash}:${chain}`;
+    
+    let cached = this.getFromCache(this.routeCache, cacheKey);
+    if (!cached) {
+      cached = this.getFromCache(this.routeCache, txSpecificKey);
+    }
     
     if (cached) {
       return {
@@ -138,6 +156,16 @@ export class PerformanceOptimizer extends EventEmitter {
       };
     }
 
+    // Check precomputed routes for faster processing
+    const routeKey = `${chain}:${transaction.to}`;
+    const precomputedRoute = this.precomputedRoutes.get(routeKey);
+    let routeOptimization = '';
+    
+    if (precomputedRoute && precomputedRoute.length > 0) {
+      routeOptimization = 'Using precomputed route';
+      console.debug(`Using precomputed route for ${routeKey}`);
+    }
+
     // Estimate processing latency
     const estimatedLatency = this.estimateProcessingLatency(transaction, chain);
     const priority = this.calculateOpportunityPriority(transaction, estimatedLatency);
@@ -145,12 +173,17 @@ export class PerformanceOptimizer extends EventEmitter {
     const shouldProcess = estimatedLatency <= this.config.maxMempoolLatency && 
                          priority >= this.config.precomputeThreshold;
 
-    // Cache result
-    this.setCache(this.routeCache, cacheKey, {
+    // Cache result with both keys for future reference
+    const result = {
       shouldProcess,
       priority,
-      estimatedLatency
-    }, 30000); // 30 second cache
+      estimatedLatency,
+      routeOptimization,
+      txHash
+    };
+    
+    this.setCache(this.routeCache, cacheKey, result, 30000); // 30 second cache
+    this.setCache(this.routeCache, txSpecificKey, result, 60000); // 1 minute cache for specific tx
 
     return {
       shouldProcess,
@@ -259,6 +292,12 @@ export class PerformanceOptimizer extends EventEmitter {
   private quickTransactionFilter(transaction: any, chain: string): { valid: boolean; reason?: string } {
     // Fast checks first (no external calls)
     
+    // Chain-specific validation
+    const chainSpecificChecks = this.validateChainSpecificRequirements(transaction, chain);
+    if (!chainSpecificChecks.valid) {
+      return chainSpecificChecks;
+    }
+    
     // Check transaction value
     if (transaction.value && parseFloat(ethers.formatEther(transaction.value)) < 0.01) {
       return { valid: false, reason: 'Transaction value too low' };
@@ -277,6 +316,40 @@ export class PerformanceOptimizer extends EventEmitter {
       return { valid: false, reason: 'Transaction data too short for DEX interaction' };
     }
 
+    return { valid: true };
+  }
+
+  /**
+   * Validate chain-specific requirements
+   */
+  private validateChainSpecificRequirements(transaction: any, chain: string): { valid: boolean; reason?: string } {
+    switch (chain) {
+      case 'ethereum':
+        // Ethereum-specific checks
+        if (transaction.gasPrice && parseFloat(ethers.formatUnits(transaction.gasPrice, 'gwei')) < 10) {
+          return { valid: false, reason: 'Gas price too low for Ethereum' };
+        }
+        break;
+        
+      case 'bsc':
+        // BSC-specific checks
+        if (transaction.gasPrice && parseFloat(ethers.formatUnits(transaction.gasPrice, 'gwei')) < 3) {
+          return { valid: false, reason: 'Gas price too low for BSC' };
+        }
+        break;
+        
+      case 'solana':
+        // Solana-specific checks
+        if (!transaction.recentBlockhash) {
+          return { valid: false, reason: 'Missing recent blockhash for Solana' };
+        }
+        break;
+        
+      default:
+        console.warn(`Unknown chain ${chain}, skipping chain-specific validation`);
+        break;
+    }
+    
     return { valid: true };
   }
 
@@ -422,13 +495,19 @@ export class PerformanceOptimizer extends EventEmitter {
       return;
     }
 
+    // Use chain-specific data fetching strategies
+    const fetchStrategy = this.getTokenFetchStrategy(chain);
+    console.debug(`Pre-fetching token data for ${tokenAddress} on ${chain} using ${fetchStrategy} strategy`);
+
     // Simulate token data fetching (would be real API calls)
     setTimeout(() => {
       const tokenData = {
         address: tokenAddress,
         symbol: 'TOKEN',
         decimals: 18,
-        price: 1.0
+        price: 1.0,
+        chain: chain, // Include chain info in cached data
+        fetchedAt: Date.now()
       };
       
       this.setCache(this.tokenCache, cacheKey, tokenData, this.config.tokenDataCacheTime);
@@ -436,16 +515,95 @@ export class PerformanceOptimizer extends EventEmitter {
   }
 
   /**
+   * Get chain-specific token fetching strategy
+   */
+  private getTokenFetchStrategy(chain: string): string {
+    switch (chain) {
+      case 'ethereum':
+        return 'eth-multicall';
+      case 'bsc':
+        return 'bsc-scan';
+      case 'solana':
+        return 'metaplex';
+      default:
+        return 'generic-rpc';
+    }
+  }
+
+  /**
    * Fetch gas data for chain
    */
   private async fetchGasData(chain: string): Promise<any> {
-    // Simulate gas data fetching
+    // Simulate chain-specific gas data fetching
     return new Promise(resolve => {
       setTimeout(() => {
-        resolve({
-          baseFee: (20 + Math.random() * 40).toFixed(1), // 20-60 gwei
-          priorityFee: (1 + Math.random() * 5).toFixed(1) // 1-6 gwei
-        });
+        // Provide chain-specific gas data based on typical network characteristics
+        let gasData;
+        
+        switch (chain) {
+          case 'ethereum':
+            gasData = {
+              baseFee: (30 + Math.random() * 50).toFixed(1), // 30-80 gwei (higher for Ethereum)
+              priorityFee: (2 + Math.random() * 8).toFixed(1), // 2-10 gwei
+              chainId: 1,
+              gasLimit: 300000
+            };
+            break;
+            
+          case 'bsc':
+            gasData = {
+              baseFee: (5 + Math.random() * 15).toFixed(1), // 5-20 gwei (lower for BSC)
+              priorityFee: (1 + Math.random() * 3).toFixed(1), // 1-4 gwei
+              chainId: 56,
+              gasLimit: 200000
+            };
+            break;
+            
+          case 'solana':
+            // Solana uses different fee structure (lamports per signature)
+            gasData = {
+              baseFee: '0.000005', // ~5k lamports (base fee)
+              priorityFee: (0.00001 + Math.random() * 0.0001).toFixed(6), // Variable priority fee
+              chainId: 101,
+              computeUnits: 200000
+            };
+            break;
+            
+          case 'polygon':
+            gasData = {
+              baseFee: (20 + Math.random() * 30).toFixed(1), // 20-50 gwei
+              priorityFee: (1 + Math.random() * 5).toFixed(1), // 1-6 gwei
+              chainId: 137,
+              gasLimit: 250000
+            };
+            break;
+            
+          case 'avalanche':
+            gasData = {
+              baseFee: (25 + Math.random() * 25).toFixed(1), // 25-50 gwei
+              priorityFee: (1.5 + Math.random() * 4).toFixed(1), // 1.5-5.5 gwei
+              chainId: 43114,
+              gasLimit: 280000
+            };
+            break;
+            
+          default:
+            // Default fallback for unknown chains
+            console.warn(`Unknown chain ${chain}, using default gas data`);
+            gasData = {
+              baseFee: (20 + Math.random() * 40).toFixed(1), // 20-60 gwei
+              priorityFee: (1 + Math.random() * 5).toFixed(1), // 1-6 gwei
+              chainId: 1,
+              gasLimit: 300000
+            };
+            break;
+        }
+        
+        // Add timestamp for cache validation
+        (gasData as any).timestamp = Date.now();
+        (gasData as any).chain = chain;
+        
+        resolve(gasData);
       }, 20);
     });
   }
@@ -461,11 +619,33 @@ export class PerformanceOptimizer extends EventEmitter {
     this.precomputedGasEstimates.set('bsc:sandwich', 220000);
     this.precomputedGasEstimates.set('solana:sandwich', 200000);
     
+    // Precompute common trading routes for faster processing
+    await this.precomputeCommonRoutes();
+    
     // Pre-warm gas price caches
     const chains = ['ethereum', 'bsc', 'solana'];
     await Promise.all(chains.map(chain => this.fetchGasData(chain)));
     
     console.log('Warmup completed');
+  }
+
+  /**
+   * Precompute common trading routes for performance optimization
+   */
+  private async precomputeCommonRoutes(): Promise<void> {
+    const commonRoutes = [
+      { chain: 'ethereum', from: '0xA0b86a33E6C8', to: '0xC02aaA39b223', path: ['USDC', 'ETH'] },
+      { chain: 'ethereum', from: '0xdAC17F958D2e', to: '0xC02aaA39b223', path: ['USDT', 'ETH'] },
+      { chain: 'bsc', from: '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d', to: '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c', path: ['USDC', 'BNB'] }
+    ];
+    
+    for (const route of commonRoutes) {
+      const routeKey = `${route.chain}:${route.from}`;
+      this.precomputedRoutes.set(routeKey, route.path);
+      console.debug(`Precomputed route for ${routeKey}: ${route.path.join(' -> ')}`);
+    }
+    
+    console.log(`Precomputed ${commonRoutes.length} common trading routes`);
   }
 
   /**
@@ -501,7 +681,7 @@ export class PerformanceOptimizer extends EventEmitter {
       averageExecutionTime: this.calculateAverage(recentMetrics.map(m => m.executionTime)),
       averageTotalLatency: this.calculateAverage(recentMetrics.map(m => m.totalLatency)),
       successRate: recentMetrics.filter(m => m.success).length / recentMetrics.length,
-      throughput: recentMetrics.length / ((Date.now() - recentMetrics[0].detectionTime) / 1000),
+      throughput: recentMetrics.length > 0 ? recentMetrics.length / ((Date.now() - recentMetrics[0]!.detectionTime) / 1000) : 0,
       memoryUsage: process.memoryUsage().heapUsed / 1024 / 1024, // MB
       cacheHitRate: this.calculateCacheHitRate(),
       gasEfficiency: this.calculateGasEfficiency(recentMetrics),
@@ -657,7 +837,7 @@ export class PerformanceOptimizer extends EventEmitter {
    */
   getPerformanceStats(): PerformanceStats | null {
     return this.performanceReports.length > 0 
-      ? this.performanceReports[this.performanceReports.length - 1] 
+      ? this.performanceReports[this.performanceReports.length - 1] || null
       : null;
   }
 

@@ -67,7 +67,7 @@ export default function WalletsPage() {
           {error && <p className="text-red-500 text-sm text-center mb-4">{error}</p>}
 
           <div className="flex justify-end">
-            <button type="submit" className="bg-blue-500 text-white px-4 py-2 rounded-md">Save Securely</button>
+            <Button type="submit">Save Securely</Button>
           </div>
         </form>
       </div>

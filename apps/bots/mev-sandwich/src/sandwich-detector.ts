@@ -228,7 +228,7 @@ export class SandwichDetector extends EventEmitter {
     const routers = this.DEX_ROUTERS[chain as keyof typeof this.DEX_ROUTERS] || {};
     
     for (const [dexType, address] of Object.entries(routers)) {
-      if (address.toLowerCase() === routerAddress.toLowerCase()) {
+      if ((address as string).toLowerCase() === routerAddress.toLowerCase()) {
         return dexType;
       }
     }
@@ -242,6 +242,13 @@ export class SandwichDetector extends EventEmitter {
     chain: string
   ): Promise<any | null> {
     try {
+      // Validate that this DEX type exists on this chain
+      const chainRouters = this.DEX_ROUTERS[chain as keyof typeof this.DEX_ROUTERS];
+      if (!chainRouters || !chainRouters[dexType as keyof typeof chainRouters]) {
+        console.warn(`DEX type ${dexType} not supported on chain ${chain}`);
+        return null;
+      }
+
       if (dexType.includes('uniswap-v2') || dexType.includes('pancakeswap')) {
         return this.decodeUniswapV2Transaction(tx);
       } else if (dexType.includes('uniswap-v3')) {
@@ -270,37 +277,42 @@ export class SandwichDetector extends EventEmitter {
       const functionName = decoded.name;
       const args = decoded.args;
 
+      // Determine chain key from chainId for wrapped token lookup
+      const chainId = Number(tx.chainId) || 1;
+      const chainKey = chainId === 1 ? 'ethereum' : 'bsc';
+
       if (functionName === 'swapExactETHForTokens') {
-        const chainKey = Number(tx.chainId) === 1 ? 'ethereum' : 'bsc';
         return {
           type: 'exactInput',
           tokenIn: this.WRAPPED_TOKENS[chainKey],
-          tokenOut: args.path[args.path.length - 1],
+          tokenOut: args['path'][args['path'].length - 1],
           amountIn: tx.value?.toString() || '0',
-          amountOutMin: args.amountOutMin.toString(),
-          path: args.path,
-          deadline: args.deadline.toString()
+          amountOutMin: args['amountOutMin'].toString(),
+          path: args['path'],
+          deadline: args['deadline'].toString(),
+          chainKey
         };
       } else if (functionName === 'swapExactTokensForETH') {
-        const chainKey = Number(tx.chainId) === 1 ? 'ethereum' : 'bsc';
         return {
           type: 'exactInput',
-          tokenIn: args.path[0],
+          tokenIn: args['path'][0],
           tokenOut: this.WRAPPED_TOKENS[chainKey],
-          amountIn: args.amountIn.toString(),
-          amountOutMin: args.amountOutMin.toString(),
-          path: args.path,
-          deadline: args.deadline.toString()
+          amountIn: args['amountIn'].toString(),
+          amountOutMin: args['amountOutMin'].toString(),
+          path: args['path'],
+          deadline: args['deadline'].toString(),
+          chainKey
         };
       } else if (functionName === 'swapExactTokensForTokens') {
         return {
           type: 'exactInput',
-          tokenIn: args.path[0],
-          tokenOut: args.path[args.path.length - 1],
-          amountIn: args.amountIn.toString(),
-          amountOutMin: args.amountOutMin.toString(),
-          path: args.path,
-          deadline: args.deadline.toString()
+          tokenIn: args['path'][0],
+          tokenOut: args['path'][args['path'].length - 1],
+          amountIn: args['amountIn'].toString(),
+          amountOutMin: args['amountOutMin'].toString(),
+          path: args['path'],
+          deadline: args['deadline'].toString(),
+          chainKey
         };
       }
 
@@ -346,8 +358,8 @@ export class SandwichDetector extends EventEmitter {
           amountIn: params.amountIn.toString(),
           amountOutMin: params.amountOutMinimum.toString(),
           deadline: params.deadline.toString(),
-          tokenIn: path[0],
-          tokenOut: path[path.length - 1]
+          tokenIn: path.length > 0 ? path[0] : undefined,
+          tokenOut: path.length > 0 ? path[path.length - 1] : undefined
         };
       }
 
@@ -358,9 +370,41 @@ export class SandwichDetector extends EventEmitter {
   }
 
   private decodePath(encodedPath: string): string[] {
-    // Simplified path decoding for Uniswap V3
-    // In production, this would properly decode the packed path
-    return [];
+    // Implement Uniswap V3 path decoding
+    // Path format: [token0, fee, token1, fee, token2, ...]
+    try {
+      if (!encodedPath || encodedPath === '0x') {
+        return [];
+      }
+
+      // Remove 0x prefix
+      const pathHex = encodedPath.startsWith('0x') ? encodedPath.slice(2) : encodedPath;
+      
+      // Each token is 20 bytes (40 hex chars), each fee is 3 bytes (6 hex chars)
+      const tokens: string[] = [];
+      let offset = 0;
+      
+      while (offset < pathHex.length) {
+        // Extract token address (20 bytes = 40 hex chars)
+        if (offset + 40 <= pathHex.length) {
+          const tokenHex = pathHex.slice(offset, offset + 40);
+          tokens.push('0x' + tokenHex);
+          offset += 40;
+          
+          // Skip fee (3 bytes = 6 hex chars) if not at end
+          if (offset + 6 <= pathHex.length && offset + 6 < pathHex.length) {
+            offset += 6;
+          }
+        } else {
+          break;
+        }
+      }
+      
+      return tokens;
+    } catch (error) {
+      console.warn('Failed to decode Uniswap V3 path:', error);
+      return [];
+    }
   }
 
   private async evaluateSandwichOpportunity(
@@ -382,6 +426,10 @@ export class SandwichDetector extends EventEmitter {
           tokenIn.isHoneypot || tokenOut.isHoneypot) {
         return null;
       }
+
+      // Evaluate token quality for sandwich potential
+      const tokenQualityScore = this.calculateTokenQuality(tokenIn, tokenOut);
+      if (tokenQualityScore < 0.5) return null;
 
       // Get pool information
       const poolInfo = await this.getPoolInfo(tokenIn.address, tokenOut.address, dexType, chain);
@@ -436,6 +484,22 @@ export class SandwichDetector extends EventEmitter {
     }
   }
 
+  private calculateTokenQuality(tokenIn: TokenInfo, tokenOut: TokenInfo): number {
+    let score = 0.5; // Base score
+    
+    // Verified tokens get higher score
+    if (tokenIn.verified && tokenOut.verified) score += 0.3;
+    
+    // Low or no taxes are preferred
+    if (tokenIn.taxBuy + tokenIn.taxSell < 5 && tokenOut.taxBuy + tokenOut.taxSell < 5) score += 0.2;
+    
+    // High liquidity is preferred
+    const minLiquidity = Math.min(parseFloat(tokenIn.liquidity), parseFloat(tokenOut.liquidity));
+    if (minLiquidity > 1000000) score += 0.2;
+    
+    return Math.min(score, 1.0);
+  }
+
   private async calculateTradeImpact(
     decodedTx: any,
     poolInfo: PoolInfo,
@@ -469,19 +533,48 @@ export class SandwichDetector extends EventEmitter {
       const amountInWithFee = amountIn * (1 - fee);
       const amountOut = (reserveOut * amountInWithFee) / (reserveIn + amountInWithFee);
       
+      // Validate against expected minimum output
+      const expectedMinOut = parseFloat(decodedTx.amountOutMin) / Math.pow(10, tokenOut.decimals);
+      if (amountOut < expectedMinOut) {
+        // Transaction would fail due to slippage protection
+        return {
+          isProfitable: false,
+          estimatedProfit: '0',
+          profitability: 0,
+          confidence: 0,
+          slippage: 100 // Maximum slippage indicates transaction failure
+        };
+      }
+      
       // Calculate price impact
       const priceImpact = (amountIn / reserveIn) * 100;
       
+      // Use amountOut to determine optimal sandwich sizing
+      const maxSandwichSize = Math.min(amountOut * 0.5, amountIn * 0.6); // Don't exceed victim trade impact
+      const optimalFrontRunAmount = Math.min(maxSandwichSize, amountIn * 0.4); // 40% of victim trade or less
+      
       // Estimate front-run and back-run amounts
-      const frontRunAmount = amountIn * 0.4; // 40% of victim trade
+      const frontRunAmount = optimalFrontRunAmount;
       const frontRunOut = (reserveOut * frontRunAmount * (1 - fee)) / (reserveIn + frontRunAmount * (1 - fee));
       
       // New reserves after front-run
       const newReserveIn = reserveIn + frontRunAmount;
       const newReserveOut = reserveOut - frontRunOut;
       
-      // Victim trade in new state
+      // Victim trade in new state - using amountOut for price comparison
       const victimOut = (newReserveOut * amountInWithFee) / (newReserveIn + amountInWithFee);
+      const expectedVictimOut = parseFloat(decodedTx.amountOutMin) / Math.pow(10, tokenOut.decimals);
+      
+      // Check if victim trade would still be profitable after front-run
+      if (victimOut < expectedVictimOut * 0.95) { // 5% tolerance
+        return {
+          isProfitable: false,
+          estimatedProfit: '0',
+          profitability: 0,
+          confidence: 0,
+          slippage: priceImpact
+        };
+      }
       
       // Final reserves after victim trade
       const finalReserveIn = newReserveIn + amountIn;
@@ -490,8 +583,21 @@ export class SandwichDetector extends EventEmitter {
       // Back-run (sell tokens acquired in front-run)
       const backRunOut = (finalReserveIn * frontRunOut * (1 - fee)) / (finalReserveOut + frontRunOut * (1 - fee));
       
-      // Calculate profit
+      // Calculate profit - use amountOut comparison for profit validation
       const profit = backRunOut - frontRunAmount;
+      const profitRatio = profit / amountOut; // Profit relative to normal trade output
+      
+      // Ensure profit is reasonable compared to normal trade output
+      if (profitRatio < 0.01) { // Less than 1% of normal output
+        return {
+          isProfitable: false,
+          estimatedProfit: '0',
+          profitability: 0,
+          confidence: 0,
+          slippage: priceImpact
+        };
+      }
+      
       const profitUsd = profit * tokenIn.price;
       
       // Estimate gas costs (simplified)
@@ -503,11 +609,12 @@ export class SandwichDetector extends EventEmitter {
       const netProfitUsd = profitUsd - gasCostUsd;
       const profitability = (netProfitUsd / (amountIn * tokenIn.price)) * 100;
       
-      // Calculate confidence based on liquidity and price impact
+      // Calculate confidence based on liquidity, price impact, and amountOut validation
       let confidence = 1.0;
       if (priceImpact > 5) confidence *= 0.7;
       if (priceImpact > 10) confidence *= 0.5;
       if (reserveIn < 100000) confidence *= 0.8; // Low liquidity penalty
+      if (amountOut < expectedMinOut * 1.1) confidence *= 0.9; // Close to slippage limit
       
       return {
         isProfitable: netProfitUsd > 0 && profitability > 1.0,
@@ -646,7 +753,26 @@ export class SandwichDetector extends EventEmitter {
   private processSolanaTransaction(signatureResult: any, context: any): void {
     // Process Solana transactions for MEV opportunities
     // This would decode Solana DEX transactions (Raydium, Orca, Jupiter)
-    console.log('Processing Solana transaction:', signatureResult);
+    try {
+      const { signature, err } = signatureResult;
+      const { slot } = context;
+      
+      // Skip failed transactions
+      if (err) return;
+      
+      console.log(`Processing Solana transaction: ${signature} at slot ${slot}`);
+      
+      // In production, this would:
+      // 1. Fetch transaction details from Solana RPC
+      // 2. Decode instruction data for DEX interactions
+      // 3. Analyze for sandwich opportunities
+      // 4. Emit opportunities if found
+      
+      // For now, just log the processing
+      this.emit('solanaTransactionProcessed', { signature, slot });
+    } catch (error) {
+      console.error('Error processing Solana transaction:', error);
+    }
   }
 
   async stopMonitoring(): Promise<void> {

@@ -56,7 +56,7 @@ export class RiskManager extends EventEmitter {
   private activeTrades: Map<string, TradeRisk> = new Map();
   private portfolioHistory: PortfolioRisk[] = [];
   private priceHistory: Map<string, number[]> = new Map();
-  private correlationMatrix: Map<string, Map<string, number>> = new Map();
+  // Removed unused correlationMatrix
   private dailyStartBalance: number = 0;
   private emergencyMode: boolean = false;
 
@@ -143,8 +143,12 @@ export class RiskManager extends EventEmitter {
       const returns = [];
       
       for (let i = 1; i < recentPrices.length; i++) {
-        const returnValue = (recentPrices[i] - recentPrices[i - 1]) / recentPrices[i - 1];
-        returns.push(returnValue);
+        const currentPrice = recentPrices[i];
+        const previousPrice = recentPrices[i - 1];
+        if (currentPrice !== undefined && previousPrice !== undefined && previousPrice !== 0) {
+          const returnValue = (currentPrice - previousPrice) / previousPrice;
+          returns.push(returnValue);
+        }
       }
       
       const mean = returns.reduce((sum, r) => sum + r, 0) / returns.length;
@@ -183,11 +187,15 @@ export class RiskManager extends EventEmitter {
       let sumSq2 = 0;
       
       for (let i = 0; i < returns1.length; i++) {
-        const diff1 = returns1[i] - mean1;
-        const diff2 = returns2[i] - mean2;
-        numerator += diff1 * diff2;
-        sumSq1 += diff1 * diff1;
-        sumSq2 += diff2 * diff2;
+        const return1 = returns1[i];
+        const return2 = returns2[i];
+        if (return1 !== undefined && return2 !== undefined) {
+          const diff1 = return1 - mean1;
+          const diff2 = return2 - mean2;
+          numerator += diff1 * diff2;
+          sumSq1 += diff1 * diff1;
+          sumSq2 += diff2 * diff2;
+        }
       }
       
       const denominator = Math.sqrt(sumSq1 * sumSq2);
@@ -216,7 +224,7 @@ export class RiskManager extends EventEmitter {
       // Calculate correlation with existing positions
       let maxCorrelation = 0;
       for (const [existingPair] of this.activeTrades) {
-        if (existingPair !== pair) {
+        if (existingPair && existingPair !== pair) {
           const correlation = Math.abs(this.calculateCorrelation(pair, existingPair));
           maxCorrelation = Math.max(maxCorrelation, correlation);
         }
@@ -259,7 +267,7 @@ export class RiskManager extends EventEmitter {
   // Stop-Loss and Take-Profit Logic
   private async checkRiskThresholds(tradeRisk: TradeRisk): Promise<void> {
     try {
-      const { tradeId, pair, entryPrice, currentPrice, unrealizedPnL, amount } = tradeRisk;
+      const { tradeId, pair, entryPrice, currentPrice, amount } = tradeRisk;
       const priceChange = (currentPrice - entryPrice) / entryPrice * 100;
       
       // Stop Loss Check
@@ -338,8 +346,12 @@ export class RiskManager extends EventEmitter {
       const pairs = Array.from(this.activeTrades.keys());
       for (let i = 0; i < pairs.length; i++) {
         for (let j = i + 1; j < pairs.length; j++) {
-          const corr = Math.abs(this.calculateCorrelation(pairs[i], pairs[j]));
-          correlations.push(corr);
+          const pairI = pairs[i];
+          const pairJ = pairs[j];
+          if (pairI && pairJ) {
+            const corr = Math.abs(this.calculateCorrelation(pairI, pairJ));
+            correlations.push(corr);
+          }
         }
       }
       const avgCorrelation = correlations.length > 0 
@@ -424,22 +436,26 @@ export class RiskManager extends EventEmitter {
   private calculateReturns(prices: number[]): number[] {
     const returns: number[] = [];
     for (let i = 1; i < prices.length; i++) {
-      returns.push((prices[i] - prices[i - 1]) / prices[i - 1]);
+      const currentPrice = prices[i];
+      const previousPrice = prices[i - 1];
+      if (currentPrice !== undefined && previousPrice !== undefined && previousPrice !== 0) {
+        returns.push((currentPrice - previousPrice) / previousPrice);
+      }
     }
     return returns;
   }
 
-  private getHistoricalWinRate(pair: string): number {
+  private getHistoricalWinRate(_pair: string): number {
     // Mock implementation - in production, query from database
     return 0.65; // 65% win rate
   }
 
-  private getAverageWin(pair: string): number {
+  private getAverageWin(_pair: string): number {
     // Mock implementation
     return 0.015; // 1.5% average win
   }
 
-  private getAverageLoss(pair: string): number {
+  private getAverageLoss(_pair: string): number {
     // Mock implementation
     return -0.008; // 0.8% average loss
   }
@@ -449,7 +465,7 @@ export class RiskManager extends EventEmitter {
     return 100000; // $100k portfolio
   }
 
-  private getRealizedPnL(tradeId: string): number {
+  private getRealizedPnL(_tradeId: string): number {
     // Mock implementation - query from database
     return 0;
   }
@@ -463,7 +479,8 @@ export class RiskManager extends EventEmitter {
     if (this.portfolioHistory.length < 2) return 0;
     
     let maxDrawdown = 0;
-    let peak = this.portfolioHistory[0].totalExposure;
+    const firstPortfolio = this.portfolioHistory[0];
+    let peak = firstPortfolio ? firstPortfolio.totalExposure : 0;
     
     for (const portfolio of this.portfolioHistory) {
       if (portfolio.totalExposure > peak) {

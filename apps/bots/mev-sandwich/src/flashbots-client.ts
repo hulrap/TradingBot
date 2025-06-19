@@ -231,7 +231,7 @@ export class FlashbotsClient extends EventEmitter {
       const simulation = await this.simulateBundle(bundle);
       if (!simulation.success) {
         bundle.status = 'failed';
-        bundle.revertReason = simulation.revertReason || simulation.error;
+        bundle.revertReason = simulation.revertReason || simulation.error || 'Unknown simulation error';
         this.emit('bundleFailed', bundle);
         return;
       }

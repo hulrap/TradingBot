@@ -141,11 +141,14 @@ export class BscMevClient extends EventEmitter {
   async createSandwichBundle(opportunity: BscSandwichOpportunity): Promise<BscMevBundle> {
     const bundleId = `bsc_sandwich_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     
+    // Select optimal router based on opportunity and token types
+    const optimalRouter = this.selectOptimalRouter(opportunity);
+    
     // Create front-run transaction
-    const frontRunTx = await this.createFrontRunTransaction(opportunity);
+    const frontRunTx = await this.createFrontRunTransaction(opportunity, optimalRouter);
     
     // Create back-run transaction
-    const backRunTx = await this.createBackRunTransaction(opportunity);
+    const backRunTx = await this.createBackRunTransaction(opportunity, optimalRouter);
     
     // Bundle: [front-run, victim tx, back-run]
     const bundleTransactions: ethers.TransactionRequest[] = [
@@ -171,21 +174,51 @@ export class BscMevClient extends EventEmitter {
     return bundle;
   }
 
-  private async createFrontRunTransaction(opportunity: BscSandwichOpportunity): Promise<ethers.TransactionRequest> {
+  /**
+   * Select optimal PancakeSwap router based on opportunity characteristics
+   */
+  private selectOptimalRouter(opportunity: BscSandwichOpportunity): string {
+    // Use provided router if specified and valid
+    if (opportunity.pancakeRouter && 
+        (opportunity.pancakeRouter === this.PANCAKE_ROUTER_V2 || 
+         opportunity.pancakeRouter === this.PANCAKE_ROUTER_V3)) {
+      return opportunity.pancakeRouter;
+    }
+
+    // Router selection logic based on token pair and trade size
+    const tradeSize = parseFloat(opportunity.amountIn);
+    const isLargeVolume = tradeSize > 100; // Threshold for large volume trades
+
+    // V3 is generally better for large volumes due to concentrated liquidity
+    // V2 is more reliable for smaller trades and has wider compatibility
+    if (isLargeVolume) {
+      console.log(`Selected PancakeSwap V3 router for large volume trade: ${tradeSize}`);
+      return this.PANCAKE_ROUTER_V3;
+    } else {
+      console.log(`Selected PancakeSwap V2 router for standard trade: ${tradeSize}`);
+      return this.PANCAKE_ROUTER_V2;
+    }
+  }
+
+  private async createFrontRunTransaction(
+    opportunity: BscSandwichOpportunity, 
+    routerAddress: string
+  ): Promise<ethers.TransactionRequest> {
     // Calculate front-run amount
     const frontRunAmount = await this.calculateOptimalFrontRunAmount(opportunity);
     
-    // Encode PancakeSwap transaction
+    // Encode PancakeSwap transaction using the selected router
     const swapData = await this.encodePancakeSwap(
       opportunity.tokenA,
       opportunity.tokenB,
       frontRunAmount,
       '0', // Accept any amount out initially
-      this.wallet.address
+      this.wallet.address,
+      routerAddress
     );
 
     const frontRunTx: ethers.TransactionRequest = {
-      to: opportunity.pancakeRouter,
+      to: routerAddress,
       data: swapData,
       value: opportunity.tokenA === this.WBNB ? frontRunAmount : '0',
       gasPrice: ethers.parseUnits(opportunity.gasPrice, 'gwei'),
@@ -196,18 +229,22 @@ export class BscMevClient extends EventEmitter {
     return frontRunTx;
   }
 
-  private async createBackRunTransaction(opportunity: BscSandwichOpportunity): Promise<ethers.TransactionRequest> {
-    // Back-run swaps back to original token
+  private async createBackRunTransaction(
+    opportunity: BscSandwichOpportunity, 
+    routerAddress: string
+  ): Promise<ethers.TransactionRequest> {
+    // Back-run swaps back to original token using the same router
     const swapData = await this.encodePancakeSwap(
       opportunity.tokenB,
       opportunity.tokenA,
       '0', // Will use balance from front-run
       '0', // Accept any amount out
-      this.wallet.address
+      this.wallet.address,
+      routerAddress
     );
 
     const backRunTx: ethers.TransactionRequest = {
-      to: opportunity.pancakeRouter,
+      to: routerAddress,
       data: swapData,
       value: '0',
       gasPrice: ethers.parseUnits(opportunity.gasPrice, 'gwei'),
@@ -223,7 +260,8 @@ export class BscMevClient extends EventEmitter {
     tokenOut: string,
     amountIn: string,
     amountOutMin: string,
-    to: string
+    to: string,
+    routerAddress?: string
   ): Promise<string> {
     const routerABI = [
       'function swapExactETHForTokens(uint amountOutMin, address[] calldata path, address to, uint deadline) external payable',
@@ -233,6 +271,10 @@ export class BscMevClient extends EventEmitter {
 
     const router = new ethers.Interface(routerABI);
     const deadline = Math.floor(Date.now() / 1000) + 60 * 20; // 20 minutes
+
+    // Log which router is being used for transaction encoding
+    const selectedRouter = routerAddress || this.PANCAKE_ROUTER_V2;
+    console.log(`Encoding swap for router: ${selectedRouter}`);
 
     if (tokenIn === this.WBNB) {
       // BNB to Token
@@ -387,9 +429,22 @@ export class BscMevClient extends EventEmitter {
           
           if (block) {
             const includedTxs = block.transactions.filter((tx: any) => 
-              bundle.transactions.some(bundleTx => 
-                tx.from?.toLowerCase() === this.wallet.address.toLowerCase()
-              )
+              bundle.transactions.some(bundleTx => {
+                // Compare transaction properties to match bundle transactions
+                // Safely convert addresses to strings for comparison
+                const txTo = tx.to ? String(tx.to).toLowerCase() : '';
+                const bundleTo = bundleTx.to ? String(bundleTx.to).toLowerCase() : '';
+                
+                const txMatches = tx.from?.toLowerCase() === this.wallet.address.toLowerCase() &&
+                                  txTo === bundleTo &&
+                                  tx.data === bundleTx.data;
+                
+                if (txMatches) {
+                  console.log(`Found matching transaction: ${tx.hash} for bundle ${bundle.id}`);
+                }
+                
+                return txMatches;
+              })
             );
 
             if (includedTxs.length > 0) {

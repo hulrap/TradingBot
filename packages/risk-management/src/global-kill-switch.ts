@@ -216,17 +216,22 @@ export class GlobalKillSwitch extends EventEmitter {
    * Get current kill switch status
    */
   public getStatus(): KillSwitchStatus {
-    return {
+    const status: KillSwitchStatus = {
       isActive: this.isActive,
       isTriggered: this.isTriggered,
-      lastTriggered: this.triggerHistory.length > 0 ? 
-        this.triggerHistory[this.triggerHistory.length - 1].timestamp : undefined,
       totalTriggers: this.triggerHistory.length,
       currentMode: this.currentMode,
       systemHealth: this.determineSystemHealth(),
       activeBots: this.activeBots.size,
       emergencyContact: this.config.emergencyContacts.length > 0
     };
+
+    // Only add lastTriggered if we have trigger history
+    if (this.triggerHistory.length > 0) {
+      status.lastTriggered = this.triggerHistory[this.triggerHistory.length - 1]!.timestamp;
+    }
+
+    return status;
   }
 
   /**
@@ -297,7 +302,7 @@ export class GlobalKillSwitch extends EventEmitter {
 
   private validateConfig(config: KillSwitchConfig): void {
     const result = KillSwitchConfigSchema.safeParse(config);
-    if (!result.success) {
+    if (result.success === false) {
       throw new Error(`Invalid kill switch configuration: ${result.error.message}`);
     }
   }
@@ -330,7 +335,7 @@ export class GlobalKillSwitch extends EventEmitter {
   }
 
   private async gracefulStopBot(botId: string): Promise<void> {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       // Set graceful shutdown timer
       const gracefulTimer = setTimeout(() => {
         console.warn(`Graceful shutdown timeout for bot ${botId}, forcing stop`);

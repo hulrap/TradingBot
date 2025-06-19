@@ -1,6 +1,6 @@
-import { CopyTraderBotConfig, Chain, Trade } from "@trading-bot/types";
+import { CopyTraderBotConfig, Chain } from "@trading-bot/types";
 import { createChainClient } from "@trading-bot/chain-client";
-import { Wallet, WebSocketProvider, Interface, parseUnits, JsonRpcProvider } from "ethers";
+import { Wallet, WebSocketProvider, Interface, parseUnits } from "ethers";
 import { Connection, PublicKey } from "@solana/web3.js";
 import dotenv from 'dotenv';
 import winston from 'winston';
@@ -13,7 +13,7 @@ dotenv.config();
 
 // Configure logger
 const logger = winston.createLogger({
-  level: process.env.LOG_LEVEL || 'info',
+  level: process.env['LOG_LEVEL'] || 'info',
   format: winston.format.combine(
     winston.format.timestamp(),
     winston.format.errors({ stack: true }),
@@ -36,7 +36,7 @@ const COPY_TRADE_CONFIG: CopyTraderBotConfig = {
   userId: "user-123",
   walletId: "wallet-1",
   chain: "ETH" as Chain,
-  targetWalletAddress: process.env.TARGET_WALLET_ADDRESS || "0x...", // IMPORTANT: Target wallet to copy
+  targetWalletAddress: process.env['TARGET_WALLET_ADDRESS'] || "0x...", // IMPORTANT: Target wallet to copy
   tradeSize: {
     type: "FIXED",
     value: 0.1, // e.g., 0.1 ETH per trade
@@ -46,12 +46,12 @@ const COPY_TRADE_CONFIG: CopyTraderBotConfig = {
   updatedAt: new Date().toISOString(),
 };
 
-const CHAIN: Chain = (process.env.CHAIN as Chain) || "ETH";
-const WEBSOCKET_RPC_URL = process.env.ETH_WEBSOCKET_RPC_URL!; // IMPORTANT: Use a WSS RPC URL
-const PRIVATE_KEY = process.env.PRIVATE_KEY!;
+const CHAIN: Chain = (process.env['CHAIN'] as Chain) || "ETH";
+const WEBSOCKET_RPC_URL = process.env['ETH_WEBSOCKET_RPC_URL']!; // IMPORTANT: Use a WSS RPC URL
+const PRIVATE_KEY = process.env['PRIVATE_KEY']!;
 
-const SOLANA_WEBSOCKET_RPC_URL = process.env.SOLANA_WEBSOCKET_RPC_URL!;
-const SOLANA_PRIVATE_KEY = process.env.SOLANA_PRIVATE_KEY!;
+const SOLANA_WEBSOCKET_RPC_URL = process.env['SOLANA_WEBSOCKET_RPC_URL']!;
+const SOLANA_PRIVATE_KEY = process.env['SOLANA_PRIVATE_KEY']!;
 
 // A common ABI for Uniswap V2-like routers
 const UNISWAP_V2_ROUTER_ABI = [
@@ -69,21 +69,21 @@ class CopyTradingBot {
   constructor() {
     // Initialize provider
     this.provider = new ethers.JsonRpcProvider(
-      process.env.ETH_RPC_URL || 'https://eth-mainnet.alchemyapi.io/v2/your-api-key'
+      process.env['ETH_RPC_URL'] || 'https://eth-mainnet.alchemyapi.io/v2/your-api-key'
     );
 
     // Initialize mempool monitor
     const monitorConfig: MonitorConfig = {
-      rpcUrl: process.env.ETH_RPC_URL || 'https://eth-mainnet.alchemyapi.io/v2/your-api-key',
-      wsUrl: process.env.ETH_WS_URL || 'wss://eth-mainnet.alchemyapi.io/v2/your-api-key',
-      targetWallets: process.env.TARGET_WALLETS?.split(',') || [],
+      rpcUrl: process.env['ETH_RPC_URL'] || 'https://eth-mainnet.alchemyapi.io/v2/your-api-key',
+      wsUrl: process.env['ETH_WS_URL'] || 'wss://eth-mainnet.alchemyapi.io/v2/your-api-key',
+      targetWallets: process.env['TARGET_WALLETS']?.split(',') || [],
       dexRouters: [
         '0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D', // Uniswap V2
         '0xE592427A0AEce92De3Edee1F18E0157C05861564', // Uniswap V3
         '0xd9e1cE17f2641f24aE83637ab66a2cca9C378B9F'  // SushiSwap
       ],
-      minTransactionValue: process.env.MIN_TRANSACTION_VALUE || '0.1',
-      maxGasPrice: process.env.MAX_GAS_PRICE || '100',
+      minTransactionValue: process.env['MIN_TRANSACTION_VALUE'] || '0.1',
+      maxGasPrice: process.env['MAX_GAS_PRICE'] || '100',
       enableDecoding: true,
       enableFiltering: true
     };
@@ -92,22 +92,22 @@ class CopyTradingBot {
 
     // Initialize copy execution engine
     const copyConfig: CopyConfig = {
-      targetWallet: process.env.TARGET_WALLET || '',
-      copyPercentage: parseFloat(process.env.COPY_PERCENTAGE || '10'),
-      maxTradeSize: process.env.MAX_TRADE_SIZE || '1.0',
-      minTradeSize: process.env.MIN_TRADE_SIZE || '0.01',
-      maxSlippage: parseFloat(process.env.MAX_SLIPPAGE || '2'),
-      maxGasPrice: process.env.MAX_GAS_PRICE || '100',
-      followTokens: process.env.FOLLOW_TOKENS?.split(',') || [],
-      excludeTokens: process.env.EXCLUDE_TOKENS?.split(',') || [],
-      copyDelay: parseInt(process.env.COPY_DELAY || '1000'),
-      stopLoss: parseFloat(process.env.STOP_LOSS || '5'),
-      takeProfit: parseFloat(process.env.TAKE_PROFIT || '10'),
-      enableFiltering: process.env.ENABLE_FILTERING === 'true',
-      enableRiskManagement: process.env.ENABLE_RISK_MANAGEMENT === 'true'
+      targetWallet: process.env['TARGET_WALLET'] || '',
+      copyPercentage: parseFloat(process.env['COPY_PERCENTAGE'] || '10'),
+      maxTradeSize: process.env['MAX_TRADE_SIZE'] || '1.0',
+      minTradeSize: process.env['MIN_TRADE_SIZE'] || '0.01',
+      maxSlippage: parseFloat(process.env['MAX_SLIPPAGE'] || '2'),
+      maxGasPrice: process.env['MAX_GAS_PRICE'] || '100',
+      followTokens: process.env['FOLLOW_TOKENS']?.split(',') || [],
+      excludeTokens: process.env['EXCLUDE_TOKENS']?.split(',') || [],
+      copyDelay: parseInt(process.env['COPY_DELAY'] || '1000'),
+      stopLoss: parseFloat(process.env['STOP_LOSS'] || '5'),
+      takeProfit: parseFloat(process.env['TAKE_PROFIT'] || '10'),
+      enableFiltering: process.env['ENABLE_FILTERING'] === 'true',
+      enableRiskManagement: process.env['ENABLE_RISK_MANAGEMENT'] === 'true'
     };
 
-    const privateKey = process.env.PRIVATE_KEY;
+    const privateKey = process.env['PRIVATE_KEY'];
     if (!privateKey) {
       throw new Error('PRIVATE_KEY environment variable is required');
     }
@@ -371,8 +371,15 @@ async function startEvmCopyTrader() {
 
   const provider = new WebSocketProvider(WEBSOCKET_RPC_URL);
   const chainClient = createChainClient(CHAIN, PRIVATE_KEY, WEBSOCKET_RPC_URL);
-  const userWallet = chainClient.getWallet() as Wallet;
+  const userWallet = new Wallet(PRIVATE_KEY, provider);
 
+  // Initialize chain client for enhanced functionality
+  const chainConfig = chainClient.getChainConfig(CHAIN.toLowerCase() as any);
+  if (chainConfig) {
+    console.log(`Chain client initialized for ${chainConfig.name} network`);
+  } else {
+    console.log(`Chain client initialized for ${CHAIN} network`);
+  }
   console.log(`Monitoring target wallet: ${COPY_TRADE_CONFIG.targetWalletAddress}`);
   
   provider.on("pending", async (txHash: string) => {
@@ -416,14 +423,16 @@ async function startEvmCopyTrader() {
     }
   });
 
-  provider._websocket.on("error", (error: any) => {
-      console.error("WebSocket Error:", error);
+  // Handle provider errors and disconnections
+  provider.on("error", (error: any) => {
+      console.error("Provider Error:", error);
   });
 
-  provider._websocket.on("close", (code: number, reason: string) => {
-      console.log(`WebSocket closed: ${code} ${reason}`);
-      console.log("Attempting to reconnect...");
-      startEvmCopyTrader(); // Reconnect on close
+  provider.on("network", (newNetwork: any, oldNetwork: any) => {
+      if (oldNetwork) {
+          console.log(`Network changed from ${oldNetwork.chainId} to ${newNetwork.chainId}, attempting to reconnect...`);
+          startEvmCopyTrader(); // Reconnect on network change
+      }
   });
 }
 
@@ -444,6 +453,7 @@ async function startSolanaCopyTrader() {
             const logMessages = logs.logs.join('\n');
             if (logMessages.includes("Instruction: Swap")) {
                 console.log(`[${new Date().toISOString()}] Detected SWAP transaction from target: ${logs.signature}`);
+                console.log(`   Slot: ${context.slot}, Confirmation: ${context.confirmation}`);
                 console.log("   --> Solana trade replication logic would be implemented here <--");
             }
         },
@@ -453,7 +463,7 @@ async function startSolanaCopyTrader() {
 
 // --- Main Execution ---
 async function main() {
-    const chain: Chain = (process.env.CHAIN as Chain) || "ETH";
+    const chain: Chain = (process.env['CHAIN'] as Chain) || "ETH";
 
     if (chain === "ETH" || chain === "BSC") {
         await startEvmCopyTrader();

@@ -1,5 +1,4 @@
 
-
-> @trading-bot/copy-trader-bot@0.0.0 build /workspace/apps/bots/copy-trader
+> @trading-bot/copy-trader-bot@1.0.0 build C:\Users\User1\Downloads\TradingBot\apps\bots\copy-trader
 > tsc
 

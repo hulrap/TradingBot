@@ -1,9 +1,8 @@
-import Database from 'better-sqlite3';
+import Database, { Database as DatabaseType } from 'better-sqlite3';
 import { User, Wallet, Trade, BotConfig } from '@trading-bot/types';
-import { encrypt, decrypt } from '@trading-bot/crypto';
 
 // Database connection
-const db = new Database(process.env.DATABASE_PATH || 'trading_bot.db');
+const db: DatabaseType = new Database(process.env['DATABASE_PATH'] || 'trading_bot.db');
 
 // Initialize database schema
 export function initializeDatabase() {

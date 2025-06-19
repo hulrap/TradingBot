@@ -1,5 +1,4 @@
 
-
-> @trading-bot/arbitrage-bot@0.0.0 build /workspace/apps/bots/arbitrage
+> @trading-bot/arbitrage-bot@1.0.0 build C:\Users\User1\Downloads\TradingBot\apps\bots\arbitrage
 > tsc
 

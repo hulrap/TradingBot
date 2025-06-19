@@ -115,4 +115,7 @@ export interface RpcConfig {
   url: string;
   websocketUrl?: string;
   apiKey?: string;
-} 
+}
+
+// Export schemas from bot.ts
+export { ArbitrageBotConfigSchema } from './src/bot'; 

@@ -37,6 +37,7 @@ export interface TokenInfo {
   logoURI?: string;
   tags?: string[];
   isNative?: boolean;
+  chainId?: number;
 }
 
 export interface WalletBalance {
@@ -52,6 +53,16 @@ export interface GasSettings {
   maxFeePerGas?: string;
   maxPriorityFeePerGas?: string;
   type?: number; // 0 = Legacy, 2 = EIP-1559
+}
+
+export interface GasEstimate {
+  gasLimit: string;
+  gasPrice?: string;
+  maxFeePerGas?: string;
+  maxPriorityFeePerGas?: string;
+  estimatedCost: string;
+  totalCost: string;
+  totalCostFormatted?: string;
 }
 
 export interface TransactionRequest {
@@ -422,14 +433,14 @@ export class ChainAbstraction extends EventEmitter {
     // Gas price oracles for different chains
     const gasOracles = {
       ethereum: {
-        fast: () => this.getGasPrice('ethereum', 'fast'),
-        standard: () => this.getGasPrice('ethereum', 'standard'),
-        safe: () => this.getGasPrice('ethereum', 'safe')
+        fast: async () => await this.getGasPrice('ethereum', 'fast'),
+        standard: async () => await this.getGasPrice('ethereum', 'standard'),
+        safe: async () => await this.getGasPrice('ethereum', 'safe')
       },
       bsc: {
-        fast: () => this.getGasPrice('bsc', 'fast'),
-        standard: () => this.getGasPrice('bsc', 'standard'),
-        safe: () => this.getGasPrice('bsc', 'safe')
+        fast: async () => await this.getGasPrice('bsc', 'fast'),
+        standard: async () => await this.getGasPrice('bsc', 'standard'),
+        safe: async () => await this.getGasPrice('bsc', 'safe')
       }
     };
 
@@ -464,7 +475,7 @@ export class ChainAbstraction extends EventEmitter {
 
   public async getBlockNumber(chain: SupportedChain): Promise<number> {
     if (chain === 'solana') {
-      return this.getSolanaSlot();
+      return await this.getSolanaSlot();
     }
 
     const provider = await this.getProvider(chain);
@@ -473,7 +484,7 @@ export class ChainAbstraction extends EventEmitter {
 
   public async getBlock(chain: SupportedChain, blockNumber: number): Promise<BlockInfo> {
     if (chain === 'solana') {
-      return this.getSolanaBlock(blockNumber);
+      return await this.getSolanaBlock(blockNumber);
     }
 
     const provider = await this.getProvider(chain);
@@ -485,19 +496,19 @@ export class ChainAbstraction extends EventEmitter {
 
     return {
       number: block.number,
-      hash: block.hash,
+      hash: block.hash || '0x',
       parentHash: block.parentHash,
       timestamp: block.timestamp,
       gasLimit: block.gasLimit.toString(),
       gasUsed: block.gasUsed.toString(),
       baseFeePerGas: block.baseFeePerGas?.toString(),
-      transactions: block.transactions
+      transactions: [...block.transactions]
     };
   }
 
   public async getTransaction(chain: SupportedChain, hash: string): Promise<TransactionReceipt | null> {
     if (chain === 'solana') {
-      return this.getSolanaTransaction(hash);
+      return await this.getSolanaTransaction(hash);
     }
 
     const provider = await this.getProvider(chain);
@@ -511,19 +522,19 @@ export class ChainAbstraction extends EventEmitter {
       blockHash: receipt.blockHash,
       transactionIndex: receipt.index,
       from: receipt.from,
-      to: receipt.to,
+      to: receipt.to || undefined,
       gasUsed: receipt.gasUsed.toString(),
       effectiveGasPrice: receipt.gasPrice.toString(),
       status: receipt.status || 0,
       logs: receipt.logs.map(log => ({
         address: log.address,
-        topics: log.topics,
+        topics: [...log.topics],
         data: log.data,
         blockNumber: log.blockNumber,
         transactionHash: log.transactionHash,
         logIndex: log.index
       })),
-      confirmations: receipt.confirmations
+      confirmations: await receipt.confirmations()
     };
   }
 
@@ -653,7 +664,7 @@ export class ChainAbstraction extends EventEmitter {
 
   public async getTokenBalance(chain: SupportedChain, tokenAddress: string, walletAddress: string): Promise<string> {
     if (chain === 'solana') {
-      return this.getSolanaTokenBalance(tokenAddress, walletAddress);
+      return await this.getSolanaTokenBalance(tokenAddress, walletAddress);
     }
 
     const provider = await this.getProvider(chain);
@@ -848,19 +859,19 @@ export class ChainAbstraction extends EventEmitter {
       blockHash: receipt.blockHash,
       transactionIndex: receipt.index,
       from: receipt.from,
-      to: receipt.to,
+      to: receipt.to || undefined,
       gasUsed: receipt.gasUsed.toString(),
       effectiveGasPrice: receipt.gasPrice.toString(),
       status: receipt.status || 0,
       logs: receipt.logs.map(log => ({
         address: log.address,
-        topics: log.topics,
+        topics: [...log.topics],
         data: log.data,
         blockNumber: log.blockNumber,
         transactionHash: log.transactionHash,
         logIndex: log.index
       })),
-      confirmations: receipt.confirmations
+      confirmations: await receipt.confirmations()
     };
   }
 
@@ -871,5 +882,21 @@ export class ChainAbstraction extends EventEmitter {
     this.tokenLists.clear();
     this.gasOracles.clear();
     this.removeAllListeners();
+  }
+
+  // Missing methods that are used by bot packages
+  public async getWallet(address: string): Promise<any> {
+    // TODO: Implement wallet management
+    throw new Error('Wallet management not yet implemented');
+  }
+
+  public async sendTransaction(transaction: TransactionRequest): Promise<TransactionReceipt> {
+    // TODO: Implement transaction sending
+    throw new Error('Transaction sending not yet implemented');
+  }
+
+  public async getBalance(address: string, tokenAddress?: string): Promise<string> {
+    // TODO: Implement balance fetching
+    throw new Error('Balance fetching not yet implemented');
   }
 }

@@ -323,7 +323,7 @@ export class ConnectionPool extends EventEmitter {
     this.updateConnectionCounts();
   }
 
-  private processQueue(): void {
+  private async processQueue(): Promise<void> {
     while (this.requestQueue.length > 0) {
       const request = this.requestQueue[0];
       
@@ -370,7 +370,7 @@ export class ConnectionPool extends EventEmitter {
   private startHealthChecks(): void {
     this.healthCheckInterval = setInterval(async () => {
       await this.performHealthChecks();
-    }, this.config.healthCheckInterval);
+    }, this.config.healthCheckInterval) as NodeJS.Timeout;
   }
 
   private async performHealthChecks(): Promise<void> {
@@ -427,7 +427,7 @@ export class ConnectionPool extends EventEmitter {
   private startAutoScaling(): void {
     this.scaleTimer = setInterval(() => {
       this.evaluateScaling();
-    }, 10000); // Check every 10 seconds
+    }, 10000) as NodeJS.Timeout; // Check every 10 seconds
   }
 
   private evaluateScaling(): void {
@@ -503,7 +503,7 @@ export class ConnectionPool extends EventEmitter {
   private startCleanupTimer(): void {
     this.cleanupTimer = setInterval(() => {
       this.cleanupExpiredConnections();
-    }, 60000); // Check every minute
+    }, 60000) as NodeJS.Timeout; // Check every minute
   }
 
   private cleanupExpiredConnections(): void {

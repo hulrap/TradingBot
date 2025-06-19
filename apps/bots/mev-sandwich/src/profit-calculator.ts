@@ -93,10 +93,14 @@ export class ProfitCalculator {
 
     for (const ratio of testRatios) {
       const frontRunAmount = victimAmount * ratio;
-      const result = await this.calculateProfit({
+      // Create modified params with front-run amount for simulation
+      const simulationParams = {
         ...params,
+        // Use calculated front-run amount for this simulation
         victimAmountIn: ethers.parseUnits(frontRunAmount.toString(), params.tokenInDecimals).toString()
-      });
+      };
+      
+      const result = await this.calculateProfit(simulationParams);
 
       simulationResults.push(result);
 
@@ -316,7 +320,6 @@ export class ProfitCalculator {
    */
   private calculateSlippage(sandwichResult: any, params: ProfitParams): number {
     // Calculate expected output without sandwich
-    const victimAmount = parseFloat(ethers.formatUnits(params.victimAmountIn, params.tokenInDecimals));
     const expectedOutput = parseFloat(ethers.formatUnits(params.victimAmountOutMin, params.tokenOutDecimals));
     
     // Calculate actual output with sandwich

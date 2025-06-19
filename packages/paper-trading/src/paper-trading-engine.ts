@@ -44,7 +44,7 @@ export interface PaperTrade {
 }
 
 export interface PaperPortfolio {
-  balances: { [token: string]: string };
+  balances: Record<string, string>;
   totalValueUSD: string;
   pnl: {
     realized: string;
@@ -134,9 +134,11 @@ export class PaperTradingEngine extends EventEmitter {
       if (token === 'USDC' || token === 'USDT') return; // Stablecoins don't move much
       
       const currentPrice = this.marketPrices[token];
-      const change = (Math.random() - 0.5) * 2 * volatility; // -volatility to +volatility
-      const newPrice = currentPrice * (1 + change / 100);
-      this.marketPrices[token] = Math.max(newPrice, 0.01); // Prevent negative prices
+      if (currentPrice !== undefined) {
+        const change = (Math.random() - 0.5) * 2 * volatility; // -volatility to +volatility
+        const newPrice = currentPrice * (1 + change / 100);
+        this.marketPrices[token] = Math.max(newPrice, 0.01); // Prevent negative prices
+      }
     });
 
     this.updatePortfolioValue();
@@ -264,7 +266,7 @@ export class PaperTradingEngine extends EventEmitter {
           'MEV frontrun'
         ];
     
-    return reasons[Math.floor(Math.random() * reasons.length)];
+    return reasons[Math.floor(Math.random() * reasons.length)]!;
   }
 
   private simulateLatency(): number {
@@ -307,7 +309,7 @@ export class PaperTradingEngine extends EventEmitter {
   private calculateMarketVolatility(token: string): number {
     // Simple volatility calculation based on recent price movements
     // In a real implementation, this would use historical data
-    const baseVolatility = {
+    const baseVolatility: { [key: string]: number } = {
       'ETH': 0.02,
       'WBTC': 0.015,
       'SOL': 0.03,
@@ -342,7 +344,8 @@ export class PaperTradingEngine extends EventEmitter {
   }
 
   private updateBalance(token: string, change: string): void {
-    const currentBalance = parseFloat(this.portfolio.balances[token] || '0');
+    const currentBalanceStr = this.portfolio.balances[token];
+    const currentBalance = parseFloat(currentBalanceStr ?? '0');
     const changeAmount = parseFloat(change.replace('+', ''));
     const newBalance = currentBalance + changeAmount;
     
@@ -413,7 +416,8 @@ export class PaperTradingEngine extends EventEmitter {
   }
 
   getBalance(token: string): string {
-    return this.portfolio.balances[token] || '0';
+    const balance = this.portfolio.balances[token];
+    return (balance ?? '0') as string;
   }
 
   getMarketPrice(token: string): number {

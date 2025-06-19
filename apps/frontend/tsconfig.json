@@ -1,13 +1,15 @@
 {
   "extends": "../../packages/config/tsconfig.base.json",
   "compilerOptions": {
+    "baseUrl": ".",
     "plugins": [
       {
         "name": "next"
       }
     ],
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@trading-bot/*": ["../../packages/*/src", "../../packages/*"]
     },
     "lib": ["dom", "dom.iterable", "esnext"],
     "allowJs": true,

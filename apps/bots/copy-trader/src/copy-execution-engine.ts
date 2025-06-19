@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 import { ethers } from 'ethers';
-import type { MempoolTransaction, DecodedTransactionData } from './mempool-monitor';
+import type { MempoolTransaction } from './mempool-monitor';
 
 export interface CopyConfig {
   targetWallet: string;
@@ -280,7 +280,29 @@ export class CopyExecutionEngine extends EventEmitter {
     // Simple router selection logic - in production, this would be more sophisticated
     // based on liquidity, fees, etc.
     
-    // Default to Uniswap V2 for most pairs
+    // Use different routers based on token pairs for better pricing
+    const isETHPair = tokenIn === 'ETH' || tokenOut === 'ETH' || 
+                     tokenIn === this.tokenAddresses.WETH || tokenOut === this.tokenAddresses.WETH;
+    
+    const isStablecoinPair = [this.tokenAddresses.USDC, this.tokenAddresses.USDT, this.tokenAddresses.DAI]
+                            .includes(tokenIn) || 
+                            [this.tokenAddresses.USDC, this.tokenAddresses.USDT, this.tokenAddresses.DAI]
+                            .includes(tokenOut);
+    
+    // Use Uniswap V3 for stablecoin pairs (better efficiency)
+    if (isStablecoinPair && !isETHPair) {
+      console.log(`Selected Uniswap V3 for stablecoin pair: ${tokenIn} -> ${tokenOut}`);
+      return this.dexRouters.uniswapV3;
+    }
+    
+    // Use Uniswap V2 for ETH pairs (higher liquidity)
+    if (isETHPair) {
+      console.log(`Selected Uniswap V2 for ETH pair: ${tokenIn} -> ${tokenOut}`);
+      return this.dexRouters.uniswapV2;
+    }
+    
+    // Default to Uniswap V2 for other pairs
+    console.log(`Selected default Uniswap V2 for pair: ${tokenIn} -> ${tokenOut}`);
     return this.dexRouters.uniswapV2;
   }
 
@@ -304,33 +326,46 @@ export class CopyExecutionEngine extends EventEmitter {
     if (copyTrade.tokenIn === 'ETH' || copyTrade.tokenIn === this.tokenAddresses.WETH) {
       // ETH to Token swap
       const path = [this.tokenAddresses.WETH, copyTrade.tokenOut];
-      txData = await router.swapExactETHForTokens.populateTransaction(
-        minAmountOut,
-        path,
-        this.wallet.address,
-        deadline,
-        { value: amountIn }
-      );
+      const swapMethod = router['swapExactETHForTokens'];
+      if (swapMethod) {
+        txData = await swapMethod.populateTransaction(
+          minAmountOut,
+          path,
+          this.wallet.address,
+          deadline,
+          { value: amountIn }
+        );
+      }
     } else if (copyTrade.tokenOut === 'ETH' || copyTrade.tokenOut === this.tokenAddresses.WETH) {
       // Token to ETH swap
       const path = [copyTrade.tokenIn, this.tokenAddresses.WETH];
-      txData = await router.swapExactTokensForETH.populateTransaction(
-        amountIn,
-        minAmountOut,
-        path,
-        this.wallet.address,
-        deadline
-      );
+      const swapMethod = router['swapExactTokensForETH'];
+      if (swapMethod) {
+        txData = await swapMethod.populateTransaction(
+          amountIn,
+          minAmountOut,
+          path,
+          this.wallet.address,
+          deadline
+        );
+      }
     } else {
       // Token to Token swap
       const path = [copyTrade.tokenIn, this.tokenAddresses.WETH, copyTrade.tokenOut];
-      txData = await router.swapExactTokensForTokens.populateTransaction(
-        amountIn,
-        minAmountOut,
-        path,
-        this.wallet.address,
-        deadline
-      );
+      const swapMethod = router['swapExactTokensForTokens'];
+      if (swapMethod) {
+        txData = await swapMethod.populateTransaction(
+          amountIn,
+          minAmountOut,
+          path,
+          this.wallet.address,
+          deadline
+        );
+      }
+    }
+
+    if (!txData) {
+      throw new Error('Failed to build swap transaction data');
     }
 
     return {

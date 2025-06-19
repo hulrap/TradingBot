@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@trading-bot/ui';
-import { useAuth } from '@/context/AuthContext';
+import { useAuth } from '../../context/AuthContext';
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
@@ -62,7 +62,7 @@ export default function LoginPage() {
             />
           </div>
           {error && <p className="text-red-500 text-sm text-center mb-4">{error}</p>}
-          <button type="submit" className="bg-blue-500 text-white px-4 py-2 rounded-md w-full">Login</button>
+          <Button type="submit" className="w-full">Login</Button>
         </form>
       </div>
     </div>

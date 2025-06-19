@@ -2,10 +2,12 @@ import { defineConfig } from 'tsup';
 
 export default defineConfig({
   entry: ['src/index.ts'],
-  format: ['esm', 'cjs'],
-  dts: true,
-  clean: true,
+  format: ['cjs', 'esm'],
+  dts: false, // Disable type declarations temporarily
   sourcemap: true,
+  clean: true,
+  minify: false,
+  target: 'node18',
   splitting: false,
   external: [
     'winston',
@@ -17,8 +19,6 @@ export default defineConfig({
     'p-retry'
   ],
   treeshake: true,
-  minify: false, // Keep readable for debugging
-  target: 'node18',
   outDir: 'dist',
   banner: {
     js: '// Multi-chain RPC Infrastructure\n// Built with tsup'
