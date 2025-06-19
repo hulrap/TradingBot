@@ -48,6 +48,17 @@ export {
   type AggregatorStats
 } from './dex-aggregator';
 
+export {
+  PriceOracle,
+  priceOracle,
+  getTokenPrice,
+  convertToUSD,
+  type PriceData,
+  type PriceSource,
+  type PriceFeedConfig,
+  type TokenMapping
+} from './price-oracle';
+
 // Factory function for creating chain clients
 export function createChainClient(chain: string, privateKey: string, rpcUrl: string) {
   // Create logger
