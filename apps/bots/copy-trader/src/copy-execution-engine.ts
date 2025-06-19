@@ -52,10 +52,78 @@ export interface RiskMetrics {
   sharpeRatio: number;
 }
 
+// Simple price service for copy execution
+class SimplePriceService {
+  private cache = new Map<string, { price: number; timestamp: number }>();
+  private readonly CACHE_TTL = 30000; // 30 seconds
+
+  async getTokenPrice(symbol: string): Promise<number> {
+    const cacheKey = symbol.toLowerCase();
+    const cached = this.cache.get(cacheKey);
+    
+    if (cached && Date.now() - cached.timestamp < this.CACHE_TTL) {
+      return cached.price;
+    }
+
+    try {
+      // Try CoinGecko first
+      const price = await this.fetchFromCoinGecko(symbol);
+      if (price > 0) {
+        this.cache.set(cacheKey, { price, timestamp: Date.now() });
+        return price;
+      }
+    } catch (error) {
+      console.warn(`Failed to fetch price for ${symbol}:`, error);
+    }
+
+    // Fallback to conservative estimate
+    return this.getFallbackPrice(symbol);
+  }
+
+  private async fetchFromCoinGecko(symbol: string): Promise<number> {
+    const coinGeckoIds: { [symbol: string]: string } = {
+      'ethereum': 'ethereum',
+      'btc': 'bitcoin',
+      'eth': 'ethereum',
+      'weth': 'ethereum',
+      'usdc': 'usd-coin',
+      'usdt': 'tether',
+      'dai': 'dai'
+    };
+
+    const coinId = coinGeckoIds[symbol.toLowerCase()];
+    if (!coinId) throw new Error(`Unknown symbol: ${symbol}`);
+
+    const response = await fetch(
+      `https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd`
+    );
+    
+    if (!response.ok) throw new Error('CoinGecko API error');
+    
+    const data: any = await response.json();
+    return data[coinId]?.usd || 0;
+  }
+
+  private getFallbackPrice(symbol: string): number {
+    const fallbackPrices: { [symbol: string]: number } = {
+      'ethereum': 2500,
+      'eth': 2500,
+      'weth': 2500,
+      'btc': 45000,
+      'usdc': 1,
+      'usdt': 1,
+      'dai': 1
+    };
+
+    return fallbackPrices[symbol.toLowerCase()] || 1;
+  }
+}
+
 export class CopyExecutionEngine extends EventEmitter {
   private config: CopyConfig;
   private provider: ethers.JsonRpcProvider;
   private wallet: ethers.Wallet;
+  private priceService: SimplePriceService;
   private copyTrades: CopyTrade[] = [];
   private isActive = false;
   private riskMetrics: RiskMetrics;
@@ -81,6 +149,7 @@ export class CopyExecutionEngine extends EventEmitter {
     this.config = config;
     this.provider = provider;
     this.wallet = new ethers.Wallet(privateKey, provider);
+    this.priceService = new SimplePriceService();
     this.riskMetrics = this.initializeRiskMetrics();
   }
 
@@ -154,7 +223,7 @@ export class CopyExecutionEngine extends EventEmitter {
     this.emit('copyTradeCreated', copyTrade);
 
     // Apply filters
-    if (this.config.enableFiltering && !this.shouldCopyTrade(copyTrade)) {
+    if (this.config.enableFiltering && !await this.shouldCopyTrade(copyTrade)) {
       copyTrade.status = 'cancelled';
       copyTrade.reason = 'Filtered out by copy rules';
       this.emit('copyTradeCancelled', copyTrade);
@@ -181,7 +250,7 @@ export class CopyExecutionEngine extends EventEmitter {
     await this.executeCopyTrade(copyTrade);
   }
 
-  private shouldCopyTrade(copyTrade: CopyTrade): boolean {
+  private async shouldCopyTrade(copyTrade: CopyTrade): Promise<boolean> {
     // Check if token is in follow list (if specified)
     if (this.config.followTokens.length > 0) {
       const hasFollowedToken = this.config.followTokens.some(token => 
@@ -200,16 +269,22 @@ export class CopyExecutionEngine extends EventEmitter {
       if (hasExcludedToken) return false;
     }
 
-    // Check trade size limits
-    const originalAmountETH = this.convertToETH(copyTrade.originalAmountIn, copyTrade.tokenIn);
-    const minSize = parseFloat(this.config.minTradeSize);
-    const maxSize = parseFloat(this.config.maxTradeSize);
+    // Check trade size limits with real-time price conversion
+    try {
+      const originalAmountETH = await this.convertToETH(copyTrade.originalAmountIn, copyTrade.tokenIn);
+      const minSize = parseFloat(this.config.minTradeSize);
+      const maxSize = parseFloat(this.config.maxTradeSize);
 
-    if (originalAmountETH < minSize || originalAmountETH > maxSize) {
-      return false;
+      if (originalAmountETH < minSize || originalAmountETH > maxSize) {
+        console.log(`Trade filtered: ${originalAmountETH.toFixed(6)} ETH not in range [${minSize}, ${maxSize}]`);
+        return false;
+      }
+
+      return true;
+    } catch (error) {
+      console.error('Error checking trade size limits:', error);
+      return false; // Reject trades if we can't properly evaluate them
     }
-
-    return true;
   }
 
   private calculateCopyAmount(originalAmount: string): string | null {
@@ -398,18 +473,55 @@ export class CopyExecutionEngine extends EventEmitter {
     }
   }
 
-  private convertToETH(amount: string, token: string): number {
-    // Simplified conversion - in production, you'd use real-time price feeds
-    const priceMap: { [key: string]: number } = {
-      'ETH': 1,
-      [this.tokenAddresses.WETH]: 1,
-      [this.tokenAddresses.USDC]: 1/2000, // Assuming ETH = $2000
-      [this.tokenAddresses.USDT]: 1/2000,
-      [this.tokenAddresses.DAI]: 1/2000
+  private async convertToETH(amount: string, token: string): Promise<number> {
+    try {
+      // Handle ETH/WETH directly
+      if (token === 'ETH' || token.toLowerCase() === this.tokenAddresses.WETH.toLowerCase()) {
+        return parseFloat(amount);
+      }
+
+      // Map token addresses to symbols for price service
+      const tokenSymbol = this.getTokenSymbol(token);
+      if (!tokenSymbol) {
+        console.warn(`Unknown token address: ${token}, using fallback price`);
+        return parseFloat(amount) * 0.0005; // Conservative fallback: 1 token = $1
+      }
+
+      // Get real-time price from service
+      const tokenPrice = await this.priceService.getTokenPrice(tokenSymbol);
+      const ethPrice = await this.priceService.getTokenPrice('ethereum');
+
+      if (tokenPrice <= 0 || ethPrice <= 0) {
+        console.warn(`Invalid prices for ${tokenSymbol} or ETH, using fallback`);
+        return parseFloat(amount) * 0.0005; // Conservative fallback
+      }
+
+      // Convert: Token amount * (Token price in USD / ETH price in USD)
+      const tokenValueInETH = (tokenPrice / ethPrice) * parseFloat(amount);
+      
+      // Log the conversion for audit trail
+      console.log(`Price conversion: ${amount} ${tokenSymbol} = ${tokenValueInETH.toFixed(6)} ETH`);
+      console.log(`  ${tokenSymbol} price: $${tokenPrice.toFixed(2)}`);
+      console.log(`  ETH price: $${ethPrice.toFixed(2)}`);
+      
+      return tokenValueInETH;
+
+    } catch (error) {
+      console.error('Error converting token amount to ETH:', error);
+      // Return conservative fallback to prevent trades with wrong amounts
+      return parseFloat(amount) * 0.0005;
+    }
+  }
+
+  private getTokenSymbol(tokenAddress: string): string | null {
+    const addressSymbolMap: { [key: string]: string } = {
+      [this.tokenAddresses.WETH.toLowerCase()]: 'ethereum',
+      [this.tokenAddresses.USDC.toLowerCase()]: 'usdc',
+      [this.tokenAddresses.USDT.toLowerCase()]: 'usdt',
+      [this.tokenAddresses.DAI.toLowerCase()]: 'dai'
     };
 
-    const price = priceMap[token] || 1/2000; // Default price
-    return parseFloat(amount) * price;
+    return addressSymbolMap[tokenAddress.toLowerCase()] || null;
   }
 
   // Public methods
