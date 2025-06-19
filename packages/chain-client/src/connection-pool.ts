@@ -2,48 +2,90 @@ import { EventEmitter } from 'events';
 import winston from 'winston';
 import { RPCManager, RPCRequest, RPCResponse } from './rpc-manager';
 
-export interface ConnectionPoolConfig {
-  maxConcurrentConnections: number;
-  connectionTimeoutMs: number;
-  idleTimeoutMs: number;
-  retryAttempts: number;
-  retryDelayMs: number;
-  healthCheckIntervalMs: number;
-  loadBalancingStrategy: 'round-robin' | 'least-connections' | 'weighted' | 'latency-based';
-}
-
-export interface PooledConnection {
+export interface PoolConnection {
   id: string;
-  chain: string;
-  provider: string;
+  providerId: string;
   isActive: boolean;
-  isHealthy: boolean;
-  createdAt: number;
+  isBusy: boolean;
   lastUsed: number;
+  createdAt: number;
   requestCount: number;
-  activeRequests: number;
-  latency: number;
   errorCount: number;
+  averageResponseTime: number;
+  consecutiveErrors: number;
+  maxConsecutiveErrors: number;
+  healthScore: number; // 0-100
 }
 
-export interface LoadBalancingStats {
+export interface LoadBalancer {
+  strategy: 'round-robin' | 'least-connections' | 'weighted' | 'latency-based';
+  weights?: Map<string, number>;
+  currentIndex?: number;
+}
+
+export interface ConnectionPoolConfig {
+  maxConnections: number;
+  minConnections: number;
+  maxConnectionAge: number; // milliseconds
+  idleTimeout: number; // milliseconds
+  healthCheckInterval: number; // milliseconds
+  maxConsecutiveErrors: number;
+  connectionTimeout: number; // milliseconds
+  retryDelay: number; // milliseconds
+  scaleUpThreshold: number; // percentage of busy connections
+  scaleDownThreshold: number; // percentage of idle connections
+  loadBalancer: LoadBalancer;
+}
+
+export interface PoolMetrics {
   totalConnections: number;
   activeConnections: number;
+  busyConnections: number;
   idleConnections: number;
   totalRequests: number;
-  averageLatency: number;
-  errorRate: number;
-  connectionUtilization: number;
+  successfulRequests: number;
+  failedRequests: number;
+  averageResponseTime: number;
+  poolUtilization: number; // percentage
+  connectionsCreated: number;
+  connectionsDestroyed: number;
+  healthChecksPassed: number;
+  healthChecksFailed: number;
 }
 
 export class ConnectionPool extends EventEmitter {
   private logger: winston.Logger;
   private rpcManager: RPCManager;
   private config: ConnectionPoolConfig;
-  private connections: Map<string, PooledConnection> = new Map();
-  private requestQueues: Map<string, RPCRequest[]> = new Map(); // chain -> queue
-  private roundRobinCounters: Map<string, number> = new Map(); // chain -> counter
-  private stats: LoadBalancingStats;
+  private connections: Map<string, PoolConnection> = new Map();
+  private providerPools: Map<string, Set<string>> = new Map();
+  private requestQueue: Array<{
+    resolve: (connection: PoolConnection) => void;
+    reject: (error: Error) => void;
+    timeout: NodeJS.Timeout;
+    priority: number;
+    timestamp: number;
+  }> = [];
+  
+  private metrics: PoolMetrics = {
+    totalConnections: 0,
+    activeConnections: 0,
+    busyConnections: 0,
+    idleConnections: 0,
+    totalRequests: 0,
+    successfulRequests: 0,
+    failedRequests: 0,
+    averageResponseTime: 0,
+    poolUtilization: 0,
+    connectionsCreated: 0,
+    connectionsDestroyed: 0,
+    healthChecksPassed: 0,
+    healthChecksFailed: 0
+  };
+
+  private healthCheckInterval?: NodeJS.Timeout;
+  private scaleTimer?: NodeJS.Timeout;
+  private cleanupTimer?: NodeJS.Timeout;
 
   constructor(
     rpcManager: RPCManager,
@@ -55,551 +97,586 @@ export class ConnectionPool extends EventEmitter {
     this.config = config;
     this.logger = logger;
     
-    this.stats = {
-      totalConnections: 0,
-      activeConnections: 0,
-      idleConnections: 0,
-      totalRequests: 0,
-      averageLatency: 0,
-      errorRate: 0,
-      connectionUtilization: 0
-    };
-
-    this.initializeConnectionPools();
     this.startHealthChecks();
-    this.startIdleConnectionCleanup();
-    this.startStatsCollection();
+    this.startAutoScaling();
+    this.startCleanupTimer();
   }
 
-  private initializeConnectionPools(): void {
-    // Initialize connection pools for each chain
-    const chains = ['ethereum', 'bsc', 'polygon', 'arbitrum', 'optimism', 'solana'];
-    
-    for (const chain of chains) {
-      this.requestQueues.set(chain, []);
-      this.roundRobinCounters.set(chain, 0);
-      
-      // Create initial connections
-      this.createInitialConnections(chain);
-    }
-
-    this.logger.info('Connection pools initialized for all chains', {
-      chains: chains.length,
-      maxConcurrentPerChain: this.config.maxConcurrentConnections
-    });
-  }
-
-  private async createInitialConnections(chain: string): Promise<void> {
-    const initialConnectionCount = Math.min(3, this.config.maxConcurrentConnections);
-    
-    for (let i = 0; i < initialConnectionCount; i++) {
-      try {
-        await this.createConnection(chain);
-      } catch (error: any) {
-        this.logger.warn('Failed to create initial connection', {
-          chain,
-          attempt: i + 1,
-          error: error.message
-        });
-      }
-    }
-  }
-
-  private async createConnection(chain: string, preferredProvider?: string): Promise<PooledConnection | null> {
-    try {
-      // Get optimal provider for this chain
-      const providerId = preferredProvider || await this.rpcManager.getOptimalProvider(chain, 'eth_blockNumber');
-      
-      if (!providerId) {
-        throw new Error(`No available providers for chain: ${chain}`);
-      }
-
-      const connectionId = `${chain}-${providerId}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-      
-      const connection: PooledConnection = {
-        id: connectionId,
-        chain,
-        provider: providerId,
-        isActive: true,
-        isHealthy: true,
-        createdAt: Date.now(),
-        lastUsed: Date.now(),
-        requestCount: 0,
-        activeRequests: 0,
-        latency: 0,
-        errorCount: 0
-      };
-
-      this.connections.set(connectionId, connection);
-      this.updateStats();
-
-      this.logger.debug('Connection created', {
-        connectionId,
-        chain,
-        provider: providerId,
-        totalConnections: this.connections.size
-      });
-
-      this.emit('connectionCreated', connection);
-      return connection;
-    } catch (error: any) {
-      this.logger.error('Failed to create connection', {
-        chain,
-        preferredProvider,
-        error: error.message
-      });
-      return null;
-    }
-  }
-
-  // Enhanced request routing with load balancing
-  async executeRequest(request: RPCRequest): Promise<RPCResponse> {
+  // Connection Management
+  public async getConnection(providerId: string, priority: number = 1): Promise<PoolConnection> {
     const startTime = Date.now();
     
     try {
-      // Select optimal connection based on load balancing strategy
-      const connection = await this.selectConnection(request.chain, request.priority);
-      
-      if (!connection) {
-        throw new Error(`No available connections for chain: ${request.chain}`);
+      // Try to get an existing idle connection
+      const existingConnection = this.getIdleConnection(providerId);
+      if (existingConnection) {
+        this.markConnectionBusy(existingConnection);
+        this.updateMetrics('connectionAcquired', Date.now() - startTime);
+        return existingConnection;
       }
 
-      // Update connection metrics
-      connection.activeRequests++;
-      connection.lastUsed = Date.now();
-      
-      // Execute request through RPC manager
-      const response = await this.rpcManager.makeRequest({
-        ...request,
-        // Force use of specific provider
-        provider: connection.provider
-      } as any);
-
-      // Update connection metrics on success
-      const latency = Date.now() - startTime;
-      this.updateConnectionMetrics(connection, latency, true);
-      
-      return response;
-    } catch (error: any) {
-      // Find and update connection metrics on failure
-      const connection = Array.from(this.connections.values())
-        .find(c => c.chain === request.chain && c.activeRequests > 0);
-      
-      if (connection) {
-        const latency = Date.now() - startTime;
-        this.updateConnectionMetrics(connection, latency, false);
+      // Check if we can create a new connection
+      if (this.canCreateNewConnection(providerId)) {
+        const newConnection = await this.createConnection(providerId);
+        this.markConnectionBusy(newConnection);
+        this.updateMetrics('connectionCreated', Date.now() - startTime);
+        return newConnection;
       }
 
+      // Queue the request if pool is full
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          const index = this.requestQueue.findIndex(item => item.resolve === resolve);
+          if (index !== -1) {
+            this.requestQueue.splice(index, 1);
+          }
+          reject(new Error(`Connection request timeout after ${this.config.connectionTimeout}ms`));
+        }, this.config.connectionTimeout);
+
+        this.requestQueue.push({
+          resolve,
+          reject,
+          timeout,
+          priority,
+          timestamp: Date.now()
+        });
+
+        // Sort queue by priority (higher priority first) and timestamp
+        this.requestQueue.sort((a, b) => {
+          if (a.priority !== b.priority) {
+            return b.priority - a.priority;
+          }
+          return a.timestamp - b.timestamp;
+        });
+      });
+
+    } catch (error) {
+      this.updateMetrics('connectionError', Date.now() - startTime);
       throw error;
     }
   }
 
-  // Smart connection selection based on strategy
-  private async selectConnection(chain: string, priority: string = 'medium'): Promise<PooledConnection | null> {
-    let availableConnections = Array.from(this.connections.values())
-      .filter(conn => 
-        conn.chain === chain && 
-        conn.isActive && 
-        conn.isHealthy &&
-        conn.activeRequests < this.getMaxRequestsPerConnection()
-      );
-
-    // If no connections available, try to create a new one
-    if (availableConnections.length === 0) {
-      const newConnection = await this.createConnection(chain);
-      if (newConnection) {
-        availableConnections = [newConnection];
-      } else {
-        // As last resort, use any available connection even if overloaded
-        availableConnections = Array.from(this.connections.values())
-          .filter(conn => conn.chain === chain && conn.isActive && conn.isHealthy);
-      }
+  public releaseConnection(connectionId: string): void {
+    const connection = this.connections.get(connectionId);
+    if (!connection) {
+      throw new Error(`Connection ${connectionId} not found`);
     }
 
-    if (availableConnections.length === 0) {
-      return null;
+    this.markConnectionIdle(connection);
+    this.processQueue();
+    this.updateMetrics('connectionReleased');
+  }
+
+  public async destroyConnection(connectionId: string): Promise<void> {
+    const connection = this.connections.get(connectionId);
+    if (!connection) return;
+
+    // Remove from pools
+    const providerPool = this.providerPools.get(connection.providerId);
+    if (providerPool) {
+      providerPool.delete(connectionId);
     }
 
-    // Apply load balancing strategy
-    switch (this.config.loadBalancingStrategy) {
+    // Remove from connections
+    this.connections.delete(connectionId);
+
+    // Update metrics
+    this.metrics.connectionsDestroyed++;
+    this.updateConnectionCounts();
+
+    this.emit('connectionDestroyed', connection);
+
+    // Process any queued requests
+    this.processQueue();
+  }
+
+  // Load Balancing
+  public selectConnectionByStrategy(providerId: string): PoolConnection | null {
+    const providerPool = this.providerPools.get(providerId);
+    if (!providerPool || providerPool.size === 0) return null;
+
+    const availableConnections = Array.from(providerPool)
+      .map(id => this.connections.get(id)!)
+      .filter(conn => conn.isActive && !conn.isBusy && conn.consecutiveErrors < conn.maxConsecutiveErrors);
+
+    if (availableConnections.length === 0) return null;
+
+    switch (this.config.loadBalancer.strategy) {
       case 'round-robin':
-        return this.selectRoundRobin(availableConnections, chain);
+        return this.roundRobinSelection(availableConnections);
       
       case 'least-connections':
-        return this.selectLeastConnections(availableConnections);
+        return this.leastConnectionsSelection(availableConnections);
       
       case 'weighted':
-        return this.selectWeighted(availableConnections, priority);
+        return this.weightedSelection(availableConnections);
       
       case 'latency-based':
-        return this.selectLatencyBased(availableConnections);
+        return this.latencyBasedSelection(availableConnections);
       
       default:
         return availableConnections[0];
     }
   }
 
-  private selectRoundRobin(connections: PooledConnection[], chain: string): PooledConnection {
-    const counter = this.roundRobinCounters.get(chain) || 0;
-    const selected = connections[counter % connections.length];
-    this.roundRobinCounters.set(chain, counter + 1);
-    return selected;
+  private roundRobinSelection(connections: PoolConnection[]): PoolConnection {
+    const currentIndex = this.config.loadBalancer.currentIndex || 0;
+    const selectedConnection = connections[currentIndex % connections.length];
+    this.config.loadBalancer.currentIndex = (currentIndex + 1) % connections.length;
+    return selectedConnection;
   }
 
-  private selectLeastConnections(connections: PooledConnection[]): PooledConnection {
-    return connections.reduce((best, current) => 
-      current.activeRequests < best.activeRequests ? current : best
+  private leastConnectionsSelection(connections: PoolConnection[]): PoolConnection {
+    return connections.reduce((least, current) => 
+      current.requestCount < least.requestCount ? current : least
     );
   }
 
-  private selectWeighted(connections: PooledConnection[], priority: string): PooledConnection {
-    // Weight based on provider quality and current load
-    const weightedConnections = connections.map(conn => {
-      let weight = 100; // Base weight
-      
-      // Adjust for active requests (less load = higher weight)
-      weight -= conn.activeRequests * 20;
-      
-      // Adjust for latency (lower latency = higher weight)
-      weight -= Math.min(conn.latency / 10, 50);
-      
-      // Adjust for error rate
-      const errorRate = conn.errorCount / Math.max(conn.requestCount, 1);
-      weight -= errorRate * 100;
-      
-      // Bonus for premium providers if high priority
-      if (priority === 'critical' || priority === 'high') {
-        const providerStatus = this.rpcManager.getProviderStatus(conn.chain)
-          .find(p => p.provider.id === conn.provider);
-        if (providerStatus?.provider.tier === 'premium') {
-          weight += 30;
-        }
-      }
-      
-      return { connection: conn, weight: Math.max(weight, 1) };
-    });
+  private weightedSelection(connections: PoolConnection[]): PoolConnection {
+    const weights = this.config.loadBalancer.weights || new Map();
+    const weightedConnections = connections.map(conn => ({
+      connection: conn,
+      weight: weights.get(conn.providerId) || 1
+    }));
 
-    // Select based on weighted random
     const totalWeight = weightedConnections.reduce((sum, item) => sum + item.weight, 0);
     let random = Math.random() * totalWeight;
-    
+
     for (const item of weightedConnections) {
       random -= item.weight;
       if (random <= 0) {
         return item.connection;
       }
     }
-    
-    return weightedConnections[0].connection;
+
+    return connections[0];
   }
 
-  private selectLatencyBased(connections: PooledConnection[]): PooledConnection {
-    // Sort by latency (ascending) and select from top performers
-    const sortedByLatency = connections.sort((a, b) => a.latency - b.latency);
-    
-    // Select from top 3 performers with some randomization to avoid overloading single connection
-    const topPerformers = sortedByLatency.slice(0, Math.min(3, sortedByLatency.length));
-    return topPerformers[Math.floor(Math.random() * topPerformers.length)];
-  }
-
-  private updateConnectionMetrics(connection: PooledConnection, latency: number, success: boolean): void {
-    connection.activeRequests = Math.max(0, connection.activeRequests - 1);
-    connection.requestCount++;
-    
-    // Update latency with exponential moving average
-    connection.latency = connection.latency === 0 
-      ? latency 
-      : (connection.latency * 0.8) + (latency * 0.2);
-    
-    if (!success) {
-      connection.errorCount++;
-      
-      // Mark as unhealthy if error rate is too high
-      const errorRate = connection.errorCount / connection.requestCount;
-      if (errorRate > 0.1 && connection.requestCount > 10) {
-        connection.isHealthy = false;
-        this.logger.warn('Connection marked as unhealthy due to high error rate', {
-          connectionId: connection.id,
-          errorRate: errorRate.toFixed(3),
-          errorCount: connection.errorCount,
-          requestCount: connection.requestCount
-        });
+  private latencyBasedSelection(connections: PoolConnection[]): PoolConnection {
+    // Sort by average response time (lower is better) and health score (higher is better)
+    return connections.sort((a, b) => {
+      const latencyDiff = a.averageResponseTime - b.averageResponseTime;
+      if (Math.abs(latencyDiff) > 10) { // 10ms threshold
+        return latencyDiff;
       }
-    }
-
-    this.updateStats();
+      return b.healthScore - a.healthScore;
+    })[0];
   }
 
-  private getMaxRequestsPerConnection(): number {
-    // Dynamic limit based on total pool size and configuration
-    const totalConnections = this.connections.size;
-    const baseLimit = 10;
+  // Connection Creation and Management
+  private async createConnection(providerId: string): Promise<PoolConnection> {
+    const connectionId = `conn_${providerId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     
-    // Allow more concurrent requests if we have fewer connections
-    return totalConnections < 5 ? baseLimit * 2 : baseLimit;
+    const connection: PoolConnection = {
+      id: connectionId,
+      providerId,
+      isActive: true,
+      isBusy: false,
+      lastUsed: Date.now(),
+      createdAt: Date.now(),
+      requestCount: 0,
+      errorCount: 0,
+      averageResponseTime: 0,
+      consecutiveErrors: 0,
+      maxConsecutiveErrors: this.config.maxConsecutiveErrors,
+      healthScore: 100
+    };
+
+    this.connections.set(connectionId, connection);
+
+    // Add to provider pool
+    if (!this.providerPools.has(providerId)) {
+      this.providerPools.set(providerId, new Set());
+    }
+    this.providerPools.get(providerId)!.add(connectionId);
+
+    // Update metrics
+    this.metrics.connectionsCreated++;
+    this.updateConnectionCounts();
+
+    this.emit('connectionCreated', connection);
+
+    return connection;
   }
 
-  // Health check system for connections
-  private startHealthChecks(): void {
-    const healthCheck = async () => {
-      const unhealthyConnections: string[] = [];
+  private getIdleConnection(providerId: string): PoolConnection | null {
+    return this.selectConnectionByStrategy(providerId);
+  }
+
+  private canCreateNewConnection(providerId: string): boolean {
+    const currentConnections = this.connections.size;
+    const providerConnections = this.providerPools.get(providerId)?.size || 0;
+    
+    return currentConnections < this.config.maxConnections && 
+           providerConnections < this.config.maxConnections;
+  }
+
+  private markConnectionBusy(connection: PoolConnection): void {
+    connection.isBusy = true;
+    connection.lastUsed = Date.now();
+    connection.requestCount++;
+    this.updateConnectionCounts();
+  }
+
+  private markConnectionIdle(connection: PoolConnection): void {
+    connection.isBusy = false;
+    this.updateConnectionCounts();
+  }
+
+  private processQueue(): void {
+    while (this.requestQueue.length > 0) {
+      const request = this.requestQueue[0];
       
-      for (const [connectionId, connection] of this.connections.entries()) {
-        try {
-          // Test connection with a simple request
-          const testRequest: RPCRequest = {
-            id: `health-${Date.now()}`,
-            method: connection.chain === 'solana' ? 'getHealth' : 'eth_blockNumber',
-            params: [],
-            chain: connection.chain,
-            priority: 'low',
-            timestamp: Date.now()
-          };
+      // Find any available connection (round-robin across providers)
+      let availableConnection: PoolConnection | null = null;
+      
+      for (const [providerId] of this.providerPools) {
+        availableConnection = this.getIdleConnection(providerId);
+        if (availableConnection) break;
+      }
 
-          const startTime = Date.now();
-          await this.rpcManager.makeRequest(testRequest);
-          const latency = Date.now() - startTime;
-
-          // Update health metrics
-          connection.isHealthy = true;
-          connection.latency = (connection.latency * 0.9) + (latency * 0.1);
-
-        } catch (error: any) {
-          connection.errorCount++;
-          
-          // Mark as unhealthy after multiple failures
-          if (connection.errorCount > 5) {
-            connection.isHealthy = false;
-            unhealthyConnections.push(connectionId);
-            
-            this.logger.warn('Connection health check failed', {
-              connectionId: connection.id,
-              chain: connection.chain,
-              provider: connection.provider,
-              errorCount: connection.errorCount
-            });
+      if (!availableConnection) {
+        // Try to create a new connection for any provider
+        let newConnection: PoolConnection | null = null;
+        
+        for (const [providerId] of this.providerPools) {
+          if (this.canCreateNewConnection(providerId)) {
+            try {
+              newConnection = await this.createConnection(providerId);
+              break;
+            } catch (error) {
+              continue;
+            }
           }
         }
+
+        if (!newConnection) {
+          break; // No connections available, stop processing queue
+        }
+
+        availableConnection = newConnection;
       }
 
-      // Remove persistently unhealthy connections
-      for (const connectionId of unhealthyConnections) {
-        this.removeConnection(connectionId);
-      }
-
-      this.updateStats();
-    };
-
-    // Run health checks every interval
-    setInterval(healthCheck, this.config.healthCheckIntervalMs);
-    
-    // Initial health check after 10 seconds
-    setTimeout(healthCheck, 10000);
+      // Remove request from queue and fulfill it
+      this.requestQueue.shift();
+      clearTimeout(request.timeout);
+      
+      this.markConnectionBusy(availableConnection);
+      request.resolve(availableConnection);
+    }
   }
 
-  private startIdleConnectionCleanup(): void {
-    const cleanup = () => {
-      const now = Date.now();
-      const connectionsToRemove: string[] = [];
+  // Health Monitoring
+  private startHealthChecks(): void {
+    this.healthCheckInterval = setInterval(async () => {
+      await this.performHealthChecks();
+    }, this.config.healthCheckInterval);
+  }
 
-      for (const [connectionId, connection] of this.connections.entries()) {
-        // Remove idle connections
-        const idleTime = now - connection.lastUsed;
-        const isIdle = idleTime > this.config.idleTimeoutMs;
-        const hasMinConnections = this.getConnectionCountForChain(connection.chain) > 2;
-
-        if (isIdle && hasMinConnections && connection.activeRequests === 0) {
-          connectionsToRemove.push(connectionId);
+  private async performHealthChecks(): Promise<void> {
+    const healthCheckPromises = Array.from(this.connections.values()).map(async connection => {
+      try {
+        const startTime = Date.now();
+        
+        // Simulate health check (in real implementation, this would be an actual request)
+        await this.simulateHealthCheck(connection);
+        
+        const responseTime = Date.now() - startTime;
+        
+        // Update connection health metrics
+        connection.averageResponseTime = (connection.averageResponseTime * 0.8) + (responseTime * 0.2);
+        connection.consecutiveErrors = 0;
+        connection.healthScore = Math.min(100, connection.healthScore + 10);
+        
+        this.metrics.healthChecksPassed++;
+        
+      } catch (error) {
+        connection.consecutiveErrors++;
+        connection.errorCount++;
+        connection.healthScore = Math.max(0, connection.healthScore - 20);
+        
+        this.metrics.healthChecksFailed++;
+        
+        // Deactivate connection if too many consecutive errors
+        if (connection.consecutiveErrors >= connection.maxConsecutiveErrors) {
+          connection.isActive = false;
+          this.emit('connectionUnhealthy', connection);
         }
       }
+    });
 
-      for (const connectionId of connectionsToRemove) {
-        this.removeConnection(connectionId);
-        this.logger.debug('Removed idle connection', { connectionId });
-      }
-    };
-
-    // Run cleanup every 5 minutes
-    setInterval(cleanup, 5 * 60 * 1000);
+    await Promise.allSettled(healthCheckPromises);
+    this.updateConnectionCounts();
   }
 
-  private removeConnection(connectionId: string): void {
-    const connection = this.connections.get(connectionId);
-    if (connection) {
-      this.connections.delete(connectionId);
-      this.emit('connectionRemoved', connection);
-      this.updateStats();
-    }
-  }
-
-  private getConnectionCountForChain(chain: string): number {
-    return Array.from(this.connections.values())
-      .filter(conn => conn.chain === chain && conn.isActive).length;
-  }
-
-  private updateStats(): void {
-    const allConnections = Array.from(this.connections.values());
-    
-    this.stats.totalConnections = allConnections.length;
-    this.stats.activeConnections = allConnections.filter(c => c.isActive && c.activeRequests > 0).length;
-    this.stats.idleConnections = allConnections.filter(c => c.isActive && c.activeRequests === 0).length;
-    
-    const totalRequests = allConnections.reduce((sum, c) => sum + c.requestCount, 0);
-    const totalErrors = allConnections.reduce((sum, c) => sum + c.errorCount, 0);
-    const totalLatency = allConnections.reduce((sum, c) => sum + (c.latency * c.requestCount), 0);
-    
-    this.stats.totalRequests = totalRequests;
-    this.stats.errorRate = totalRequests > 0 ? (totalErrors / totalRequests) * 100 : 0;
-    this.stats.averageLatency = totalRequests > 0 ? totalLatency / totalRequests : 0;
-    
-    const maxPossibleActiveRequests = allConnections.length * this.getMaxRequestsPerConnection();
-    const currentActiveRequests = allConnections.reduce((sum, c) => sum + c.activeRequests, 0);
-    this.stats.connectionUtilization = maxPossibleActiveRequests > 0 
-      ? (currentActiveRequests / maxPossibleActiveRequests) * 100 
-      : 0;
-  }
-
-  private startStatsCollection(): void {
-    // Log detailed stats every 10 minutes
-    setInterval(() => {
-      const chainStats = this.getChainStats();
-      
-      this.logger.info('Connection Pool Statistics', {
-        ...this.stats,
-        chainBreakdown: chainStats
-      });
-    }, 10 * 60 * 1000);
-  }
-
-  private getChainStats(): Record<string, any> {
-    const chainStats: Record<string, any> = {};
-    
-    for (const connection of this.connections.values()) {
-      if (!chainStats[connection.chain]) {
-        chainStats[connection.chain] = {
-          totalConnections: 0,
-          activeConnections: 0,
-          healthyConnections: 0,
-          totalRequests: 0,
-          averageLatency: 0,
-          errorRate: 0
-        };
-      }
-      
-      const stats = chainStats[connection.chain];
-      stats.totalConnections++;
-      
-      if (connection.activeRequests > 0) stats.activeConnections++;
-      if (connection.isHealthy) stats.healthyConnections++;
-      
-      stats.totalRequests += connection.requestCount;
-      stats.averageLatency += connection.latency;
-      stats.errorRate += connection.errorCount;
-    }
-    
-    // Calculate averages
-    for (const chainStat of Object.values(chainStats) as any[]) {
-      if (chainStat.totalConnections > 0) {
-        chainStat.averageLatency = chainStat.averageLatency / chainStat.totalConnections;
-        chainStat.errorRate = chainStat.totalRequests > 0 
-          ? (chainStat.errorRate / chainStat.totalRequests) * 100 
-          : 0;
-      }
-    }
-    
-    return chainStats;
-  }
-
-  // Public API methods
-  getStats(): LoadBalancingStats {
-    return { ...this.stats };
-  }
-
-  getConnectionStats(): PooledConnection[] {
-    return Array.from(this.connections.values()).map(conn => ({ ...conn }));
-  }
-
-  getConnectionStatsForChain(chain: string): PooledConnection[] {
-    return Array.from(this.connections.values())
-      .filter(conn => conn.chain === chain)
-      .map(conn => ({ ...conn }));
-  }
-
-  async scaleConnections(chain: string, targetCount: number): Promise<void> {
-    const currentCount = this.getConnectionCountForChain(chain);
-    
-    if (targetCount > currentCount) {
-      // Scale up
-      const connectionsToAdd = Math.min(
-        targetCount - currentCount,
-        this.config.maxConcurrentConnections - currentCount
-      );
-      
-      for (let i = 0; i < connectionsToAdd; i++) {
-        await this.createConnection(chain);
-      }
-      
-      this.logger.info('Scaled up connections', {
-        chain,
-        previousCount: currentCount,
-        newCount: this.getConnectionCountForChain(chain),
-        targetCount
-      });
-    } else if (targetCount < currentCount) {
-      // Scale down
-      const connectionsToRemove = currentCount - targetCount;
-      const chainConnections = Array.from(this.connections.values())
-        .filter(conn => conn.chain === chain && conn.activeRequests === 0)
-        .sort((a, b) => a.lastUsed - b.lastUsed); // Remove least recently used first
-      
-      for (let i = 0; i < Math.min(connectionsToRemove, chainConnections.length); i++) {
-        this.removeConnection(chainConnections[i].id);
-      }
-      
-      this.logger.info('Scaled down connections', {
-        chain,
-        previousCount: currentCount,
-        newCount: this.getConnectionCountForChain(chain),
-        targetCount
-      });
-    }
-  }
-
-  async optimizeForLatency(chain: string): Promise<void> {
-    // Run latency optimization on the RPC manager
-    await this.rpcManager.optimizeForLatency(chain);
-    
-    // Recreate connections to use optimized providers
-    const chainConnections = Array.from(this.connections.values())
-      .filter(conn => conn.chain === chain);
-    
-    // Remove half of the connections and let them be recreated with better providers
-    const connectionsToRecreate = Math.floor(chainConnections.length / 2);
-    const oldestConnections = chainConnections
-      .sort((a, b) => a.createdAt - b.createdAt)
-      .slice(0, connectionsToRecreate);
-    
-    for (const connection of oldestConnections) {
-      this.removeConnection(connection.id);
-    }
-    
-    // Create new connections which will use the optimized providers
-    for (let i = 0; i < connectionsToRecreate; i++) {
-      await this.createConnection(chain);
-    }
-    
-    this.logger.info('Connection pool optimized for latency', {
-      chain,
-      recreatedConnections: connectionsToRecreate
+  private async simulateHealthCheck(connection: PoolConnection): Promise<void> {
+    // Simulate health check delay and potential failure
+    await new Promise((resolve, reject) => {
+      setTimeout(() => {
+        // 95% success rate for healthy connections
+        if (Math.random() < 0.95 || connection.healthScore > 80) {
+          resolve(undefined);
+        } else {
+          reject(new Error('Health check failed'));
+        }
+      }, Math.random() * 100 + 10); // 10-110ms delay
     });
   }
 
-  async close(): Promise<void> {
-    // Clear all connections
-    this.connections.clear();
-    this.requestQueues.clear();
-    this.roundRobinCounters.clear();
+  // Auto-scaling
+  private startAutoScaling(): void {
+    this.scaleTimer = setInterval(() => {
+      this.evaluateScaling();
+    }, 10000); // Check every 10 seconds
+  }
+
+  private evaluateScaling(): void {
+    const utilization = this.getUtilization();
     
-    this.logger.info('Connection pool closed');
+    // Scale up if utilization is high
+    if (utilization > this.config.scaleUpThreshold) {
+      this.scaleUp();
+    }
+    
+    // Scale down if utilization is low
+    else if (utilization < this.config.scaleDownThreshold) {
+      this.scaleDown();
+    }
+  }
+
+  private getUtilization(): number {
+    const totalConnections = this.connections.size;
+    if (totalConnections === 0) return 0;
+    
+    const busyConnections = Array.from(this.connections.values())
+      .filter(conn => conn.isBusy).length;
+    
+    return (busyConnections / totalConnections) * 100;
+  }
+
+  private async scaleUp(): Promise<void> {
+    // Find the provider with the highest load
+    let targetProviderId: string | null = null;
+    let maxLoad = 0;
+
+    for (const [providerId, connectionIds] of this.providerPools) {
+      const providerConnections = Array.from(connectionIds)
+        .map(id => this.connections.get(id)!)
+        .filter(conn => conn.isActive);
+      
+      const busyCount = providerConnections.filter(conn => conn.isBusy).length;
+      const load = busyCount / Math.max(providerConnections.length, 1);
+      
+      if (load > maxLoad && this.canCreateNewConnection(providerId)) {
+        maxLoad = load;
+        targetProviderId = providerId;
+      }
+    }
+
+    if (targetProviderId) {
+      try {
+        await this.createConnection(targetProviderId);
+        this.emit('scaledUp', { providerId: targetProviderId, totalConnections: this.connections.size });
+      } catch (error) {
+        this.emit('scaleUpFailed', { providerId: targetProviderId, error });
+      }
+    }
+  }
+
+  private scaleDown(): void {
+    // Find the oldest, idle connection to remove
+    const idleConnections = Array.from(this.connections.values())
+      .filter(conn => !conn.isBusy && conn.isActive)
+      .sort((a, b) => a.lastUsed - b.lastUsed);
+
+    if (idleConnections.length > this.config.minConnections) {
+      const connectionToRemove = idleConnections[0];
+      this.destroyConnection(connectionToRemove.id);
+      this.emit('scaledDown', { 
+        connectionId: connectionToRemove.id, 
+        totalConnections: this.connections.size 
+      });
+    }
+  }
+
+  // Cleanup
+  private startCleanupTimer(): void {
+    this.cleanupTimer = setInterval(() => {
+      this.cleanupExpiredConnections();
+    }, 60000); // Check every minute
+  }
+
+  private cleanupExpiredConnections(): void {
+    const now = Date.now();
+    const connectionsToRemove: string[] = [];
+
+    for (const connection of this.connections.values()) {
+      // Remove connections that are too old
+      if (now - connection.createdAt > this.config.maxConnectionAge) {
+        connectionsToRemove.push(connection.id);
+      }
+      
+      // Remove idle connections that have been idle too long
+      else if (!connection.isBusy && 
+               now - connection.lastUsed > this.config.idleTimeout) {
+        connectionsToRemove.push(connection.id);
+      }
+      
+      // Remove unhealthy connections
+      else if (!connection.isActive) {
+        connectionsToRemove.push(connection.id);
+      }
+    }
+
+    connectionsToRemove.forEach(id => this.destroyConnection(id));
+    
+    if (connectionsToRemove.length > 0) {
+      this.emit('cleanupCompleted', { removedConnections: connectionsToRemove.length });
+    }
+  }
+
+  // Metrics and Monitoring
+  private updateConnectionCounts(): void {
+    const connections = Array.from(this.connections.values());
+    
+    this.metrics.totalConnections = connections.length;
+    this.metrics.activeConnections = connections.filter(conn => conn.isActive).length;
+    this.metrics.busyConnections = connections.filter(conn => conn.isBusy).length;
+    this.metrics.idleConnections = connections.filter(conn => !conn.isBusy && conn.isActive).length;
+    this.metrics.poolUtilization = this.getUtilization();
+  }
+
+  private updateMetrics(event: string, duration?: number): void {
+    switch (event) {
+      case 'connectionAcquired':
+        this.metrics.totalRequests++;
+        this.metrics.successfulRequests++;
+        if (duration) {
+          this.metrics.averageResponseTime = 
+            (this.metrics.averageResponseTime * 0.9) + (duration * 0.1);
+        }
+        break;
+        
+      case 'connectionError':
+        this.metrics.totalRequests++;
+        this.metrics.failedRequests++;
+        break;
+        
+      case 'connectionCreated':
+      case 'connectionReleased':
+        // Metrics updated in other methods
+        break;
+    }
+  }
+
+  // Public API
+  public getMetrics(): PoolMetrics {
+    return { ...this.metrics };
+  }
+
+  public getConnectionStatus(): Array<{
+    connection: PoolConnection;
+    provider: string;
+    status: 'active' | 'busy' | 'idle' | 'unhealthy';
+  }> {
+    return Array.from(this.connections.values()).map(connection => ({
+      connection,
+      provider: connection.providerId,
+      status: !connection.isActive ? 'unhealthy' :
+              connection.isBusy ? 'busy' :
+              'idle'
+    }));
+  }
+
+  public getProviderStats(): Map<string, {
+    totalConnections: number;
+    activeConnections: number;
+    busyConnections: number;
+    averageResponseTime: number;
+    healthScore: number;
+  }> {
+    const stats = new Map();
+
+    for (const [providerId, connectionIds] of this.providerPools) {
+      const connections = Array.from(connectionIds)
+        .map(id => this.connections.get(id)!)
+        .filter(conn => conn);
+
+      const activeConnections = connections.filter(conn => conn.isActive);
+      const busyConnections = connections.filter(conn => conn.isBusy);
+      
+      const avgResponseTime = activeConnections.length > 0 ?
+        activeConnections.reduce((sum, conn) => sum + conn.averageResponseTime, 0) / activeConnections.length : 0;
+      
+      const avgHealthScore = activeConnections.length > 0 ?
+        activeConnections.reduce((sum, conn) => sum + conn.healthScore, 0) / activeConnections.length : 0;
+
+      stats.set(providerId, {
+        totalConnections: connections.length,
+        activeConnections: activeConnections.length,
+        busyConnections: busyConnections.length,
+        averageResponseTime: avgResponseTime,
+        healthScore: avgHealthScore
+      });
+    }
+
+    return stats;
+  }
+
+  public async warmup(providerId: string, targetConnections: number): Promise<void> {
+    const existingConnections = this.providerPools.get(providerId)?.size || 0;
+    const connectionsToCreate = Math.max(0, targetConnections - existingConnections);
+
+    const creationPromises = Array.from({ length: connectionsToCreate }, () =>
+      this.createConnection(providerId)
+    );
+
+    await Promise.allSettled(creationPromises);
+    this.emit('warmupCompleted', { providerId, connectionsCreated: connectionsToCreate });
+  }
+
+  public drain(): Promise<void> {
+    return new Promise((resolve) => {
+      // Stop accepting new requests
+      this.requestQueue.forEach(request => {
+        clearTimeout(request.timeout);
+        request.reject(new Error('Pool is draining'));
+      });
+      this.requestQueue.length = 0;
+
+      // Wait for all busy connections to become idle
+      const checkIdle = () => {
+        const busyConnections = Array.from(this.connections.values())
+          .filter(conn => conn.isBusy);
+
+        if (busyConnections.length === 0) {
+          resolve();
+        } else {
+          setTimeout(checkIdle, 100);
+        }
+      };
+
+      checkIdle();
+    });
+  }
+
+  public destroy(): void {
+    // Clear all timers
+    if (this.healthCheckInterval) clearInterval(this.healthCheckInterval);
+    if (this.scaleTimer) clearInterval(this.scaleTimer);
+    if (this.cleanupTimer) clearInterval(this.cleanupTimer);
+
+    // Reject any pending requests
+    this.requestQueue.forEach(request => {
+      clearTimeout(request.timeout);
+      request.reject(new Error('Pool destroyed'));
+    });
+
+    // Clear all data structures
+    this.connections.clear();
+    this.providerPools.clear();
+    this.requestQueue.length = 0;
+
+    this.removeAllListeners();
   }
 }

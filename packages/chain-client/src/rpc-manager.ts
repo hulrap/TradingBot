@@ -1,21 +1,22 @@
 import { EventEmitter } from 'events';
-import axios, { AxiosInstance, AxiosResponse } from 'axios';
+import axios, { AxiosInstance, AxiosRequestConfig } from 'axios';
 import WebSocket from 'ws';
 import winston from 'winston';
 
 export interface RPCProvider {
   id: string;
   name: string;
+  tier: 'premium' | 'standard' | 'fallback';
   url: string;
   wsUrl?: string;
-  tier: 'premium' | 'standard' | 'fallback';
-  chain: string;
   apiKey?: string;
   rateLimit: number; // requests per second
-  priority: number; // higher = better
-  maxRetries: number;
-  timeout: number;
-  cost: number; // cost per request in USD
+  maxConnections: number;
+  cost: number; // cost per 1000 requests
+  latency: number; // average latency in ms
+  successRate: number; // success rate percentage
+  isActive: boolean;
+  priority: number; // higher number = higher priority
 }
 
 export interface RPCEndpoint {
@@ -40,16 +41,20 @@ export interface RPCRequest {
   timeout?: number;
   retries?: number;
   timestamp: number;
+  retryCount: number;
+  maxRetries: number;
 }
 
 export interface RPCResponse {
   id: string;
   result?: any;
-  error?: any;
-  provider: string;
+  error?: {
+    code: number;
+    message: string;
+    data?: any;
+  };
   latency: number;
-  fromCache?: boolean;
-  timestamp: number;
+  provider: string;
 }
 
 export interface RPCMetrics {
@@ -67,6 +72,28 @@ export interface RPCMetrics {
   }>;
 }
 
+export interface ProviderMetrics {
+  totalRequests: number;
+  successfulRequests: number;
+  failedRequests: number;
+  averageLatency: number;
+  costToday: number;
+  blacklistedUntil?: number;
+  lastHealthCheck: number;
+  isHealthy: boolean;
+}
+
+export interface RPCManagerConfig {
+  providers: RPCProvider[];
+  maxRetries: number;
+  retryDelay: number;
+  healthCheckInterval: number;
+  blacklistDuration: number;
+  requestTimeout: number;
+  dailyBudget: number; // USD
+  costTrackingWindow: number; // hours
+}
+
 export class RPCManager extends EventEmitter {
   private logger: winston.Logger;
   private providers: Map<string, RPCProvider> = new Map();
@@ -75,221 +102,81 @@ export class RPCManager extends EventEmitter {
   private responseCache: Map<string, { response: any; expiry: number }> = new Map();
   private axiosInstances: Map<string, AxiosInstance> = new Map();
   private wsConnections: Map<string, WebSocket> = new Map();
-  private metrics: RPCMetrics;
+  private metrics: Map<string, ProviderMetrics> = new Map();
   private isProcessingQueue = false;
+  private healthCheckInterval?: NodeJS.Timeout;
+  private costTracker: Map<string, { timestamp: number; cost: number }[]> = new Map();
 
-  constructor(logger: winston.Logger) {
+  constructor(logger: winston.Logger, private config: RPCManagerConfig) {
     super();
     this.logger = logger;
-    this.metrics = {
-      totalRequests: 0,
-      successfulRequests: 0,
-      failedRequests: 0,
-      averageLatency: 0,
-      successRate: 0,
-      costToday: 0,
-      providerStats: new Map()
-    };
-
     this.setupDefaultProviders();
     this.startHealthChecks();
     this.startQueueProcessor();
     this.startMetricsCollection();
+    this.startCostTracking();
   }
 
   private setupDefaultProviders(): void {
-    // Ethereum Providers
-    this.addProvider({
-      id: 'quicknode-eth-premium',
-      name: 'QuickNode Ethereum Premium',
-      url: process.env.QUICKNODE_ETH_URL || 'https://YOUR_ENDPOINT.quiknode.pro/',
-      wsUrl: process.env.QUICKNODE_ETH_WS || 'wss://YOUR_ENDPOINT.quiknode.pro/',
-      tier: 'premium',
-      chain: 'ethereum',
-      apiKey: process.env.QUICKNODE_API_KEY,
-      rateLimit: 100,
-      priority: 100,
-      maxRetries: 3,
-      timeout: 5000,
-      cost: 0.0001
-    });
+    this.config.providers.forEach(provider => {
+      this.providers.set(provider.id, provider);
+      
+      // Initialize metrics
+      this.metrics.set(provider.id, {
+        totalRequests: 0,
+        successfulRequests: 0,
+        failedRequests: 0,
+        averageLatency: provider.latency,
+        costToday: 0,
+        lastHealthCheck: Date.now(),
+        isHealthy: true
+      });
 
-    this.addProvider({
-      id: 'alchemy-eth-premium',
-      name: 'Alchemy Ethereum',
-      url: `https://eth-mainnet.alchemyapi.io/v2/${process.env.ALCHEMY_API_KEY}`,
-      wsUrl: `wss://eth-mainnet.alchemyapi.io/v2/${process.env.ALCHEMY_API_KEY}`,
-      tier: 'premium',
-      chain: 'ethereum',
-      apiKey: process.env.ALCHEMY_API_KEY,
-      rateLimit: 80,
-      priority: 95,
-      maxRetries: 3,
-      timeout: 5000,
-      cost: 0.00008
-    });
+      // Initialize HTTP client
+      const httpClient = axios.create({
+        baseURL: provider.url,
+        timeout: this.config.requestTimeout,
+        headers: provider.apiKey ? {
+          'Authorization': `Bearer ${provider.apiKey}`,
+          'Content-Type': 'application/json'
+        } : {
+          'Content-Type': 'application/json'
+        }
+      });
 
-    this.addProvider({
-      id: 'chainstack-eth',
-      name: 'Chainstack Ethereum',
-      url: process.env.CHAINSTACK_ETH_URL || 'https://YOUR_ENDPOINT.chainstack.com/',
-      tier: 'premium',
-      chain: 'ethereum',
-      apiKey: process.env.CHAINSTACK_API_KEY,
-      rateLimit: 60,
-      priority: 90,
-      maxRetries: 3,
-      timeout: 6000,
-      cost: 0.00009
-    });
+      // Add response interceptor for metrics
+      httpClient.interceptors.response.use(
+        response => {
+          this.updateMetrics(provider.id, true, response.config.metadata?.startTime);
+          return response;
+        },
+        error => {
+          this.updateMetrics(provider.id, false, error.config?.metadata?.startTime);
+          return Promise.reject(error);
+        }
+      );
 
-    this.addProvider({
-      id: 'infura-eth-standard',
-      name: 'Infura Ethereum',
-      url: `https://mainnet.infura.io/v3/${process.env.INFURA_API_KEY}`,
-      wsUrl: `wss://mainnet.infura.io/ws/v3/${process.env.INFURA_API_KEY}`,
-      tier: 'standard',
-      chain: 'ethereum',
-      apiKey: process.env.INFURA_API_KEY,
-      rateLimit: 10,
-      priority: 50,
-      maxRetries: 2,
-      timeout: 8000,
-      cost: 0.00005
-    });
+      this.axiosInstances.set(provider.id, httpClient);
+      this.costTracker.set(provider.id, []);
 
-    // BSC Providers
-    this.addProvider({
-      id: 'quicknode-bsc-premium',
-      name: 'QuickNode BSC Premium',
-      url: process.env.QUICKNODE_BSC_URL || 'https://YOUR_ENDPOINT.bsc.quiknode.pro/',
-      wsUrl: process.env.QUICKNODE_BSC_WS || 'wss://YOUR_ENDPOINT.bsc.quiknode.pro/',
-      tier: 'premium',
-      chain: 'bsc',
-      apiKey: process.env.QUICKNODE_API_KEY,
-      rateLimit: 100,
-      priority: 100,
-      maxRetries: 3,
-      timeout: 5000,
-      cost: 0.00008
-    });
+      // Initialize request queue for this chain
+      if (!this.requestQueue.has(provider.chain)) {
+        this.requestQueue.set(provider.chain, []);
+      }
 
-    this.addProvider({
-      id: 'nodereal-bsc',
-      name: 'NodeReal BSC',
-      url: `https://bsc-mainnet.nodereal.io/v1/${process.env.NODEREAL_API_KEY}`,
-      tier: 'premium',
-      chain: 'bsc',
-      apiKey: process.env.NODEREAL_API_KEY,
-      rateLimit: 80,
-      priority: 95,
-      maxRetries: 3,
-      timeout: 5000,
-      cost: 0.00007
-    });
+      // Initialize provider stats
+      this.metrics.get(provider.id)!.requests = 0;
+      this.metrics.get(provider.id)!.errors = 0;
+      this.metrics.get(provider.id)!.latency = 0;
+      this.metrics.get(provider.id)!.cost = 0;
 
-    this.addProvider({
-      id: 'bsc-public-fallback',
-      name: 'BSC Public RPC',
-      url: 'https://bsc-dataseed1.binance.org/',
-      tier: 'fallback',
-      chain: 'bsc',
-      rateLimit: 3,
-      priority: 10,
-      maxRetries: 1,
-      timeout: 15000,
-      cost: 0
-    });
-
-    // Polygon Providers
-    this.addProvider({
-      id: 'alchemy-polygon',
-      name: 'Alchemy Polygon',
-      url: `https://polygon-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}`,
-      wsUrl: `wss://polygon-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}`,
-      tier: 'premium',
-      chain: 'polygon',
-      apiKey: process.env.ALCHEMY_API_KEY,
-      rateLimit: 80,
-      priority: 100,
-      maxRetries: 3,
-      timeout: 5000,
-      cost: 0.00006
-    });
-
-    this.addProvider({
-      id: 'quicknode-polygon',
-      name: 'QuickNode Polygon',
-      url: process.env.QUICKNODE_POLYGON_URL || 'https://YOUR_ENDPOINT.matic.quiknode.pro/',
-      tier: 'premium',
-      chain: 'polygon',
-      apiKey: process.env.QUICKNODE_API_KEY,
-      rateLimit: 100,
-      priority: 95,
-      maxRetries: 3,
-      timeout: 5000,
-      cost: 0.00007
-    });
-
-    // Arbitrum Providers
-    this.addProvider({
-      id: 'alchemy-arbitrum',
-      name: 'Alchemy Arbitrum',
-      url: `https://arb-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}`,
-      wsUrl: `wss://arb-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}`,
-      tier: 'premium',
-      chain: 'arbitrum',
-      apiKey: process.env.ALCHEMY_API_KEY,
-      rateLimit: 80,
-      priority: 100,
-      maxRetries: 3,
-      timeout: 5000,
-      cost: 0.00005
-    });
-
-    // Optimism Providers
-    this.addProvider({
-      id: 'alchemy-optimism',
-      name: 'Alchemy Optimism',
-      url: `https://opt-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}`,
-      wsUrl: `wss://opt-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}`,
-      tier: 'premium',
-      chain: 'optimism',
-      apiKey: process.env.ALCHEMY_API_KEY,
-      rateLimit: 80,
-      priority: 100,
-      maxRetries: 3,
-      timeout: 5000,
-      cost: 0.00005
-    });
-
-    // Solana Providers (using HTTP API)
-    this.addProvider({
-      id: 'quicknode-solana',
-      name: 'QuickNode Solana',
-      url: process.env.QUICKNODE_SOL_URL || 'https://YOUR_ENDPOINT.solana.quiknode.pro/',
-      tier: 'premium',
-      chain: 'solana',
-      apiKey: process.env.QUICKNODE_API_KEY,
-      rateLimit: 100,
-      priority: 100,
-      maxRetries: 3,
-      timeout: 5000,
-      cost: 0.00008
-    });
-
-    this.addProvider({
-      id: 'helius-solana',
-      name: 'Helius Solana',
-      url: `https://rpc.helius.xyz/?api-key=${process.env.HELIUS_API_KEY}`,
-      tier: 'premium',
-      chain: 'solana',
-      apiKey: process.env.HELIUS_API_KEY,
-      rateLimit: 80,
-      priority: 95,
-      maxRetries: 3,
-      timeout: 5000,
-      cost: 0.00009
+      this.logger.info('RPC provider added', {
+        id: provider.id,
+        name: provider.name,
+        chain: provider.chain,
+        tier: provider.tier,
+        priority: provider.priority
+      });
     });
 
     this.logger.info('Default RPC providers configured', {
@@ -298,240 +185,378 @@ export class RPCManager extends EventEmitter {
     });
   }
 
-  addProvider(provider: RPCProvider): void {
-    this.providers.set(provider.id, provider);
-    
-    const endpoint: RPCEndpoint = {
-      provider,
-      isHealthy: true,
-      latency: 0,
-      successRate: 100,
-      lastUsed: 0,
-      requestCount: 0,
-      errorCount: 0,
-      consecutiveErrors: 0,
-      isBlacklisted: false
-    };
-    
-    this.endpoints.set(provider.id, endpoint);
+  private updateMetrics(providerId: string, success: boolean, startTime?: number): void {
+    const metrics = this.metrics.get(providerId);
+    if (!metrics) return;
 
-    // Create axios instance for this provider
-    const axiosConfig: any = {
-      baseURL: provider.url,
-      timeout: provider.timeout,
-      headers: {
-        'Content-Type': 'application/json',
-        'User-Agent': 'TradingBot/1.0'
-      }
-    };
-
-    // Add API key to headers if provided
-    if (provider.apiKey) {
-      if (provider.name.includes('Alchemy')) {
-        // Alchemy uses API key in URL
-      } else if (provider.name.includes('QuickNode')) {
-        axiosConfig.headers['X-API-Key'] = provider.apiKey;
-      } else if (provider.name.includes('Chainstack')) {
-        axiosConfig.headers['Authorization'] = `Bearer ${provider.apiKey}`;
-      } else if (provider.name.includes('NodeReal')) {
-        // NodeReal uses API key in URL
-      }
+    metrics.totalRequests++;
+    
+    if (success) {
+      metrics.successfulRequests++;
+    } else {
+      metrics.failedRequests++;
     }
 
-    this.axiosInstances.set(provider.id, axios.create(axiosConfig));
-    
-    // Initialize request queue for this chain
-    if (!this.requestQueue.has(provider.chain)) {
-      this.requestQueue.set(provider.chain, []);
+    if (startTime) {
+      const latency = Date.now() - startTime;
+      metrics.averageLatency = (metrics.averageLatency + latency) / 2;
     }
 
-    // Initialize provider stats
-    this.metrics.providerStats.set(provider.id, {
-      requests: 0,
-      errors: 0,
-      latency: 0,
-      cost: 0
-    });
-
-    this.logger.info('RPC provider added', {
-      id: provider.id,
-      name: provider.name,
-      chain: provider.chain,
-      tier: provider.tier,
-      priority: provider.priority
-    });
+    metrics.isHealthy = (metrics.successfulRequests / metrics.totalRequests) > 0.8;
+    this.metrics.set(providerId, metrics);
   }
 
-  // Smart Provider Selection Algorithm
-  private selectBestProvider(chain: string, priority: string = 'medium'): RPCEndpoint | null {
-    const chainProviders = Array.from(this.endpoints.values())
-      .filter(endpoint => 
-        endpoint.provider.chain === chain && 
-        endpoint.isHealthy && 
-        !endpoint.isBlacklisted
-      );
-
-    if (chainProviders.length === 0) {
-      this.logger.warn('No healthy providers available for chain', { chain });
-      return null;
-    }
-
-    // Sort by multiple criteria
-    chainProviders.sort((a, b) => {
-      // 1. Priority tier (premium > standard > fallback)
-      const tierWeight = { premium: 3, standard: 2, fallback: 1 };
-      const tierDiff = tierWeight[b.provider.tier] - tierWeight[a.provider.tier];
-      if (tierDiff !== 0) return tierDiff;
-
-      // 2. Success rate
-      const successRateDiff = b.successRate - a.successRate;
-      if (Math.abs(successRateDiff) > 5) return successRateDiff;
-
-      // 3. Latency (lower is better)
-      const latencyDiff = a.latency - b.latency;
-      if (Math.abs(latencyDiff) > 100) return latencyDiff;
-
-      // 4. Provider priority
-      const priorityDiff = b.provider.priority - a.provider.priority;
-      if (priorityDiff !== 0) return priorityDiff;
-
-      // 5. Load balancing - prefer less recently used
-      return a.lastUsed - b.lastUsed;
-    });
-
-    // For critical requests, always use the best provider
-    if (priority === 'critical') {
-      return chainProviders[0];
-    }
-
-    // For other requests, use weighted random selection from top 3
-    const topProviders = chainProviders.slice(0, Math.min(3, chainProviders.length));
-    const weights = topProviders.map((_, index) => Math.pow(2, topProviders.length - index - 1));
-    const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
-    
-    let random = Math.random() * totalWeight;
-    for (let i = 0; i < topProviders.length; i++) {
-      random -= weights[i];
-      if (random <= 0) {
-        return topProviders[i];
-      }
-    }
-
-    return topProviders[0];
+  private startHealthChecks(): void {
+    this.healthCheckInterval = setInterval(async () => {
+      await this.performHealthChecks();
+    }, this.config.healthCheckInterval);
   }
 
-  // Main request method with intelligent routing
-  async makeRequest(request: RPCRequest): Promise<RPCResponse> {
-    const startTime = Date.now();
-    
-    // Check cache first for cacheable methods
-    if (this.isCacheable(request.method)) {
-      const cacheKey = this.getCacheKey(request);
-      const cached = this.responseCache.get(cacheKey);
-      if (cached && cached.expiry > Date.now()) {
-        return {
-          id: request.id,
-          result: cached.response,
-          provider: 'cache',
-          latency: 0,
-          fromCache: true,
-          timestamp: Date.now()
-        };
-      }
-    }
-
-    // Select best provider
-    const endpoint = this.selectBestProvider(request.chain, request.priority);
-    if (!endpoint) {
-      throw new Error(`No available providers for chain: ${request.chain}`);
-    }
-
-    const maxRetries = request.retries ?? endpoint.provider.maxRetries;
-    let lastError: any;
-
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+  private async performHealthChecks(): Promise<void> {
+    const healthCheckPromises = Array.from(this.providers.values()).map(async provider => {
       try {
-        const response = await this.executeRequest(endpoint, request);
-        
-        // Update endpoint metrics on success
-        this.updateEndpointMetrics(endpoint, Date.now() - startTime, true);
-        
-        // Cache response if applicable
-        if (this.isCacheable(request.method)) {
-          this.cacheResponse(request, response.result);
-        }
+        const client = this.axiosInstances.get(provider.id);
+        if (!client) return;
 
-        // Update global metrics
-        this.updateGlobalMetrics(endpoint.provider.id, Date.now() - startTime, true);
-
-        return response;
-      } catch (error) {
-        lastError = error;
-        this.updateEndpointMetrics(endpoint, Date.now() - startTime, false);
-        
-        this.logger.warn('RPC request failed', {
-          provider: endpoint.provider.id,
-          chain: request.chain,
-          method: request.method,
-          attempt: attempt + 1,
-          error: error.message
+        const startTime = Date.now();
+        await client.post('', {
+          jsonrpc: '2.0',
+          method: 'eth_blockNumber',
+          params: [],
+          id: 1
         });
 
-        // If this was the last attempt, or it's a non-retryable error, break
-        if (attempt === maxRetries || !this.isRetryableError(error)) {
-          break;
-        }
+        const latency = Date.now() - startTime;
+        const metrics = this.metrics.get(provider.id)!;
+        metrics.lastHealthCheck = Date.now();
+        metrics.isHealthy = true;
+        metrics.averageLatency = (metrics.averageLatency + latency) / 2;
 
-        // Try a different provider for the next attempt
-        const nextEndpoint = this.selectBestProvider(request.chain, request.priority);
-        if (nextEndpoint && nextEndpoint.provider.id !== endpoint.provider.id) {
-          Object.assign(endpoint, nextEndpoint);
-        }
+        // Update provider latency
+        provider.latency = metrics.averageLatency;
 
-        // Exponential backoff
-        await this.sleep(Math.pow(2, attempt) * 1000);
+        this.emit('healthCheck', { providerId: provider.id, healthy: true, latency });
+      } catch (error) {
+        const metrics = this.metrics.get(provider.id)!;
+        metrics.isHealthy = false;
+        metrics.lastHealthCheck = Date.now();
+
+        this.emit('healthCheck', { providerId: provider.id, healthy: false, error });
+        
+        // Temporarily blacklist provider
+        this.blacklistProvider(provider.id);
       }
-    }
-
-    // Update global metrics on failure
-    this.updateGlobalMetrics(endpoint.provider.id, Date.now() - startTime, false);
-
-    throw lastError || new Error('Request failed after all retries');
-  }
-
-  private async executeRequest(endpoint: RPCEndpoint, request: RPCRequest): Promise<RPCResponse> {
-    const startTime = Date.now();
-    const axiosInstance = this.axiosInstances.get(endpoint.provider.id);
-    
-    if (!axiosInstance) {
-      throw new Error(`No axios instance found for provider: ${endpoint.provider.id}`);
-    }
-
-    const requestBody = {
-      jsonrpc: '2.0',
-      id: request.id,
-      method: request.method,
-      params: request.params
-    };
-
-    const response: AxiosResponse = await axiosInstance.post('/', requestBody, {
-      timeout: request.timeout || endpoint.provider.timeout
     });
 
-    if (response.data.error) {
-      throw new Error(`RPC Error: ${response.data.error.message}`);
+    await Promise.allSettled(healthCheckPromises);
+  }
+
+  private blacklistProvider(providerId: string): void {
+    const metrics = this.metrics.get(providerId);
+    if (metrics) {
+      metrics.blacklistedUntil = Date.now() + this.config.blacklistDuration;
+      this.emit('providerBlacklisted', { providerId, until: metrics.blacklistedUntil });
+    }
+  }
+
+  private startCostTracking(): void {
+    setInterval(() => {
+      this.cleanupOldCostData();
+    }, 60 * 60 * 1000); // Every hour
+  }
+
+  private cleanupOldCostData(): void {
+    const cutoff = Date.now() - (this.config.costTrackingWindow * 60 * 60 * 1000);
+    
+    this.costTracker.forEach((costs, providerId) => {
+      const filteredCosts = costs.filter(entry => entry.timestamp > cutoff);
+      this.costTracker.set(providerId, filteredCosts);
+    });
+  }
+
+  private addCostEntry(providerId: string, cost: number): void {
+    const costs = this.costTracker.get(providerId) || [];
+    costs.push({ timestamp: Date.now(), cost });
+    this.costTracker.set(providerId, costs);
+
+    // Update daily cost in metrics
+    const metrics = this.metrics.get(providerId)!;
+    const todayStart = new Date().setHours(0, 0, 0, 0);
+    const todayCosts = costs.filter(entry => entry.timestamp >= todayStart);
+    metrics.costToday = todayCosts.reduce((total, entry) => total + entry.cost, 0);
+  }
+
+  private getAvailableProviders(): RPCProvider[] {
+    const now = Date.now();
+    
+    return Array.from(this.providers.values())
+      .filter(provider => {
+        const metrics = this.metrics.get(provider.id)!;
+        
+        // Filter out inactive providers
+        if (!provider.isActive) return false;
+        
+        // Filter out blacklisted providers
+        if (metrics.blacklistedUntil && metrics.blacklistedUntil > now) return false;
+        
+        // Filter out unhealthy providers
+        if (!metrics.isHealthy) return false;
+        
+        // Filter out providers over budget
+        if (metrics.costToday >= this.config.dailyBudget) return false;
+        
+        return true;
+      })
+      .sort((a, b) => {
+        // Sort by tier priority first, then by success rate and latency
+        const tierWeight = { premium: 3, standard: 2, fallback: 1 };
+        const aTierScore = tierWeight[a.tier] * 1000;
+        const bTierScore = tierWeight[b.tier] * 1000;
+        
+        const aMetrics = this.metrics.get(a.id)!;
+        const bMetrics = this.metrics.get(b.id)!;
+        
+        const aScore = aTierScore + a.priority + (aMetrics.successfulRequests / aMetrics.totalRequests) * 100 - a.latency;
+        const bScore = bTierScore + b.priority + (bMetrics.successfulRequests / bMetrics.totalRequests) * 100 - b.latency;
+        
+        return bScore - aScore;
+      });
+  }
+
+  public async makeRequest(method: string, params: any[] = [], options: {
+    timeout?: number;
+    retries?: number;
+    preferredProvider?: string;
+  } = {}): Promise<RPCResponse> {
+    const request: RPCRequest = {
+      id: `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      method,
+      params,
+      chain: '',
+      priority: 'medium',
+      timestamp: Date.now(),
+      retryCount: 0,
+      maxRetries: options.retries || this.config.maxRetries
+    };
+
+    return this.executeRequest(request, options);
+  }
+
+  private async executeRequest(request: RPCRequest, options: any): Promise<RPCResponse> {
+    const availableProviders = this.getAvailableProviders();
+    
+    if (availableProviders.length === 0) {
+      throw new Error('No available RPC providers');
     }
 
-    const latency = Date.now() - startTime;
-    endpoint.lastUsed = Date.now();
+    // Use preferred provider if specified and available
+    let targetProvider = availableProviders[0];
+    if (options.preferredProvider) {
+      const preferred = availableProviders.find(p => p.id === options.preferredProvider);
+      if (preferred) targetProvider = preferred;
+    }
 
-    return {
-      id: request.id,
-      result: response.data.result,
-      provider: endpoint.provider.id,
-      latency,
-      timestamp: Date.now()
-    };
+    const startTime = Date.now();
+
+    try {
+      const client = this.axiosInstances.get(targetProvider.id)!;
+      
+      // Add metadata for metrics
+      const config: AxiosRequestConfig = {
+        metadata: { startTime }
+      };
+
+      const response = await client.post('', {
+        jsonrpc: '2.0',
+        method: request.method,
+        params: request.params,
+        id: request.id
+      }, config);
+
+      const latency = Date.now() - startTime;
+
+      // Track cost
+      const requestCost = (targetProvider.cost / 1000);
+      this.addCostEntry(targetProvider.id, requestCost);
+
+      const rpcResponse: RPCResponse = {
+        id: request.id,
+        result: response.data.result,
+        error: response.data.error,
+        latency,
+        provider: targetProvider.id
+      };
+
+      this.emit('requestCompleted', { request, response: rpcResponse, provider: targetProvider.id });
+
+      if (rpcResponse.error) {
+        throw new Error(`RPC Error: ${rpcResponse.error.message}`);
+      }
+
+      return rpcResponse;
+
+    } catch (error) {
+      this.emit('requestFailed', { request, error, provider: targetProvider.id });
+
+      // Retry with different provider if possible
+      if (request.retryCount < request.maxRetries) {
+        request.retryCount++;
+        
+        // Wait before retry
+        await new Promise(resolve => setTimeout(resolve, this.config.retryDelay * Math.pow(2, request.retryCount)));
+        
+        // Temporarily blacklist failed provider for this request
+        const filteredProviders = availableProviders.filter(p => p.id !== targetProvider.id);
+        if (filteredProviders.length > 0) {
+          return this.executeRequest(request, { ...options, preferredProvider: undefined });
+        }
+      }
+
+      throw error;
+    }
+  }
+
+  public async batchRequest(requests: Array<{ method: string; params: any[] }>): Promise<RPCResponse[]> {
+    const batchPromises = requests.map(req => this.makeRequest(req.method, req.params));
+    return Promise.all(batchPromises);
+  }
+
+  public getProviderMetrics(providerId?: string): ProviderMetrics | Map<string, ProviderMetrics> {
+    if (providerId) {
+      const metrics = this.metrics.get(providerId);
+      if (!metrics) throw new Error(`Provider ${providerId} not found`);
+      return metrics;
+    }
+    return new Map(this.metrics);
+  }
+
+  public getProviderStatus(): Array<{ provider: RPCProvider; metrics: ProviderMetrics }> {
+    return Array.from(this.providers.values()).map(provider => ({
+      provider,
+      metrics: this.metrics.get(provider.id)!
+    }));
+  }
+
+  public async addProvider(provider: RPCProvider): Promise<void> {
+    this.providers.set(provider.id, provider);
+    
+    // Initialize metrics
+    this.metrics.set(provider.id, {
+      totalRequests: 0,
+      successfulRequests: 0,
+      failedRequests: 0,
+      averageLatency: provider.latency,
+      costToday: 0,
+      lastHealthCheck: Date.now(),
+      isHealthy: true
+    });
+
+    // Initialize HTTP client
+    const httpClient = axios.create({
+      baseURL: provider.url,
+      timeout: this.config.requestTimeout,
+      headers: provider.apiKey ? {
+        'Authorization': `Bearer ${provider.apiKey}`,
+        'Content-Type': 'application/json'
+      } : {
+        'Content-Type': 'application/json'
+      }
+    });
+
+    this.axiosInstances.set(provider.id, httpClient);
+    this.costTracker.set(provider.id, []);
+
+    this.emit('providerAdded', provider);
+  }
+
+  public removeProvider(providerId: string): void {
+    this.providers.delete(providerId);
+    this.metrics.delete(providerId);
+    this.axiosInstances.delete(providerId);
+    this.costTracker.delete(providerId);
+
+    // Close WebSocket if exists
+    const ws = this.wsConnections.get(providerId);
+    if (ws) {
+      ws.close();
+      this.wsConnections.delete(providerId);
+    }
+
+    this.emit('providerRemoved', providerId);
+  }
+
+  public setProviderActive(providerId: string, active: boolean): void {
+    const provider = this.providers.get(providerId);
+    if (provider) {
+      provider.isActive = active;
+      this.emit('providerStatusChanged', { providerId, active });
+    }
+  }
+
+  public getTotalCosts(): { daily: number; window: number; breakdown: Record<string, number> } {
+    const now = Date.now();
+    const todayStart = new Date().setHours(0, 0, 0, 0);
+    const windowStart = now - (this.config.costTrackingWindow * 60 * 60 * 1000);
+
+    let dailyTotal = 0;
+    let windowTotal = 0;
+    const breakdown: Record<string, number> = {};
+
+    this.costTracker.forEach((costs, providerId) => {
+      const dailyCosts = costs.filter(entry => entry.timestamp >= todayStart);
+      const windowCosts = costs.filter(entry => entry.timestamp >= windowStart);
+
+      const dailySum = dailyCosts.reduce((sum, entry) => sum + entry.cost, 0);
+      const windowSum = windowCosts.reduce((sum, entry) => sum + entry.cost, 0);
+
+      dailyTotal += dailySum;
+      windowTotal += windowSum;
+      breakdown[providerId] = dailySum;
+    });
+
+    return { daily: dailyTotal, window: windowTotal, breakdown };
+  }
+
+  public optimizeForCost(): void {
+    // Reorder providers to prioritize cost-effective ones
+    const providers = Array.from(this.providers.values());
+    providers.forEach(provider => {
+      const metrics = this.metrics.get(provider.id)!;
+      const costEfficiency = metrics.successfulRequests / (metrics.costToday + 1);
+      provider.priority = Math.floor(costEfficiency * 100);
+    });
+
+    this.emit('optimizedForCost');
+  }
+
+  public optimizeForSpeed(): void {
+    // Reorder providers to prioritize low-latency ones
+    const providers = Array.from(this.providers.values());
+    providers.forEach(provider => {
+      const metrics = this.metrics.get(provider.id)!;
+      provider.priority = Math.floor(1000 / (metrics.averageLatency + 1));
+    });
+
+    this.emit('optimizedForSpeed');
+  }
+
+  public destroy(): void {
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
+    }
+
+    // Close all WebSocket connections
+    this.wsConnections.forEach(ws => ws.close());
+    this.wsConnections.clear();
+
+    // Clear all data
+    this.providers.clear();
+    this.metrics.clear();
+    this.axiosInstances.clear();
+    this.costTracker.clear();
+    this.requestQueue.clear();
+
+    this.removeAllListeners();
   }
 
   // WebSocket Connection Management
@@ -637,7 +662,11 @@ export class RPCManager extends EventEmitter {
           if (!request) continue;
 
           try {
-            const response = await this.makeRequest(request);
+            const response = await this.makeRequest(request.method, request.params, {
+              timeout: request.timeout,
+              retries: request.retries,
+              preferredProvider: request.preferredProvider
+            });
             (request as any).resolve(response);
           } catch (error) {
             (request as any).reject(error);
@@ -651,58 +680,61 @@ export class RPCManager extends EventEmitter {
   }
 
   // Health Check System
-  private startHealthChecks(): void {
-    const healthCheck = async () => {
-      for (const [providerId, endpoint] of this.endpoints.entries()) {
-        try {
-          const testRequest: RPCRequest = {
-            id: `health-${Date.now()}`,
-            method: endpoint.provider.chain === 'solana' ? 'getHealth' : 'eth_blockNumber',
-            params: [],
-            chain: endpoint.provider.chain,
-            priority: 'low',
-            timestamp: Date.now()
-          };
+  private selectBestProvider(chain: string, priority: string = 'medium'): RPCEndpoint | null {
+    const chainProviders = Array.from(this.endpoints.values())
+      .filter(endpoint => 
+        endpoint.provider.chain === chain && 
+        endpoint.isHealthy && 
+        !endpoint.isBlacklisted
+      );
 
-          const startTime = Date.now();
-          await this.executeRequest(endpoint, testRequest);
-          const latency = Date.now() - startTime;
+    if (chainProviders.length === 0) {
+      this.logger.warn('No healthy providers available for chain', { chain });
+      return null;
+    }
 
-          // Update health metrics
-          endpoint.isHealthy = true;
-          endpoint.latency = (endpoint.latency * 0.8) + (latency * 0.2); // EMA
-          endpoint.consecutiveErrors = 0;
+    // Sort by multiple criteria
+    chainProviders.sort((a, b) => {
+      // 1. Priority tier (premium > standard > fallback)
+      const tierWeight = { premium: 3, standard: 2, fallback: 1 };
+      const tierDiff = tierWeight[b.provider.tier] - tierWeight[a.provider.tier];
+      if (tierDiff !== 0) return tierDiff;
 
-          // Remove from blacklist if healthy
-          if (endpoint.isBlacklisted && endpoint.consecutiveErrors === 0) {
-            endpoint.isBlacklisted = false;
-            endpoint.blacklistUntil = undefined;
-            this.logger.info('Provider removed from blacklist', { providerId });
-          }
+      // 2. Success rate
+      const successRateDiff = b.successRate - a.successRate;
+      if (Math.abs(successRateDiff) > 5) return successRateDiff;
 
-        } catch (error) {
-          endpoint.consecutiveErrors++;
-          
-          // Blacklist after 3 consecutive errors
-          if (endpoint.consecutiveErrors >= 3) {
-            endpoint.isBlacklisted = true;
-            endpoint.blacklistUntil = Date.now() + (5 * 60 * 1000); // 5 minutes
-            endpoint.isHealthy = false;
-            
-            this.logger.warn('Provider blacklisted due to health check failures', {
-              providerId,
-              consecutiveErrors: endpoint.consecutiveErrors
-            });
-          }
-        }
-      }
-    };
+      // 3. Latency (lower is better)
+      const latencyDiff = a.latency - b.latency;
+      if (Math.abs(latencyDiff) > 100) return latencyDiff;
 
-    // Run health checks every 30 seconds
-    setInterval(healthCheck, 30000);
+      // 4. Provider priority
+      const priorityDiff = b.provider.priority - a.provider.priority;
+      if (priorityDiff !== 0) return priorityDiff;
+
+      // 5. Load balancing - prefer less recently used
+      return a.lastUsed - b.lastUsed;
+    });
+
+    // For critical requests, always use the best provider
+    if (priority === 'critical') {
+      return chainProviders[0];
+    }
+
+    // For other requests, use weighted random selection from top 3
+    const topProviders = chainProviders.slice(0, Math.min(3, chainProviders.length));
+    const weights = topProviders.map((_, index) => Math.pow(2, topProviders.length - index - 1));
+    const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
     
-    // Initial health check
-    setTimeout(healthCheck, 5000);
+    let random = Math.random() * totalWeight;
+    for (let i = 0; i < topProviders.length; i++) {
+      random -= weights[i];
+      if (random <= 0) {
+        return topProviders[i];
+      }
+    }
+
+    return topProviders[0];
   }
 
   // Metrics and monitoring
@@ -721,33 +753,34 @@ export class RPCManager extends EventEmitter {
   }
 
   private updateGlobalMetrics(providerId: string, latency: number, success: boolean): void {
-    this.metrics.totalRequests++;
+    const metrics = this.metrics.get(providerId);
+    if (!metrics) return;
+
+    metrics.totalRequests++;
     
     if (success) {
-      this.metrics.successfulRequests++;
+      metrics.successfulRequests++;
     } else {
-      this.metrics.failedRequests++;
+      metrics.failedRequests++;
     }
 
-    this.metrics.successRate = (this.metrics.successfulRequests / this.metrics.totalRequests) * 100;
-    this.metrics.averageLatency = (this.metrics.averageLatency * 0.95) + (latency * 0.05);
+    metrics.successRate = (metrics.successfulRequests / metrics.totalRequests) * 100;
+    metrics.averageLatency = (metrics.averageLatency * 0.95) + (latency * 0.05);
 
     // Update provider-specific stats
-    const providerStats = this.metrics.providerStats.get(providerId);
-    if (providerStats) {
-      providerStats.requests++;
-      providerStats.latency = (providerStats.latency * 0.9) + (latency * 0.1);
+    const provider = this.providers.get(providerId);
+    if (provider) {
+      metrics.requests++;
+      metrics.latency = (metrics.latency * 0.9) + (latency * 0.1);
       
       if (!success) {
-        providerStats.errors++;
+        metrics.errors++;
       }
 
       // Update cost
-      const provider = this.providers.get(providerId);
-      if (provider) {
-        providerStats.cost += provider.cost;
-        this.metrics.costToday += provider.cost;
-      }
+      const cost = (provider.cost / 1000) * (metrics.requests / 1000);
+      metrics.cost += cost;
+      metrics.costToday += cost;
     }
   }
 
@@ -762,17 +795,15 @@ export class RPCManager extends EventEmitter {
       const msUntilMidnight = tomorrow.getTime() - now.getTime();
       
       setTimeout(() => {
-        this.metrics.costToday = 0;
-        this.metrics.providerStats.forEach(stats => {
-          stats.cost = 0;
+        this.metrics.forEach(metrics => {
+          metrics.costToday = 0;
         });
         this.logger.info('Daily RPC cost metrics reset');
         
         // Set up recurring daily reset
         setInterval(() => {
-          this.metrics.costToday = 0;
-          this.metrics.providerStats.forEach(stats => {
-            stats.cost = 0;
+          this.metrics.forEach(metrics => {
+            metrics.costToday = 0;
           });
           this.logger.info('Daily RPC cost metrics reset');
         }, 24 * 60 * 60 * 1000);
@@ -870,7 +901,23 @@ export class RPCManager extends EventEmitter {
 
   // Public API methods
   getMetrics(): RPCMetrics {
-    return { ...this.metrics };
+    return {
+      totalRequests: this.metrics.totalRequests,
+      successfulRequests: this.metrics.successfulRequests,
+      failedRequests: this.metrics.failedRequests,
+      averageLatency: this.metrics.averageLatency,
+      successRate: this.metrics.successRate,
+      costToday: this.metrics.costToday,
+      providerStats: new Map(this.metrics.map(metrics => [
+        metrics.id,
+        {
+          requests: metrics.requests,
+          errors: metrics.errors,
+          latency: metrics.latency,
+          cost: metrics.cost
+        }
+      ]))
+    };
   }
 
   getProviderStatus(chain?: string): RPCEndpoint[] {
@@ -900,7 +947,7 @@ export class RPCManager extends EventEmitter {
 
       const startTime = Date.now();
       try {
-        await this.executeRequest(endpoint, testRequest);
+        await this.executeRequest(testRequest, {});
         return { endpoint, latency: Date.now() - startTime };
       } catch (error) {
         return { endpoint, latency: 999999 }; // Max latency for failed requests
