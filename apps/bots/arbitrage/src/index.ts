@@ -1,155 +1,146 @@
-import { ArbitrageBotConfig, Chain } from "@trading-bot/types";
-import { createChainClient } from "@trading-bot/chain-client";
-import axios from "axios";
-import Database from "better-sqlite3";
-import { ethers } from "ethers";
+import dotenv from 'dotenv';
+import winston from 'winston';
+import cron from 'node-cron';
+import { ArbitrageEngine } from './arbitrage-engine';
+import { DatabaseManager } from './database-manager';
+import { ConfigManager } from './config-manager';
 
-// --- Configuration ---
-const ARBITRAGE_CONFIG: ArbitrageBotConfig = {
-  id: "1",
-  userId: "user-123",
-  tokenPair: {
-    tokenA: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", // Native token (ETH, BNB)
-    tokenB: "0x6b175474e89094c44da98b954eedeac495271d0f", // DAI on Ethereum
-  },
-  minProfitThreshold: 0.1, // 0.1% profit
-  tradeSize: 1, // e.g., 1 ETH
-};
-const CHAIN: Chain = "ETH";
-const RPC_URL = process.env.ETH_RPC_URL!; // IMPORTANT: Set in .env file
-const PRIVATE_KEY = process.env.PRIVATE_KEY!; // IMPORTANT: Set in .env file
+// Load environment variables
+dotenv.config();
 
-// --- Database Setup ---
-const db = new Database("arbitrage_bot.db");
-db.exec(`
-  CREATE TABLE IF NOT EXISTS trades (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    profit REAL NOT NULL,
-    trade_details TEXT NOT NULL
-  )
-`);
+// Configure logger
+const logger = winston.createLogger({
+  level: process.env.LOG_LEVEL || 'info',
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.errors({ stack: true }),
+    winston.format.json()
+  ),
+  defaultMeta: { service: 'arbitrage-bot' },
+  transports: [
+    new winston.transports.File({ filename: 'logs/error.log', level: 'error' }),
+    new winston.transports.File({ filename: 'logs/combined.log' }),
+    new winston.transports.Console({
+      format: winston.format.combine(
+        winston.format.colorize(),
+        winston.format.simple()
+      )
+    })
+  ]
+});
 
-// --- 0x API Client ---
-const ZERO_X_API_URL = "https://api.0x.org";
+class ArbitrageBot {
+  private engine: ArbitrageEngine;
+  private database: DatabaseManager;
+  private config: ConfigManager;
+  private isRunning = false;
 
-async function getQuote(buyToken: string, sellToken: string, sellAmount: string) {
-  try {
-    const response = await axios.get(`${ZERO_X_API_URL}/swap/v1/quote`, {
-      params: {
-        buyToken,
-        sellToken,
-        sellAmount,
-      },
-    });
-    return response.data;
-  } catch (error: any) {
-    console.error("Error fetching quote from 0x API:", error.response?.data?.validationErrors[0]?.description || error.message);
-    return null;
-  }
-}
-
-// --- Main Bot Logic ---
-async function runArbitrage() {
-  console.log(`[${new Date().toISOString()}] Checking for arbitrage opportunities...`);
-
-  if (!RPC_URL || !PRIVATE_KEY) {
-    throw new Error("Missing environment variables: ETH_RPC_URL or PRIVATE_KEY");
+  constructor() {
+    this.config = new ConfigManager();
+    this.database = new DatabaseManager();
+    this.engine = new ArbitrageEngine(this.config, this.database, logger);
   }
 
-  const chainClient = createChainClient(CHAIN, PRIVATE_KEY, RPC_URL);
-
-  const sellAmountWei = (ARBITRAGE_CONFIG.tradeSize * 10 ** 18).toString();
-
-  // Find opportunity: Sell Token A for Token B
-  const quoteAtoB = await getQuote(
-    ARBITRAGE_CONFIG.tokenPair.tokenB,
-    ARBITRAGE_CONFIG.tokenPair.tokenA,
-    sellAmountWei
-  );
-
-  if (!quoteAtoB) {
-    console.log("Could not get quote for A -> B. Skipping cycle.");
-    return;
-  }
-  const buyAmountFromAtoB = BigInt(quoteAtoB.buyAmount);
-
-  // Find opportunity: Sell Token B back to Token A
-  const quoteBtoA = await getQuote(
-    ARBITRAGE_CONFIG.tokenPair.tokenA,
-    ARBITRAGE_CONFIG.tokenPair.tokenB,
-    buyAmountFromAtoB.toString()
-  );
-
-  if (!quoteBtoA) {
-    console.log("Could not get quote for B -> A. Skipping cycle.");
-    return;
-  }
-
-  const finalAmount = BigInt(quoteBtoA.buyAmount);
-  const initialAmount = BigInt(sellAmountWei);
-  
-  // --- Profitability Calculation ---
-  // Note: This is a simplified calculation. A real bot must simulate gas costs for both transactions.
-  // The `gasPrice` and `gas` from the quote can be used for a more accurate estimate.
-  const grossProfit = finalAmount - initialAmount;
-  const estimatedGasCost = BigInt(quoteAtoB.gas) * BigInt(quoteAtoB.gasPrice) + BigInt(quoteBtoA.gas) * BigInt(quoteBtoA.gasPrice);
-  const netProfit = grossProfit - estimatedGasCost;
-  
-  if (netProfit > 0) {
-    const profitPercentage = (Number(netProfit) / Number(initialAmount)) * 100;
-    console.log(`\n✅ Arbitrage Opportunity Found!`);
-    console.log(`   Initial Amount: ${ethers.formatEther(initialAmount)} ${CHAIN}`);
-    console.log(`   Final Amount:   ${ethers.formatEther(finalAmount)} ${CHAIN}`);
-    console.log(`   Net Profit:     ${ethers.formatEther(netProfit)} ${CHAIN} (${profitPercentage.toFixed(4)}%)`);
-
-    if (profitPercentage > ARBITRAGE_CONFIG.minProfitThreshold) {
-        console.log("🚀 Executing trades...");
-        
-        // Execute the first swap (e.g., ETH -> DAI)
-        const txAtoB = await chainClient.sendTransaction({
-            to: quoteAtoB.to,
-            data: quoteAtoB.data,
-            value: quoteAtoB.value,
-            gasPrice: quoteAtoB.gasPrice,
-        });
-        console.log(`   Trade 1 executed: ${txAtoB}`);
-
-        // Execute the second swap (e.g., DAI -> ETH)
-        const txBtoA = await chainClient.sendTransaction({
-            to: quoteBtoA.to,
-            data: quoteBtoA.data,
-            value: quoteBtoA.value,
-            gasPrice: quoteBtoA.gasPrice,
-        });
-        console.log(`   Trade 2 executed: ${txBtoA}`);
-        
-        // Record the profitable trade
-        const stmt = db.prepare('INSERT INTO trades (profit, trade_details) VALUES (?, ?)');
-        stmt.run(ethers.formatEther(netProfit), JSON.stringify({
-            quoteAtoB,
-            quoteBtoA,
-            timestamp: new Date().toISOString()
-        }));
-        console.log("Trade executed and logged to database.");
-    } else {
-        console.log("Profit does not meet minimum threshold. Skipping.");
+  async start() {
+    try {
+      logger.info('Starting Arbitrage Bot...');
+      
+      // Initialize components
+      await this.database.initialize();
+      await this.engine.initialize();
+      
+      this.isRunning = true;
+      
+      // Start the main arbitrage scanning loop
+      this.startArbitrageLoop();
+      
+      // Schedule periodic tasks
+      this.schedulePeriodicTasks();
+      
+      logger.info('Arbitrage Bot started successfully');
+      
+      // Handle graceful shutdown
+      this.setupGracefulShutdown();
+      
+    } catch (error) {
+      logger.error('Failed to start Arbitrage Bot:', error);
+      process.exit(1);
     }
+  }
 
-  } else {
-    console.log("No profitable opportunity found in this cycle.");
+  private startArbitrageLoop() {
+    // Main arbitrage detection loop - runs every 5 seconds
+    setInterval(async () => {
+      if (!this.isRunning) return;
+      
+      try {
+        await this.engine.scanForOpportunities();
+      } catch (error) {
+        logger.error('Error in arbitrage loop:', error);
+      }
+    }, 5000);
+  }
+
+  private schedulePeriodicTasks() {
+    // Update performance metrics every minute
+    cron.schedule('* * * * *', async () => {
+      if (!this.isRunning) return;
+      
+      try {
+        await this.engine.updatePerformanceMetrics();
+      } catch (error) {
+        logger.error('Error updating performance metrics:', error);
+      }
+    });
+
+    // Clean up old data every hour
+    cron.schedule('0 * * * *', async () => {
+      if (!this.isRunning) return;
+      
+      try {
+        await this.database.cleanupOldData();
+      } catch (error) {
+        logger.error('Error cleaning up old data:', error);
+      }
+    });
+
+    // Health check every 5 minutes
+    cron.schedule('*/5 * * * *', async () => {
+      if (!this.isRunning) return;
+      
+      try {
+        await this.engine.performHealthCheck();
+      } catch (error) {
+        logger.error('Health check failed:', error);
+      }
+    });
+  }
+
+  private setupGracefulShutdown() {
+    const shutdown = async (signal: string) => {
+      logger.info(`Received ${signal}, shutting down gracefully...`);
+      this.isRunning = false;
+      
+      try {
+        await this.engine.shutdown();
+        await this.database.close();
+        logger.info('Arbitrage Bot shut down successfully');
+        process.exit(0);
+      } catch (error) {
+        logger.error('Error during shutdown:', error);
+        process.exit(1);
+      }
+    };
+
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => shutdown('SIGINT'));
+    process.on('SIGUSR2', () => shutdown('SIGUSR2'));
   }
 }
 
-
-// --- Bot Execution Loop ---
-const POLLING_INTERVAL = 30000; // 30 seconds
-
-(async () => {
-  console.log("🤖 Arbitrage bot starting...");
-  console.log("Configuration:", ARBITRAGE_CONFIG);
-  
-  // Run once immediately, then start the interval
-  await runArbitrage().catch(console.error);
-  setInterval(() => runArbitrage().catch(console.error), POLLING_INTERVAL);
-})(); 
+// Start the bot
+const bot = new ArbitrageBot();
+bot.start().catch((error) => {
+  logger.error('Fatal error:', error);
+  process.exit(1);
+}); 

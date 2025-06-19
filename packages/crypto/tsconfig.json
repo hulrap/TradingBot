@@ -5,6 +5,9 @@
   "compilerOptions": {
     "outDir": "./dist",
     "rootDir": "./src",
+    "declaration": true,
+    "emitDeclarationOnly": false,
+    "incremental": false,
     "module": "commonjs",
     "target": "es2021",
     "lib": ["es2021"],

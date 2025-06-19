@@ -4,7 +4,6 @@ import React, { createContext, useContext, useEffect, useState } from 'react';
 import { User, Session } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
 import { LoginRequest, RegisterRequest, AuthResponse } from '@trading-bot/types';
-import { hashPassword, verifyPassword } from '@trading-bot/crypto';
 import toast from 'react-hot-toast';
 
 interface AuthContextType {
@@ -48,7 +47,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     // Listen for auth changes
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
+    } = supabase.auth.onAuthStateChange((_event: string, session: Session | null) => {
       setSession(session);
       setUser(session?.user ?? null);
       setLoading(false);
@@ -70,7 +69,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
         toast.error(error.message);
         return {
           success: false,
-          error: error.message
+          error: error.message,
+          timestamp: new Date()
         };
       }
 
@@ -88,14 +88,16 @@ export function AuthProvider({ children }: AuthProviderProps) {
         user: data.user,
         accessToken: data.session?.access_token,
         refreshToken: data.session?.refresh_token,
-        expiresIn: data.session?.expires_in
+        expiresIn: data.session?.expires_in,
+        timestamp: new Date()
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'An error occurred';
       toast.error(message);
       return {
         success: false,
-        error: message
+        error: message,
+        timestamp: new Date()
       };
     } finally {
       setLoading(false);
@@ -121,7 +123,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
         toast.error(error.message);
         return {
           success: false,
-          error: error.message
+          error: error.message,
+          timestamp: new Date()
         };
       }
 
@@ -150,14 +153,16 @@ export function AuthProvider({ children }: AuthProviderProps) {
       toast.success('Account created! Please check your email for verification.');
       return {
         success: true,
-        user: data.user
+        user: data.user,
+        timestamp: new Date()
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'An error occurred';
       toast.error(message);
       return {
         success: false,
-        error: message
+        error: message,
+        timestamp: new Date()
       };
     } finally {
       setLoading(false);

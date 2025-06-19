@@ -62,11 +62,13 @@ export type RegisterRequest = z.infer<typeof RegisterRequestSchema>;
 
 export const AuthResponseSchema = z.object({
   success: z.boolean(),
-  user: UserSchema.optional(),
+  user: z.any().optional(), // Using any for Supabase User type compatibility
   accessToken: z.string().optional(),
   refreshToken: z.string().optional(),
   expiresIn: z.number().optional(),
-  error: z.string().optional()
+  error: z.string().optional(),
+  message: z.string().optional(),
+  timestamp: z.date().default(() => new Date())
 });
 
 export type AuthResponse = z.infer<typeof AuthResponseSchema>;
