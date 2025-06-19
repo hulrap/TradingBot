@@ -11,8 +11,9 @@ export {
 export {
   ConnectionPool,
   type ConnectionPoolConfig,
-  type PooledConnection,
-  type LoadBalancingStats
+  type PoolConnection,
+  type LoadBalancer,
+  type PoolMetrics
 } from './connection-pool';
 
 export {
@@ -21,11 +22,14 @@ export {
   type TokenInfo,
   type WalletBalance,
   type TransactionRequest,
-  type TransactionResponse,
+  type TransactionReceipt,
+  type TransactionLog,
   type BlockInfo,
-  type GasEstimate,
+  type GasSettings,
   type SwapQuote,
-  type ChainState
+  type ChainState,
+  type ChainAbstractionConfig,
+  type SupportedChain
 } from './chain-abstraction';
 
 export {

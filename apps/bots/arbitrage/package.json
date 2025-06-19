@@ -14,7 +14,10 @@
     "@trading-bot/types": "workspace:*",
     "axios": "^1.7.2",
     "better-sqlite3": "^10.0.0",
-    "ethers": "^6.11.1"
+    "ethers": "^6.11.1",
+    "winston": "^3.11.0",
+    "events": "^3.3.0",
+    "dotenv": "^16.4.5"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.10",

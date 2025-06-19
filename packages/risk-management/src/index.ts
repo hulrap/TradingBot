@@ -26,6 +26,16 @@ export {
   type RiskAlert
 } from './risk-manager';
 
+// Import types for use in utility functions
+import type { KillSwitchConfig } from './global-kill-switch';
+import type { PositionSizingConfig } from './position-sizing';
+import type { 
+  StressTestScenario, 
+  RiskManagerConfig,
+  RiskAlert,
+  Position 
+} from './risk-manager';
+
 // Utility functions and helpers
 export const createDefaultKillSwitchConfig = (): KillSwitchConfig => ({
   enableAutoTrigger: true,
@@ -250,25 +260,6 @@ export const analyzePortfolioHealth = (
     liquidityScore: Math.round(liquidityScore),
     overallHealth
   };
-};
-
-// Export types for external use
-export type {
-  KillSwitchConfig,
-  KillSwitchEvent,
-  KillSwitchStatus,
-  PositionSizingConfig,
-  MarketData,
-  TradeSignal,
-  PositionResult,
-  PortfolioRisk,
-  RiskManagerConfig,
-  StressTestScenario,
-  Position,
-  RiskReport,
-  StressTestResult,
-  RiskRecommendation,
-  RiskAlert
 };
 
 // Version export

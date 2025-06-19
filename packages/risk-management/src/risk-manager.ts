@@ -67,7 +67,7 @@ export interface RiskRecommendation {
 
 export interface RiskAlert {
   id: string;
-  type: 'risk_limit' | 'correlation' | 'concentration' | 'drawdown' | 'stress_test';
+  type: 'risk_limit' | 'correlation' | 'concentration' | 'drawdown' | 'stress_test' | 'emergency_stop';
   severity: 'info' | 'warning' | 'error' | 'critical';
   message: string;
   timestamp: string;

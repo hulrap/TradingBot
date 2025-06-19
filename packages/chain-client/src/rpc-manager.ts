@@ -920,16 +920,6 @@ export class RPCManager extends EventEmitter {
     };
   }
 
-  getProviderStatus(chain?: string): RPCEndpoint[] {
-    let endpoints = Array.from(this.endpoints.values());
-    
-    if (chain) {
-      endpoints = endpoints.filter(e => e.provider.chain === chain);
-    }
-    
-    return endpoints.sort((a, b) => b.provider.priority - a.provider.priority);
-  }
-
   async optimizeForLatency(chain: string): Promise<void> {
     // Run latency tests on all providers for the chain
     const endpoints = Array.from(this.endpoints.values())
@@ -942,7 +932,9 @@ export class RPCManager extends EventEmitter {
         params: [],
         chain,
         priority: 'low',
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        retryCount: 0,
+        maxRetries: 0
       };
 
       const startTime = Date.now();

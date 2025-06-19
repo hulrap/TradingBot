@@ -323,7 +323,7 @@ export class ConnectionPool extends EventEmitter {
     this.updateConnectionCounts();
   }
 
-  private processQueue(): void {
+  private async processQueue(): Promise<void> {
     while (this.requestQueue.length > 0) {
       const request = this.requestQueue[0];
       

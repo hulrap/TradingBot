@@ -307,7 +307,7 @@ export class PaperTradingEngine extends EventEmitter {
   private calculateMarketVolatility(token: string): number {
     // Simple volatility calculation based on recent price movements
     // In a real implementation, this would use historical data
-    const baseVolatility = {
+    const baseVolatility: { [key: string]: number } = {
       'ETH': 0.02,
       'WBTC': 0.015,
       'SOL': 0.03,

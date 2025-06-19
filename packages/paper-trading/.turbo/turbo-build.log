@@ -1,8 +1,18 @@
 
-
 > @trading-bot/paper-trading@0.0.0 build /workspace/packages/paper-trading
 > tsup src/index.ts --format cjs,esm --dts
 
-sh: 1: tsup: not found
-[41m[30m ELIFECYCLE [39m[49m [31mCommand failed.[39m
-[43m[30m WARN [39m[49m  Local package.json exists, but node_modules missing, did you mean to install?
+CLI Building entry: src/index.ts
+CLI Using tsconfig: tsconfig.json
+CLI tsup v8.0.0
+CLI Target: es2022
+CJS Build start
+ESM Build start
+CJS dist/index.js 10.63 KB
+CJS ⚡️ Build success in 16ms
+ESM dist/index.mjs 9.61 KB
+ESM ⚡️ Build success in 16ms
+DTS Build start
+DTS ⚡️ Build success in 453ms
+DTS dist/index.d.ts  2.94 KB
+DTS dist/index.d.mts 2.94 KB

@@ -13,7 +13,10 @@
     "@trading-bot/chain-client": "workspace:*",
     "@trading-bot/types": "workspace:*",
     "ethers": "^6.11.1",
-    "@solana/web3.js": "^1.91.4"
+    "@solana/web3.js": "^1.91.4",
+    "winston": "^3.11.0",
+    "events": "^3.3.0",
+    "dotenv": "^16.4.5"
   },
   "devDependencies": {
     "@types/node": "^20",

@@ -1,19 +1,103 @@
 
+> @trading-bot/chain-client@1.0.0 build /workspace/packages/chain-client
+> tsup
 
-> @trading-bot/chain-client@0.0.0 build /workspace/packages/chain-client
-> tsup src/index.ts --format cjs,esm --dts
+CLI Building entry: src/index.ts
+CLI Using tsconfig: tsconfig.json
+CLI tsup v8.0.2
+CLI Using tsup config: /workspace/packages/chain-client/tsup.config.ts
+CLI Target: node18
+CLI Cleaning output folder
+ESM Build start
+CJS Build start
+DTS Build start
+ESM dist/index.mjs     79.14 KB
+ESM dist/index.mjs.map 156.99 KB
+ESM ⚡️ Build success in 264ms
+CJS dist/index.js     79.64 KB
+CJS dist/index.js.map 156.99 KB
+CJS ⚡️ Build success in 264ms
+src/chain-abstraction.ts(488,7): error TS2322: Type 'string | null' is not assignable to type 'string'.
+  Type 'null' is not assignable to type 'string'.
+src/chain-abstraction.ts(494,7): error TS4104: The type 'readonly string[]' is 'readonly' and cannot be assigned to the mutable type 'string[]'.
+src/chain-abstraction.ts(514,7): error TS2322: Type 'string | null' is not assignable to type 'string | undefined'.
+  Type 'null' is not assignable to type 'string | undefined'.
+src/chain-abstraction.ts(518,7): error TS2322: Type '{ address: string; topics: readonly string[]; data: string; blockNumber: number; transactionHash: string; logIndex: number; }[]' is not assignable to type 'TransactionLog[]'.
+  Type '{ address: string; topics: readonly string[]; data: string; blockNumber: number; transactionHash: string; logIndex: number; }' is not assignable to type 'TransactionLog'.
+    Types of property 'topics' are incompatible.
+      The type 'readonly string[]' is 'readonly' and cannot be assigned to the mutable type 'string[]'.
+src/chain-abstraction.ts(526,7): error TS2322: Type '() => Promise<number>' is not assignable to type 'number'.
+src/chain-abstraction.ts(851,7): error TS2322: Type 'string | null' is not assignable to type 'string | undefined'.
+  Type 'null' is not assignable to type 'string | undefined'.
+src/chain-abstraction.ts(855,7): error TS2322: Type '{ address: string; topics: readonly string[]; data: string; blockNumber: number; transactionHash: string; logIndex: number; }[]' is not assignable to type 'TransactionLog[]'.
+  Type '{ address: string; topics: readonly string[]; data: string; blockNumber: number; transactionHash: string; logIndex: number; }' is not assignable to type 'TransactionLog'.
+    Types of property 'topics' are incompatible.
+      The type 'readonly string[]' is 'readonly' and cannot be assigned to the mutable type 'string[]'.
+src/chain-abstraction.ts(863,7): error TS2322: Type '() => Promise<number>' is not assignable to type 'number'.
 
-[34mCLI[39m Building entry: src/index.ts
-[34mCLI[39m Using tsconfig: tsconfig.json
-[34mCLI[39m tsup v8.0.0
-[34mCLI[39m Target: es2021
-[34mCJS[39m Build start
-[34mESM[39m Build start
-[32mESM[39m [1mdist/index.mjs [22m[32m5.46 KB[39m
-[32mESM[39m ⚡️ Build success in 19ms
-[32mCJS[39m [1mdist/index.js [22m[32m7.81 KB[39m
-[32mCJS[39m ⚡️ Build success in 20ms
-[34mDTS[39m Build start
-[32mDTS[39m ⚡️ Build success in 753ms
-[32mDTS[39m [1mdist/index.d.ts  [22m[32m5.29 KB[39m
-[32mDTS[39m [1mdist/index.d.mts [22m[32m5.29 KB[39m
+Error: error occured in dts build
+    at Worker.<anonymous> (/workspace/node_modules/.pnpm/tsup@8.0.2_typescript@5.8.3/node_modules/tsup/dist/index.js:2693:26)
+    at Worker.emit (node:events:518:28)
+    at MessagePort.<anonymous> (node:internal/worker:268:53)
+    at [nodejs.internal.kHybridDispatch] (node:internal/event_target:827:20)
+    at MessagePort.<anonymous> (node:internal/per_context/messageport:23:28)
+DTS Build error
+RollupError: [plugin dts] src/chain-abstraction.ts: Failed to compile. Check the logs above.
+    at getRollupError (/workspace/node_modules/.pnpm/rollup@4.44.0/node_modules/rollup/dist/shared/parseAst.js:285:41)
+    at Object.error (/workspace/node_modules/.pnpm/rollup@4.44.0/node_modules/rollup/dist/shared/parseAst.js:281:42)
+    at Object.error (/workspace/node_modules/.pnpm/rollup@4.44.0/node_modules/rollup/dist/shared/rollup.js:913:32)
+    at Object.error (/workspace/node_modules/.pnpm/rollup@4.44.0/node_modules/rollup/dist/shared/rollup.js:22252:42)
+    at generateDtsFromTs (/workspace/node_modules/.pnpm/tsup@8.0.2_typescript@5.8.3/node_modules/tsup/dist/rollup.js:7776:22)
+    at /workspace/node_modules/.pnpm/tsup@8.0.2_typescript@5.8.3/node_modules/tsup/dist/rollup.js:7783:59
+    at _nullishCoalesce (/workspace/node_modules/.pnpm/tsup@8.0.2_typescript@5.8.3/node_modules/tsup/dist/rollup.js:1:198)
+    at Object.transform (/workspace/node_modules/.pnpm/tsup@8.0.2_typescript@5.8.3/node_modules/tsup/dist/rollup.js:7783:18)
+    at /workspace/node_modules/.pnpm/rollup@4.44.0/node_modules/rollup/dist/shared/rollup.js:3387:40
+src/rpc-manager.ts(150,65): error TS2339: Property 'metadata' does not exist on type 'InternalAxiosRequestConfig<any>'.
+src/rpc-manager.ts(163,43): error TS2339: Property 'chain' does not exist on type 'RPCProvider'.
+src/rpc-manager.ts(164,40): error TS2339: Property 'chain' does not exist on type 'RPCProvider'.
+src/rpc-manager.ts(168,38): error TS2339: Property 'requests' does not exist on type 'ProviderMetrics'.
+src/rpc-manager.ts(169,38): error TS2339: Property 'errors' does not exist on type 'ProviderMetrics'.
+src/rpc-manager.ts(170,38): error TS2339: Property 'latency' does not exist on type 'ProviderMetrics'.
+src/rpc-manager.ts(171,38): error TS2339: Property 'cost' does not exist on type 'ProviderMetrics'.
+src/rpc-manager.ts(176,25): error TS2339: Property 'chain' does not exist on type 'RPCProvider'.
+src/rpc-manager.ts(184,81): error TS2339: Property 'chain' does not exist on type 'RPCProvider'.
+src/rpc-manager.ts(210,5): error TS2741: Property '[Symbol.dispose]' is missing in type 'Timer' but required in type 'Timeout'.
+src/rpc-manager.ts(366,9): error TS2353: Object literal may only specify known properties, and 'metadata' does not exist in type 'AxiosRequestConfig<any>'.
+src/rpc-manager.ts(668,42): error TS2339: Property 'preferredProvider' does not exist on type 'RPCRequest'.
+src/rpc-manager.ts(686,27): error TS2339: Property 'chain' does not exist on type 'RPCProvider'.
+src/rpc-manager.ts(767,13): error TS2339: Property 'successRate' does not exist on type 'ProviderMetrics'.
+src/rpc-manager.ts(773,15): error TS2339: Property 'requests' does not exist on type 'ProviderMetrics'.
+src/rpc-manager.ts(774,15): error TS2339: Property 'latency' does not exist on type 'ProviderMetrics'.
+src/rpc-manager.ts(774,34): error TS2339: Property 'latency' does not exist on type 'ProviderMetrics'.
+src/rpc-manager.ts(777,17): error TS2339: Property 'errors' does not exist on type 'ProviderMetrics'.
+src/rpc-manager.ts(781,54): error TS2339: Property 'requests' does not exist on type 'ProviderMetrics'.
+src/rpc-manager.ts(782,15): error TS2339: Property 'cost' does not exist on type 'ProviderMetrics'.
+src/rpc-manager.ts(818,37): error TS2339: Property 'totalRequests' does not exist on type 'Map<string, ProviderMetrics>'.
+src/rpc-manager.ts(819,35): error TS2339: Property 'successRate' does not exist on type 'Map<string, ProviderMetrics>'.
+src/rpc-manager.ts(820,38): error TS2339: Property 'averageLatency' does not exist on type 'Map<string, ProviderMetrics>'.
+src/rpc-manager.ts(821,39): error TS2339: Property 'costToday' does not exist on type 'Map<string, ProviderMetrics>'.
+src/rpc-manager.ts(905,35): error TS2339: Property 'totalRequests' does not exist on type 'Map<string, ProviderMetrics>'.
+src/rpc-manager.ts(906,40): error TS2339: Property 'successfulRequests' does not exist on type 'Map<string, ProviderMetrics>'.
+src/rpc-manager.ts(907,36): error TS2339: Property 'failedRequests' does not exist on type 'Map<string, ProviderMetrics>'.
+src/rpc-manager.ts(908,36): error TS2339: Property 'averageLatency' does not exist on type 'Map<string, ProviderMetrics>'.
+src/rpc-manager.ts(909,33): error TS2339: Property 'successRate' does not exist on type 'Map<string, ProviderMetrics>'.
+src/rpc-manager.ts(910,31): error TS2339: Property 'costToday' does not exist on type 'Map<string, ProviderMetrics>'.
+src/rpc-manager.ts(911,43): error TS2339: Property 'map' does not exist on type 'Map<string, ProviderMetrics>'.
+src/rpc-manager.ts(911,47): error TS7006: Parameter 'metrics' implicitly has an 'any' type.
+src/rpc-manager.ts(926,31): error TS2339: Property 'chain' does not exist on type 'RPCProvider'.
+src/rpc-manager.ts(977,28): error TS2339: Property 'chain' does not exist on type 'RPCProvider'.
+src/rpc-manager.ts(978,25): error TS2339: Property 'chain' does not exist on type 'RPCProvider'.
+src/rpc-manager.ts(983,25): error TS2339: Property 'chain' does not exist on type 'RPCProvider'.
+
+src/dex-aggregator.ts(4,39): error TS2305: Module '"./chain-abstraction"' has no exported member 'GasEstimate'.
+src/dex-aggregator.ts(441,62): error TS2345: Argument of type 'string' is not assignable to parameter of type 'SupportedChain'.
+src/dex-aggregator.ts(446,47): error TS2345: Argument of type 'string' is not assignable to parameter of type 'SupportedChain'.
+src/dex-aggregator.ts(450,47): error TS2345: Argument of type 'string' is not assignable to parameter of type 'SupportedChain'.
+src/dex-aggregator.ts(705,51): error TS2339: Property 'getBalance' does not exist on type 'ChainAbstraction'.
+src/dex-aggregator.ts(719,7): error TS2353: Object literal may only specify known properties, and 'chainId' does not exist in type 'TokenInfo'.
+
+src/connection-pool.ts(371,5): error TS2741: Property '[Symbol.dispose]' is missing in type 'Timer' but required in type 'Timeout'.
+src/connection-pool.ts(428,5): error TS2741: Property '[Symbol.dispose]' is missing in type 'Timer' but required in type 'Timeout'.
+src/connection-pool.ts(504,5): error TS2741: Property '[Symbol.dispose]' is missing in type 'Timer' but required in type 'Timeout'.
+
+ ELIFECYCLE  Command failed with exit code 1.
