@@ -3,6 +3,11 @@ import { verifyJWT as cryptoVerifyJWT } from '@trading-bot/crypto';
 import { userDb } from './database';
 import { getValidatedEnvironment } from './environment';
 
+// Extend global interface for rate limiting
+declare global {
+  var authRateLimits: Map<string, number[]> | undefined;
+}
+
 interface JWTPayload {
   sub: string;
   email?: string;
@@ -206,13 +211,51 @@ export async function validateResourceAccess(
  * @returns Promise resolving to boolean indicating if request is allowed
  */
 export async function checkAuthRateLimit(request: NextRequest): Promise<boolean> {
-  // Get IP for future rate limiting implementation
-  // const ip = request.headers.get('x-forwarded-for') || 
-  //            request.headers.get('x-real-ip') || 
-  //            'unknown';
+  const ip = request.headers.get('x-forwarded-for') || 
+             request.headers.get('x-real-ip') || 
+             'unknown';
   
-  // Implement basic rate limiting logic here
-  // In production, this should use Redis or similar
-  // For now, return true - implement proper rate limiting in production
+  // Basic in-memory rate limiting (for production, use Redis)
+  const rateLimitKey = `auth_attempts_${ip}`;
+  const now = Date.now();
+  const windowMs = 15 * 60 * 1000; // 15 minutes
+  const maxAttempts = 5;
+  
+  // Get or initialize attempts for this IP
+  if (typeof global.authRateLimits === 'undefined') {
+    global.authRateLimits = new Map();
+  }
+  
+  const attempts = global.authRateLimits.get(rateLimitKey) || [];
+  
+  // Remove attempts outside the time window
+  const recentAttempts = attempts.filter((attemptTime: number) => now - attemptTime < windowMs);
+  
+  // Check if rate limit exceeded
+  if (recentAttempts.length >= maxAttempts) {
+    console.warn('Rate limit exceeded for authentication attempt:', {
+      ip,
+      attempts: recentAttempts.length,
+      timestamp: new Date().toISOString()
+    });
+    return false;
+  }
+  
+  // Add current attempt and update cache
+  recentAttempts.push(now);
+  global.authRateLimits.set(rateLimitKey, recentAttempts);
+  
+  // Clean up old entries periodically
+  if (Math.random() < 0.01) { // 1% chance to clean up
+    for (const [key, attemptList] of global.authRateLimits.entries()) {
+      const validAttempts = (attemptList as number[]).filter((time: number) => now - time < windowMs);
+      if (validAttempts.length === 0) {
+        global.authRateLimits.delete(key);
+      } else {
+        global.authRateLimits.set(key, validAttempts);
+      }
+    }
+  }
+  
   return true;
 } 

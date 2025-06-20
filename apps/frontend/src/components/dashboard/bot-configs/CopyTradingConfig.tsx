@@ -17,7 +17,10 @@ import {
   DollarSign,
   Clock,
   Shield,
-  Activity
+  TrendingUp,
+  Activity,
+  ExternalLink,
+  BarChart3
 } from 'lucide-react';
 import { BotConfiguration, CopyTradingConfiguration, TradeFilter } from '../BotConfigurationDashboard';
 
@@ -360,10 +363,21 @@ export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) 
               </p>
             )}
             {walletValidation.isValid && copyConfig.targetWallet && (
-              <p className="text-sm text-green-600 flex items-center gap-1">
-                <CheckCircle className="h-4 w-4" />
-                Valid Ethereum address
-              </p>
+              <div className="flex items-center justify-between">
+                <p className="text-sm text-green-600 flex items-center gap-1">
+                  <CheckCircle className="h-4 w-4" />
+                  Valid Ethereum address
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => window.open(`https://etherscan.io/address/${copyConfig.targetWallet}`, '_blank')}
+                  className="text-xs"
+                >
+                  <ExternalLink className="h-3 w-3 mr-1" />
+                  View on Etherscan
+                </Button>
+              </div>
             )}
             
             {selectedWallet && (
@@ -398,20 +412,59 @@ export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) 
                 </div>
                 <div className="grid grid-cols-4 gap-4 mt-3 text-sm">
                   <div>
-                    <div className="text-muted-foreground">Win Rate</div>
+                    <div className="text-muted-foreground flex items-center gap-1">
+                      <CheckCircle className="h-3 w-3" />
+                      Win Rate
+                    </div>
                     <div className="font-medium">{selectedWallet.winRate}%</div>
                   </div>
                   <div>
-                    <div className="text-muted-foreground">Avg Return</div>
-                    <div className="font-medium">{selectedWallet.avgReturn}%</div>
+                    <div className="text-muted-foreground flex items-center gap-1">
+                      <TrendingUp className="h-3 w-3" />
+                      Avg Return
+                    </div>
+                    <div className="font-medium text-green-600">{selectedWallet.avgReturn}%</div>
                   </div>
                   <div>
-                    <div className="text-muted-foreground">Trades</div>
+                    <div className="text-muted-foreground flex items-center gap-1">
+                      <BarChart3 className="h-3 w-3" />
+                      Trades
+                    </div>
                     <div className="font-medium">{selectedWallet.trades}</div>
                   </div>
                   <div>
-                    <div className="text-muted-foreground">Last Active</div>
+                    <div className="text-muted-foreground flex items-center gap-1">
+                      <Clock className="h-3 w-3" />
+                      Last Active
+                    </div>
                     <div className="font-medium text-green-600">{selectedWallet.lastActive}</div>
+                  </div>
+                </div>
+                
+                {/* Wallet verification and external links */}
+                <div className="flex items-center justify-between mt-3 pt-3 border-t">
+                  <div className="text-xs text-muted-foreground">
+                    Wallet Verification & Analysis
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => window.open(`https://etherscan.io/address/${selectedWallet.address}`, '_blank')}
+                      className="text-xs"
+                    >
+                      <ExternalLink className="h-3 w-3 mr-1" />
+                      Etherscan
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => window.open(`https://debank.com/profile/${selectedWallet.address}`, '_blank')}
+                      className="text-xs"
+                    >
+                      <ExternalLink className="h-3 w-3 mr-1" />
+                      DeBank
+                    </Button>
                   </div>
                 </div>
               </div>

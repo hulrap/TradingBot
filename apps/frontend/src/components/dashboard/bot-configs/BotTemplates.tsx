@@ -15,7 +15,11 @@ import {
   Star,
   Filter,
   Search,
-  BarChart3
+  BarChart3,
+  DollarSign,
+  Clock,
+  Target,
+  Info
 } from 'lucide-react';
 import { 
   ArbitrageConfiguration, 
@@ -588,44 +592,80 @@ export function BotTemplates({ botType, onApplyTemplate }: BotTemplatesProps) {
 
               {/* Template-specific details */}
               {botType === 'arbitrage' && (
-                <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
                   <div>
-                    <div className="text-muted-foreground">Token Pairs</div>
+                    <div className="text-muted-foreground flex items-center gap-1">
+                      <Target className="h-3 w-3" />
+                      Token Pairs
+                    </div>
                     <div className="font-medium">
                       {(template.configuration as ArbitrageConfiguration).tokenPairs.length}
                     </div>
                   </div>
                   <div>
-                    <div className="text-muted-foreground">Profit Threshold</div>
+                    <div className="text-muted-foreground flex items-center gap-1">
+                      <DollarSign className="h-3 w-3" />
+                      Profit Threshold
+                    </div>
                     <div className="font-medium">
                       {(template.configuration as ArbitrageConfiguration).profitThreshold}%
                     </div>
                   </div>
                   <div>
-                    <div className="text-muted-foreground">Max Trade Size</div>
+                    <div className="text-muted-foreground flex items-center gap-1">
+                      <DollarSign className="h-3 w-3" />
+                      Max Trade Size
+                    </div>
                     <div className="font-medium">
                       ${(template.configuration as ArbitrageConfiguration).maxTradeSize}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-muted-foreground flex items-center gap-1">
+                      <Clock className="h-3 w-3" />
+                      Max Simultaneous
+                    </div>
+                    <div className="font-medium">
+                      {(template.configuration as ArbitrageConfiguration).maxSimultaneousTrades || 3}
                     </div>
                   </div>
                 </div>
               )}
 
               {botType === 'copy-trading' && (
-                <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
                   <div>
-                    <div className="text-muted-foreground">Copy Mode</div>
+                    <div className="text-muted-foreground flex items-center gap-1">
+                      <Target className="h-3 w-3" />
+                      Copy Mode
+                    </div>
                     <div className="font-medium">
                       {(template.configuration as CopyTradingConfiguration).copyMode.replace('_', ' ')}
                     </div>
                   </div>
                   <div>
-                    <div className="text-muted-foreground">Max Copy Amount</div>
+                    <div className="text-muted-foreground flex items-center gap-1">
+                      <DollarSign className="h-3 w-3" />
+                      Max Copy Amount
+                    </div>
                     <div className="font-medium">
                       ${(template.configuration as CopyTradingConfiguration).maxCopyAmount}
                     </div>
                   </div>
                   <div>
-                    <div className="text-muted-foreground">Filters</div>
+                    <div className="text-muted-foreground flex items-center gap-1">
+                      <Clock className="h-3 w-3" />
+                      Copy Delay
+                    </div>
+                    <div className="font-medium">
+                      {(template.configuration as CopyTradingConfiguration).delayMs / 1000}s
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-muted-foreground flex items-center gap-1">
+                      <Info className="h-3 w-3" />
+                      Filters
+                    </div>
                     <div className="font-medium">
                       {(template.configuration as CopyTradingConfiguration).tradeFilters.length}
                     </div>
@@ -634,17 +674,32 @@ export function BotTemplates({ botType, onApplyTemplate }: BotTemplatesProps) {
               )}
 
               {botType === 'sandwich' && (
-                <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
                   <div>
-                    <div className="text-muted-foreground">Min Victim Size</div>
+                    <div className="text-muted-foreground flex items-center gap-1">
+                      <DollarSign className="h-3 w-3" />
+                      Min Victim Size
+                    </div>
                     <div className="font-medium">
                       ${(template.configuration as SandwichConfiguration).minVictimTradeSize}
                     </div>
                   </div>
                   <div>
-                    <div className="text-muted-foreground">Gas Strategy</div>
+                    <div className="text-muted-foreground flex items-center gap-1">
+                      <Target className="h-3 w-3" />
+                      Gas Strategy
+                    </div>
                     <div className="font-medium">
                       {(template.configuration as SandwichConfiguration).gasBidStrategy}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-muted-foreground flex items-center gap-1">
+                      <Clock className="h-3 w-3" />
+                      Max Block Delay
+                    </div>
+                    <div className="font-medium">
+                      {(template.configuration as SandwichConfiguration).maxBlockDelay} blocks
                     </div>
                   </div>
                   <div>

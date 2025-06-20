@@ -15,6 +15,8 @@ import {
   Timer,
   DollarSign,
   Globe,
+  Info,
+  ExternalLink,
   Activity
 } from 'lucide-react';
 import { BotConfiguration, SandwichConfiguration } from '../BotConfigurationDashboard';
@@ -594,10 +596,37 @@ export function SandwichConfig({ config, onChange }: SandwichConfigProps) {
                 >
                   <div className="flex items-center justify-between mb-2">
                     <div>
-                      <div className="font-medium">{network.name}</div>
+                      <div className="font-medium flex items-center gap-2">
+                        {network.name}
+                        <div className="group relative">
+                          <Info className="h-3 w-3 text-muted-foreground cursor-help" />
+                          <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-black text-white text-xs rounded-md opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10 w-48">
+                            MEV protection network that provides private mempool access to reduce competition from other bots
+                          </div>
+                        </div>
+                      </div>
                       <div className="text-sm text-muted-foreground">{network.description}</div>
                     </div>
-                    {isEnabled && <CheckCircle className="h-5 w-5 text-primary" />}
+                    <div className="flex items-center gap-2">
+                      {isEnabled && <CheckCircle className="h-5 w-5 text-primary" />}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const urls = {
+                            flashbots: 'https://docs.flashbots.net/',
+                            jito: 'https://docs.jito.wtf/',
+                            bloxroute: 'https://docs.bloxroute.com/'
+                          };
+                          window.open(urls[network.id as keyof typeof urls], '_blank');
+                        }}
+                        className="text-xs"
+                      >
+                        <ExternalLink className="h-3 w-3 mr-1" />
+                        Docs
+                      </Button>
+                    </div>
                   </div>
                   <div className="grid grid-cols-3 gap-4 text-sm">
                     <div>
