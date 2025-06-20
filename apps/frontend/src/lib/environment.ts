@@ -125,15 +125,15 @@ export function validateEnvironment(): ValidationResult {
   
   // Prepare environment object
   const environmentData = {
-    JWT_SECRET: env.JWT_SECRET,
-    DATABASE_PATH: env.DATABASE_PATH,
-    SUPABASE_URL: env.SUPABASE_URL,
-    SUPABASE_SERVICE_ROLE_KEY: env.SUPABASE_SERVICE_ROLE_KEY,
-    SUPABASE_ANON_KEY: env.SUPABASE_ANON_KEY,
+    JWT_SECRET: env['JWT_SECRET'],
+    DATABASE_PATH: env['DATABASE_PATH'],
+    SUPABASE_URL: env['SUPABASE_URL'],
+    SUPABASE_SERVICE_ROLE_KEY: env['SUPABASE_SERVICE_ROLE_KEY'],
+    SUPABASE_ANON_KEY: env['SUPABASE_ANON_KEY'],
     NODE_ENV: env.NODE_ENV,
-    NEXTAUTH_SECRET: env.NEXTAUTH_SECRET,
-    REDIS_URL: env.REDIS_URL,
-    ENCRYPTION_KEY: env.ENCRYPTION_KEY,
+    NEXTAUTH_SECRET: env['NEXTAUTH_SECRET'],
+    REDIS_URL: env['REDIS_URL'],
+    ENCRYPTION_KEY: env['ENCRYPTION_KEY'],
   };
   
   try {
@@ -141,7 +141,8 @@ export function validateEnvironment(): ValidationResult {
     
     if (env.NODE_ENV === 'production') {
       // Strict validation for production
-      validatedEnv = ProductionEnvironmentSchema.parse(environmentData);
+      const prodEnv = ProductionEnvironmentSchema.parse(environmentData);
+      validatedEnv = prodEnv as ValidatedEnvironment;
       
       // Additional production security checks
       if (validatedEnv.JWT_SECRET === 'default-secret-for-development') {
@@ -155,10 +156,11 @@ export function validateEnvironment(): ValidationResult {
       
     } else {
       // More lenient validation for development
-      validatedEnv = DevelopmentEnvironmentSchema.parse(environmentData);
+      const devEnv = DevelopmentEnvironmentSchema.parse(environmentData);
+      validatedEnv = devEnv as ValidatedEnvironment;
       
       // Development warnings
-      if (!env.JWT_SECRET) {
+      if (!env['JWT_SECRET']) {
         warnings.push('JWT_SECRET not set - using generated secret for development');
       }
       
@@ -166,7 +168,7 @@ export function validateEnvironment(): ValidationResult {
         warnings.push('Using default JWT secret - this is insecure even for development');
       }
       
-      if (!env.SUPABASE_URL && !env.DATABASE_PATH) {
+      if (!env['SUPABASE_URL'] && !env['DATABASE_PATH']) {
         warnings.push('Neither SUPABASE_URL nor DATABASE_PATH configured - using default SQLite');
       }
     }
@@ -182,11 +184,16 @@ export function validateEnvironment(): ValidationResult {
       warnings.forEach(warning => console.warn(`⚠️  ${warning}`));
     }
     
-    return {
+    const result: ValidationResult = {
       success: true,
-      environment: validatedEnv,
-      warnings: warnings.length > 0 ? warnings : undefined
+      environment: validatedEnv
     };
+    
+    if (warnings.length > 0) {
+      result.warnings = warnings;
+    }
+    
+    return result;
     
   } catch (error) {
     if (error instanceof z.ZodError) {
