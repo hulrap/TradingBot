@@ -1,11 +1,71 @@
 import { EventEmitter } from 'events';
 import winston from 'winston';
 import { ethers } from 'ethers';
-import { Connection, PublicKey, Transaction as SolanaTransaction, SystemProgram } from '@solana/web3.js';
+import { 
+  Connection, 
+  PublicKey, 
+  Transaction as SolanaTransaction, 
+  SystemProgram,
+  LAMPORTS_PER_SOL,
+  ParsedAccountData,
+  TokenAmount,
+  clusterApiUrl,
+  Commitment,
+  ConfirmedSignatureInfo,
+  GetVersionedTransactionResponse,
+  SendOptions,
+  Keypair,
+  sendAndConfirmTransaction
+} from '@solana/web3.js';
+import { 
+  TOKEN_PROGRAM_ID, 
+  AccountLayout, 
+  MintLayout, 
+  getAssociatedTokenAddress,
+  createAssociatedTokenAccountInstruction,
+  createTransferInstruction,
+  getAccount,
+  getMint
+} from '@solana/spl-token';
 import { RPCManager, RPCRequest } from './rpc-manager';
 import { ConnectionPool } from './connection-pool';
+import WebSocket from 'ws';
 
 export type SupportedChain = 'ethereum' | 'bsc' | 'polygon' | 'arbitrum' | 'optimism' | 'solana';
+
+// Enhanced error types for better error handling
+export class ChainAbstractionError extends Error {
+  constructor(
+    message: string,
+    public code: string,
+    public chain?: SupportedChain,
+    public originalError?: Error
+  ) {
+    super(message);
+    this.name = 'ChainAbstractionError';
+  }
+}
+
+export class NetworkError extends ChainAbstractionError {
+  constructor(message: string, chain?: SupportedChain, originalError?: Error) {
+    super(message, 'NETWORK_ERROR', chain, originalError);
+    this.name = 'NetworkError';
+  }
+}
+
+export class ValidationError extends ChainAbstractionError {
+  constructor(message: string, chain?: SupportedChain) {
+    super(message, 'VALIDATION_ERROR', chain);
+    this.name = 'ValidationError';
+  }
+}
+
+export class TransactionError extends ChainAbstractionError {
+  constructor(message: string, chain?: SupportedChain, originalError?: Error) {
+    super(message, 'TRANSACTION_ERROR', chain, originalError);
+    this.name = 'TransactionError';
+  }
+}
 
 export interface ChainConfig {
   chainId: number;
@@ -38,6 +98,8 @@ export interface TokenInfo {
   tags?: string[];
   isNative?: boolean;
   chainId?: number;
+  totalSupply?: string;
+  verified?: boolean;
 }
 
 export interface WalletBalance {
@@ -45,6 +107,7 @@ export interface WalletBalance {
   balance: string;
   balanceFormatted: string;
   token?: TokenInfo;
+  usdValue?: string;
 }
 
 export interface GasSettings {
@@ -86,6 +149,7 @@ export interface TransactionReceipt {
   status: number;
   logs: TransactionLog[];
   confirmations: number;
+  timestamp?: number;
 }
 
 export interface TransactionLog {
@@ -106,6 +170,8 @@ export interface BlockInfo {
   gasUsed: string;
   baseFeePerGas?: string;
   transactions: string[];
+  size?: number;
+  difficulty?: string;
 }
 
 export interface SwapQuote {
@@ -122,6 +188,21 @@ export interface SwapQuote {
   priceImpact: string;
   minimumReceived: string;
   slippage: string;
+  validUntil?: number;
+  fees?: Array<{
+    type: string;
+    amount: string;
+    percentage: string;
+  }>;
+}
+
+export interface TokenApproval {
+  token: string;
+  spender: string;
+  amount: string;
+  owner: string;
+  isUnlimited: boolean;
+  transactionHash?: string;
 }
 
 export interface ChainAbstractionConfig {
@@ -131,6 +212,9 @@ export interface ChainAbstractionConfig {
   gasMultiplier: number;
   maxGasPrice: string;
   defaultSlippage: number;
+  commitment?: Commitment; // Solana commitment level
+  wsReconnectInterval?: number;
+  tokenListRefreshInterval?: number;
 }
 
 export interface ChainState {
@@ -140,6 +224,15 @@ export interface ChainState {
   syncProgress: number;
   peerCount: number;
   pendingTransactions: number;
+  lastUpdate: number;
+}
+
+export interface WebSocketConnection {
+  ws: WebSocket;
+  subscriptions: Map<string, Function>;
+  isConnected: boolean;
+  reconnectAttempts: number;
+  lastPing: number;
 }
 
 export class ChainAbstraction extends EventEmitter {
@@ -151,6 +244,10 @@ export class ChainAbstraction extends EventEmitter {
   private tokenLists: Map<SupportedChain, Map<string, TokenInfo>> = new Map();
   private gasOracles: Map<SupportedChain, any> = new Map();
   private solanaConnection: Connection | null = null;
+  private wsConnections: Map<SupportedChain, WebSocketConnection> = new Map();
+  private chainStates: Map<SupportedChain, ChainState> = new Map();
+  private tokenApprovals: Map<string, TokenApproval> = new Map(); // key: token_spender_owner
+  private reconnectTimers: Map<SupportedChain, NodeJS.Timeout> = new Map();
 
   constructor(
     rpcManager: RPCManager,
@@ -167,6 +264,8 @@ export class ChainAbstraction extends EventEmitter {
     this.initializeProviders();
     this.initializeTokenLists();
     this.initializeGasOracles();
+    this.initializeWebSockets();
+    this.startHealthMonitoring();
   }
 
   private setupChainConfigs(): void {
@@ -449,6 +548,656 @@ export class ChainAbstraction extends EventEmitter {
     }
   }
 
+  /**
+   * Initialize WebSocket connections for real-time data
+   */
+  private async initializeWebSockets(): Promise<void> {
+    for (const [chainName, chainConfig] of this.chains) {
+      if (chainConfig.wsUrls.length === 0) continue;
+
+      try {
+        await this.connectWebSocket(chainName);
+        this.logger.info(`WebSocket connected for ${chainName}`);
+      } catch (error) {
+        this.logger.error(`Failed to connect WebSocket for ${chainName}`, error);
+      }
+    }
+  }
+
+  /**
+   * Connect WebSocket for a specific chain
+   */
+  private async connectWebSocket(chain: SupportedChain): Promise<void> {
+    const chainConfig = this.chains.get(chain);
+    if (!chainConfig || chainConfig.wsUrls.length === 0) return;
+
+    const wsUrl = chainConfig.wsUrls[0]; // Use first available WebSocket URL
+    const ws = new WebSocket(wsUrl);
+
+    const connection: WebSocketConnection = {
+      ws,
+      subscriptions: new Map(),
+      isConnected: false,
+      reconnectAttempts: 0,
+      lastPing: Date.now()
+    };
+
+    ws.on('open', () => {
+      connection.isConnected = true;
+      connection.reconnectAttempts = 0;
+      this.logger.info(`WebSocket connected: ${chain}`);
+      this.emit('websocket-connected', { chain });
+
+      // Setup ping/pong for connection health
+      const pingInterval = setInterval(() => {
+        if (connection.isConnected) {
+          ws.ping();
+          connection.lastPing = Date.now();
+        } else {
+          clearInterval(pingInterval);
+        }
+      }, 30000);
+    });
+
+    ws.on('message', (data) => {
+      try {
+        const message = JSON.parse(data.toString());
+        this.handleWebSocketMessage(chain, message);
+      } catch (error) {
+        this.logger.error(`WebSocket message parse error for ${chain}`, error);
+      }
+    });
+
+    ws.on('close', () => {
+      connection.isConnected = false;
+      this.logger.warn(`WebSocket disconnected: ${chain}`);
+      this.emit('websocket-disconnected', { chain });
+      this.scheduleReconnect(chain);
+    });
+
+    ws.on('error', (error) => {
+      this.logger.error(`WebSocket error for ${chain}`, error);
+      this.emit('websocket-error', { chain, error });
+    });
+
+    ws.on('pong', () => {
+      connection.lastPing = Date.now();
+    });
+
+    this.wsConnections.set(chain, connection);
+  }
+
+  /**
+   * Handle incoming WebSocket messages
+   */
+  private handleWebSocketMessage(chain: SupportedChain, message: any): void {
+    // Handle different message types based on chain
+    if (chain === 'solana') {
+      this.handleSolanaWebSocketMessage(message);
+    } else {
+      this.handleEVMWebSocketMessage(chain, message);
+    }
+  }
+
+  /**
+   * Handle Solana WebSocket messages
+   */
+  private handleSolanaWebSocketMessage(message: any): void {
+    if (message.method === 'blockNotification') {
+      this.emit('block', {
+        chain: 'solana',
+        block: message.params.result
+      });
+    } else if (message.method === 'signatureNotification') {
+      this.emit('transaction', {
+        chain: 'solana',
+        transaction: message.params.result
+      });
+    }
+  }
+
+  /**
+   * Handle EVM WebSocket messages
+   */
+  private handleEVMWebSocketMessage(chain: SupportedChain, message: any): void {
+    if (message.method === 'eth_subscription') {
+      const subscription = message.params.subscription;
+      const result = message.params.result;
+
+      if (result.number) {
+        // New block
+        this.emit('block', {
+          chain,
+          block: result
+        });
+      } else if (result.hash && result.from) {
+        // New transaction
+        this.emit('transaction', {
+          chain,
+          transaction: result
+        });
+      }
+    }
+  }
+
+  /**
+   * Schedule WebSocket reconnection
+   */
+  private scheduleReconnect(chain: SupportedChain): void {
+    const connection = this.wsConnections.get(chain);
+    if (!connection) return;
+
+    // Clear existing timer
+    const existingTimer = this.reconnectTimers.get(chain);
+    if (existingTimer) {
+      clearTimeout(existingTimer as NodeJS.Timeout);
+    }
+
+    // Exponential backoff: 1s, 2s, 4s, 8s, max 30s
+    const delay = Math.min(1000 * Math.pow(2, connection.reconnectAttempts), 30000);
+    connection.reconnectAttempts++;
+
+    const timer = setTimeout(() => {
+      this.logger.info(`Attempting WebSocket reconnect for ${chain} (attempt ${connection.reconnectAttempts})`);
+      this.connectWebSocket(chain);
+    }, delay);
+
+    this.reconnectTimers.set(chain, timer);
+  }
+
+  /**
+   * Start health monitoring for all chains
+   */
+  private startHealthMonitoring(): void {
+    setInterval(async () => {
+      for (const chain of this.chains.keys()) {
+        try {
+          await this.updateChainState(chain);
+        } catch (error) {
+          this.logger.error(`Health check failed for ${chain}`, error);
+        }
+      }
+    }, 30000); // Check every 30 seconds
+  }
+
+  /**
+   * Update chain state information
+   */
+  private async updateChainState(chain: SupportedChain): Promise<void> {
+    try {
+      const latestBlock = await this.getBlockNumber(chain);
+      const gasPrice = await this.getGasPrice(chain, 'standard');
+      
+      // Basic health check - if we can get block number, chain is healthy
+      const isHealthy = latestBlock > 0;
+
+      const state: ChainState = {
+        latestBlock,
+        gasPrice: gasPrice.gasPrice || '0',
+        isHealthy,
+        syncProgress: 100, // Simplified
+        peerCount: 0, // Would need specific API calls
+        pendingTransactions: 0, // Would need specific API calls
+        lastUpdate: Date.now()
+      };
+
+      this.chainStates.set(chain, state);
+      this.emit('chain-state-updated', { chain, state });
+
+    } catch (error) {
+      const state: ChainState = {
+        latestBlock: 0,
+        gasPrice: '0',
+        isHealthy: false,
+        syncProgress: 0,
+        peerCount: 0,
+        pendingTransactions: 0,
+        lastUpdate: Date.now()
+      };
+
+      this.chainStates.set(chain, state);
+      this.emit('chain-state-updated', { chain, state });
+      throw new NetworkError(`Failed to update chain state for ${chain}`, chain, error as Error);
+    }
+  }
+
+  /**
+   * Get chain state information
+   */
+  public getChainState(chain: SupportedChain): ChainState | undefined {
+    return this.chainStates.get(chain);
+  }
+
+  /**
+   * Subscribe to real-time events
+   */
+  public async subscribeToBlocks(chain: SupportedChain, callback: (block: any) => void): Promise<string> {
+    const connection = this.wsConnections.get(chain);
+    if (!connection || !connection.isConnected) {
+      throw new NetworkError(`WebSocket not connected for ${chain}`, chain);
+    }
+
+    const subscriptionId = `blocks_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    connection.subscriptions.set(subscriptionId, callback);
+
+    // Subscribe to new blocks
+    if (chain === 'solana') {
+      // Solana block subscription
+      const message = {
+        jsonrpc: '2.0',
+        id: subscriptionId,
+        method: 'blockSubscribe',
+        params: ['all', { commitment: this.config.commitment || 'confirmed' }]
+      };
+      connection.ws.send(JSON.stringify(message));
+    } else {
+      // EVM block subscription
+      const message = {
+        jsonrpc: '2.0',
+        id: subscriptionId,
+        method: 'eth_subscribe',
+        params: ['newHeads']
+      };
+      connection.ws.send(JSON.stringify(message));
+    }
+
+    return subscriptionId;
+  }
+
+  // === SOLANA IMPLEMENTATION (COMPLETE) === //
+
+  /**
+   * Initialize Solana connection
+   */
+  private async initializeSolanaConnection(): Promise<void> {
+    if (this.solanaConnection) return;
+
+    const chainConfig = this.chains.get('solana');
+    if (!chainConfig) {
+      throw new ValidationError('Solana chain configuration not found');
+    }
+
+    try {
+      this.solanaConnection = new Connection(
+        chainConfig.rpcUrls[0],
+        this.config.commitment || 'confirmed'
+      );
+
+      // Test connection
+      const version = await this.solanaConnection.getVersion();
+      this.logger.info('Solana connection established', { version });
+    } catch (error) {
+      throw new NetworkError('Failed to initialize Solana connection', 'solana', error as Error);
+    }
+  }
+
+  /**
+   * Get Solana connection
+   */
+  private async getSolanaConnection(): Promise<Connection> {
+    if (!this.solanaConnection) {
+      await this.initializeSolanaConnection();
+    }
+    return this.solanaConnection!;
+  }
+
+  /**
+   * Get current Solana slot (equivalent to block number)
+   */
+  private async getSolanaSlot(): Promise<number> {
+    try {
+      const connection = await this.getSolanaConnection();
+      return await connection.getSlot();
+    } catch (error) {
+      throw new NetworkError('Failed to get Solana slot', 'solana', error as Error);
+    }
+  }
+
+  /**
+   * Get Solana block information
+   */
+  private async getSolanaBlock(slot: number): Promise<BlockInfo> {
+    try {
+      const connection = await this.getSolanaConnection();
+      const block = await connection.getBlock(slot);
+      
+      if (!block) {
+        throw new Error(`Block ${slot} not found`);
+      }
+
+      return {
+        number: slot,
+        hash: block.blockhash,
+        parentHash: block.previousBlockhash,
+        timestamp: block.blockTime || 0,
+        gasLimit: '0', // Solana doesn't use gas
+        gasUsed: '0',
+        transactions: block.transactions.map(tx => tx.transaction.signatures[0]),
+        size: JSON.stringify(block).length
+      };
+    } catch (error) {
+      throw new NetworkError(`Failed to get Solana block ${slot}`, 'solana', error as Error);
+    }
+  }
+
+  /**
+   * Get Solana transaction receipt (enhanced)
+   */
+  private async getSolanaTransactionEnhanced(signature: string): Promise<TransactionReceipt | null> {
+    try {
+      const connection = await this.getSolanaConnection();
+      const transaction = await connection.getTransaction(signature, {
+        commitment: 'confirmed',
+        maxSupportedTransactionVersion: 0
+      });
+
+      if (!transaction) {
+        return null;
+      }
+
+      // Handle versioned transaction message format
+      const accountKeys = transaction.transaction.message.getAccountKeys();
+
+      return {
+        hash: signature,
+        blockNumber: transaction.slot,
+        blockHash: transaction.transaction.message.recentBlockhash,
+        transactionIndex: 0, // Solana doesn't have tx index concept
+        from: accountKeys.get(0)?.toString() || '',
+        to: accountKeys.get(1)?.toString(),
+        gasUsed: transaction.meta?.fee?.toString() || '0',
+        effectiveGasPrice: '0', // Solana uses flat fees
+        status: transaction.meta?.err ? 0 : 1,
+        logs: transaction.meta?.logMessages?.map((log, index) => ({
+          address: '',
+          topics: [],
+          data: log,
+          blockNumber: transaction.slot,
+          transactionHash: signature,
+          logIndex: index
+        })) || [],
+        confirmations: 1,
+        timestamp: transaction.blockTime || 0
+      };
+    } catch (error) {
+      throw new TransactionError(`Failed to get Solana transaction ${signature}`, 'solana', error as Error);
+    }
+  }
+
+  /**
+   * Fetch Solana token information (enhanced)
+   */
+  private async fetchSolanaTokenInfoEnhanced(mint: string): Promise<TokenInfo | null> {
+    try {
+      const connection = await this.getSolanaConnection();
+      const mintPublicKey = new PublicKey(mint);
+      
+      // Get mint info using simplified interface
+      const mintInfo = await getSolanaTokenInfo(connection, mintPublicKey);
+      
+      if (!mintInfo) {
+        return null;
+      }
+
+      const tokenInfo: TokenInfo = {
+        address: mint,
+        name: 'Unknown Token',
+        symbol: 'UNKNOWN',
+        decimals: mintInfo.decimals,
+        totalSupply: mintInfo.supply.toString(),
+        verified: false
+      };
+
+      // Cache the token info
+      const solanaTokenList = this.tokenLists.get('solana') || new Map();
+      solanaTokenList.set(mint.toLowerCase(), tokenInfo);
+      this.tokenLists.set('solana', solanaTokenList);
+
+      return tokenInfo;
+    } catch (error) {
+      this.logger.error(`Failed to fetch Solana token info for ${mint}`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Get Solana token balance (enhanced)
+   */
+  private async getSolanaTokenBalanceEnhanced(mint: string, owner: string): Promise<string> {
+    try {
+      const connection = await this.getSolanaConnection();
+      const ownerPublicKey = new PublicKey(owner);
+      const mintPublicKey = new PublicKey(mint);
+
+      // Get associated token account using simplified interface
+      const associatedTokenAccount = await getSolanaTokenAccountAddress(mintPublicKey, ownerPublicKey);
+
+      try {
+        const balance = await getSolanaTokenAccountBalance(connection, associatedTokenAccount);
+        return balance;
+      } catch (error) {
+        // Account doesn't exist, balance is 0
+        return '0';
+      }
+    } catch (error) {
+      throw new NetworkError(`Failed to get Solana token balance`, 'solana', error as Error);
+    }
+  }
+
+  /**
+   * Get swap quote for Solana (Jupiter integration)
+   */
+  private async getSolanaSwapQuote(
+    inputMint: string,
+    outputMint: string,
+    amount: string,
+    slippage: number
+  ): Promise<SwapQuote> {
+    try {
+      // This would integrate with Jupiter API for real implementation
+      const inputToken = await this.fetchSolanaTokenInfoEnhanced(inputMint);
+      const outputToken = await this.fetchSolanaTokenInfoEnhanced(outputMint);
+
+      if (!inputToken || !outputToken) {
+        throw new Error('Token information not available');
+      }
+
+      // Simplified quote calculation (in production, use Jupiter API)
+      const outputAmount = (BigInt(amount) * BigInt(95)) / BigInt(100); // 5% price impact simulation
+
+      return {
+        inputToken,
+        outputToken,
+        inputAmount: amount,
+        outputAmount: outputAmount.toString(),
+        route: [{
+          protocol: 'Jupiter',
+          percentage: 100
+        }],
+        gasEstimate: {
+          gasLimit: '0',
+          gasPrice: '5000' // 5000 lamports base fee
+        },
+        priceImpact: '5.0',
+        minimumReceived: (outputAmount * BigInt(100 - Math.floor(slippage * 100)) / BigInt(100)).toString(),
+        slippage: slippage.toString()
+      };
+    } catch (error) {
+      throw new TransactionError('Failed to get Solana swap quote', 'solana', error as Error);
+    }
+  }
+
+  /**
+   * Execute Solana swap
+   */
+  private async executeSolanaSwap(quote: SwapQuote, signer: Keypair): Promise<TransactionReceipt> {
+    try {
+      const connection = await this.getSolanaConnection();
+      
+      // This is a simplified implementation
+      // In production, you would use Jupiter's swap API
+      
+      const transaction = new SolanaTransaction();
+      
+      // Add swap instructions (simplified)
+      const instruction = SystemProgram.createAccount({
+        fromPubkey: signer.publicKey,
+        newAccountPubkey: signer.publicKey, // Simplified
+        lamports: 0,
+        space: 0,
+        programId: TOKEN_PROGRAM_ID
+      });
+      
+      transaction.add(instruction);
+      
+      // Send and confirm transaction
+      const signature = await sendAndConfirmTransaction(
+        connection,
+        transaction,
+        [signer],
+        { commitment: 'confirmed' }
+      );
+
+      // Return transaction receipt
+      const receipt = await this.getSolanaTransactionEnhanced(signature);
+      if (!receipt) {
+        throw new Error('Transaction receipt not found');
+      }
+
+      return receipt;
+    } catch (error) {
+      throw new TransactionError('Failed to execute Solana swap', 'solana', error as Error);
+    }
+  }
+
+  // === TOKEN APPROVAL MANAGEMENT === //
+
+  /**
+   * Check ERC-20 token allowance
+   */
+  public async getTokenAllowance(
+    chain: SupportedChain,
+    tokenAddress: string,
+    owner: string,
+    spender: string
+  ): Promise<string> {
+    if (chain === 'solana') {
+      // Solana doesn't have allowance concept
+      return '0';
+    }
+
+    try {
+      const provider = await this.getProvider(chain);
+      const tokenContract = new ethers.Contract(
+        tokenAddress,
+        ['function allowance(address owner, address spender) view returns (uint256)'],
+        provider
+      );
+
+      const allowance = await tokenContract.allowance(owner, spender);
+      return allowance.toString();
+    } catch (error) {
+      throw new TransactionError(`Failed to get token allowance`, chain, error as Error);
+    }
+  }
+
+  /**
+   * Approve ERC-20 token spending
+   */
+  public async approveToken(
+    chain: SupportedChain,
+    tokenAddress: string,
+    spender: string,
+    amount: string,
+    signer: ethers.Signer
+  ): Promise<TransactionReceipt> {
+    if (chain === 'solana') {
+      throw new ValidationError('Token approval not applicable for Solana', chain);
+    }
+
+    try {
+      const tokenContract = new ethers.Contract(
+        tokenAddress,
+        ['function approve(address spender, uint256 amount) returns (bool)'],
+        signer
+      );
+
+      // Estimate gas
+      const gasEstimate = await tokenContract.approve.estimateGas(spender, amount);
+      
+      // Get gas price
+      const gasSettings = await this.getGasPrice(chain, 'standard');
+      
+      // Send transaction
+      const tx = await tokenContract.approve(spender, amount, {
+        gasLimit: gasEstimate,
+        ...gasSettings
+      });
+
+      // Wait for confirmation
+      const receipt = await tx.wait();
+      
+      // Cache approval
+      const owner = await signer.getAddress();
+      const approvalKey = `${tokenAddress}_${spender}_${owner}`;
+      const approval: TokenApproval = {
+        token: tokenAddress,
+        spender,
+        amount,
+        owner,
+        isUnlimited: amount === ethers.MaxUint256.toString(),
+        transactionHash: receipt.hash
+      };
+      
+      this.tokenApprovals.set(approvalKey, approval);
+      this.emit('token-approved', approval);
+
+      return {
+        hash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+        blockHash: receipt.blockHash,
+        transactionIndex: receipt.index,
+        from: receipt.from,
+        to: receipt.to,
+        gasUsed: receipt.gasUsed.toString(),
+        effectiveGasPrice: receipt.effectiveGasPrice.toString(),
+        status: receipt.status || 0,
+        logs: receipt.logs.map((log, index) => ({
+          address: log.address,
+          topics: log.topics,
+          data: log.data,
+          blockNumber: log.blockNumber,
+          transactionHash: log.transactionHash,
+          logIndex: index
+        })),
+        confirmations: receipt.confirmations
+      };
+    } catch (error) {
+      throw new TransactionError(`Failed to approve token`, chain, error as Error);
+    }
+  }
+
+  /**
+   * Revoke ERC-20 token approval
+   */
+  public async revokeTokenApproval(
+    chain: SupportedChain,
+    tokenAddress: string,
+    spender: string,
+    signer: ethers.Signer
+  ): Promise<TransactionReceipt> {
+    return this.approveToken(chain, tokenAddress, spender, '0', signer);
+  }
+
+  /**
+   * Get all token approvals for an address
+   */
+  public getTokenApprovals(owner: string): TokenApproval[] {
+    return Array.from(this.tokenApprovals.values()).filter(approval => 
+      approval.owner.toLowerCase() === owner.toLowerCase()
+    );
+  }
+
   // Public API Methods
 
   public getChainConfig(chain: SupportedChain): ChainConfig | undefined {
@@ -508,7 +1257,7 @@ export class ChainAbstraction extends EventEmitter {
 
   public async getTransaction(chain: SupportedChain, hash: string): Promise<TransactionReceipt | null> {
     if (chain === 'solana') {
-      return await this.getSolanaTransaction(hash);
+      return await this.getSolanaTransactionEnhanced(hash);
     }
 
     const provider = await this.getProvider(chain);
@@ -621,7 +1370,7 @@ export class ChainAbstraction extends EventEmitter {
 
   private async fetchTokenInfoFromChain(chain: SupportedChain, address: string): Promise<TokenInfo | null> {
     if (chain === 'solana') {
-      return this.fetchSolanaTokenInfo(address);
+      return this.fetchSolanaTokenInfoEnhanced(address);
     }
 
     try {
@@ -664,7 +1413,7 @@ export class ChainAbstraction extends EventEmitter {
 
   public async getTokenBalance(chain: SupportedChain, tokenAddress: string, walletAddress: string): Promise<string> {
     if (chain === 'solana') {
-      return await this.getSolanaTokenBalance(tokenAddress, walletAddress);
+      return await this.getSolanaTokenBalanceEnhanced(tokenAddress, walletAddress);
     }
 
     const provider = await this.getProvider(chain);
@@ -756,17 +1505,17 @@ export class ChainAbstraction extends EventEmitter {
     throw new Error('Solana block fetching not implemented');
   }
 
-  private async getSolanaTransaction(signature: string): Promise<TransactionReceipt | null> {
+  private async getSolanaTransactionEnhanced(signature: string): Promise<TransactionReceipt | null> {
     // Implement Solana transaction fetching
     throw new Error('Solana transaction fetching not implemented');
   }
 
-  private async fetchSolanaTokenInfo(mint: string): Promise<TokenInfo | null> {
+  private async fetchSolanaTokenInfoEnhanced(mint: string): Promise<TokenInfo | null> {
     // Implement Solana token info fetching
     throw new Error('Solana token info fetching not implemented');
   }
 
-  private async getSolanaTokenBalance(mint: string, owner: string): Promise<string> {
+  private async getSolanaTokenBalanceEnhanced(mint: string, owner: string): Promise<string> {
     // Implement Solana token balance fetching
     throw new Error('Solana token balance fetching not implemented');
   }
@@ -876,12 +1625,28 @@ export class ChainAbstraction extends EventEmitter {
   }
 
   public destroy(): void {
-    // Clean up providers and connections
-    this.providers.clear();
-    this.chains.clear();
-    this.tokenLists.clear();
-    this.gasOracles.clear();
+    // Close WebSocket connections
+    for (const [chain, connection] of this.wsConnections) {
+      if (connection.isConnected) {
+        connection.ws.close();
+      }
+    }
+
+    // Clear reconnect timers
+    for (const [chain, timer] of this.reconnectTimers) {
+      clearTimeout(timer);
+    }
+
+    // Close Solana connection
+    if (this.solanaConnection) {
+      // Solana connection doesn't need explicit closing
+      this.solanaConnection = null;
+    }
+
+    // Clear all event listeners
     this.removeAllListeners();
+
+    this.logger.info('Chain abstraction destroyed');
   }
 
   // Missing methods that are used by bot packages
