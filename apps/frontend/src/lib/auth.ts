@@ -41,9 +41,8 @@ export async function verifyJWT(request: NextRequest): Promise<AuthResult> {
     }
 
     // Get validated environment configuration
-    let validatedEnv;
     try {
-      validatedEnv = getValidatedEnvironment();
+      getValidatedEnvironment();
     } catch (error) {
       console.error('Environment validation failed during JWT verification:', error);
       return {
@@ -207,9 +206,10 @@ export async function validateResourceAccess(
  * @returns Promise resolving to boolean indicating if request is allowed
  */
 export async function checkAuthRateLimit(request: NextRequest): Promise<boolean> {
-  const ip = request.headers.get('x-forwarded-for') || 
-             request.headers.get('x-real-ip') || 
-             'unknown';
+  // Get IP for future rate limiting implementation
+  // const ip = request.headers.get('x-forwarded-for') || 
+  //            request.headers.get('x-real-ip') || 
+  //            'unknown';
   
   // Implement basic rate limiting logic here
   // In production, this should use Redis or similar
