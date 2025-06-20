@@ -4,30 +4,132 @@ import { z } from 'zod';
 import { rateLimiter } from '@/lib/rate-limiter';
 import { verifyJWT } from '@/lib/auth';
 
+/**
+ * Performance Analytics API Configuration
+ * Centralized configuration for financial calculations and system parameters
+ */
+const PERFORMANCE_CONFIG = {
+  // Financial calculation constants
+  RISK_FREE_RATE_ANNUAL: parseFloat(process.env['RISK_FREE_RATE_ANNUAL'] || '0.02'), // 2% annual risk-free rate
+  VAR_CONFIDENCE_LEVEL: parseFloat(process.env['VAR_CONFIDENCE_LEVEL'] || '0.95'), // 95% confidence level for VaR
+  
+  // Date range defaults
+  DEFAULT_START_YEAR: parseInt(process.env['DEFAULT_PERFORMANCE_START_YEAR'] || '2023'),
+  
+  // Caching configuration
+  CACHE_TTL_SECONDS: parseInt(process.env['PERFORMANCE_CACHE_TTL'] || '300'), // 5 minutes
+  
+  // Rate limiting
+  RATE_LIMIT_REQUESTS: parseInt(process.env['PERFORMANCE_RATE_LIMIT'] || '30'),
+  RATE_LIMIT_WINDOW_MS: parseInt(process.env['PERFORMANCE_RATE_LIMIT_WINDOW'] || '3600000'), // 1 hour
+  
+  // Database optimization
+  MAX_TRADES_FOR_DETAILED_ANALYSIS: parseInt(process.env['MAX_TRADES_DETAILED_ANALYSIS'] || '10000'),
+  
+  // Portfolio breakdown limits
+  MAX_TOKEN_BREAKDOWN_ITEMS: parseInt(process.env['MAX_TOKEN_BREAKDOWN_ITEMS'] || '20'),
+} as const;
+
+/**
+ * Simple in-memory cache for expensive calculations
+ * In production, this should be replaced with Redis
+ */
+class PerformanceCache {
+  private cache = new Map<string, { data: any; timestamp: number; ttl: number }>();
+  
+  set(key: string, data: any, ttlSeconds: number = PERFORMANCE_CONFIG.CACHE_TTL_SECONDS): void {
+    this.cache.set(key, {
+      data,
+      timestamp: Date.now(),
+      ttl: ttlSeconds * 1000
+    });
+  }
+  
+  get(key: string): any | null {
+    const entry = this.cache.get(key);
+    if (!entry) return null;
+    
+    if (Date.now() - entry.timestamp > entry.ttl) {
+      this.cache.delete(key);
+      return null;
+    }
+    
+    return entry.data;
+  }
+  
+  clear(): void {
+    this.cache.clear();
+  }
+  
+  getStats(): { size: number; hits: number; misses: number } {
+    return {
+      size: this.cache.size,
+      hits: 0, // Would need proper tracking in production
+      misses: 0
+    };
+  }
+}
+
+const performanceCache = new PerformanceCache();
+
+/**
+ * Enhanced error types for better error handling
+ */
+class PerformanceAPIError extends Error {
+  constructor(
+    message: string,
+    public statusCode: number = 500,
+    public errorCode: string = 'PERFORMANCE_ERROR',
+    public details?: any
+  ) {
+    super(message);
+    this.name = 'PerformanceAPIError';
+  }
+}
+
 // Lazy initialization to avoid build-time errors
 function getSupabaseClient() {
   const supabaseUrl = process.env['SUPABASE_URL'];
   const supabaseServiceKey = process.env['SUPABASE_SERVICE_ROLE_KEY'];
   
   if (!supabaseUrl || !supabaseServiceKey) {
-    throw new Error('Supabase configuration is missing. Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables.');
+    throw new PerformanceAPIError(
+      'Supabase configuration is missing',
+      500,
+      'CONFIG_ERROR',
+      { missing: ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY'] }
+    );
   }
   
   return createClient(supabaseUrl, supabaseServiceKey);
 }
 
+/**
+ * Input validation schema with comprehensive validation
+ */
 const PerformanceQuerySchema = z.object({
-  botId: z.string().uuid().optional(),
-  botType: z.enum(['arbitrage', 'copy-trader', 'mev-sandwich']).optional(),
-  chain: z.enum(['ethereum', 'bsc', 'polygon', 'arbitrum', 'optimism', 'solana']).optional(),
-  period: z.enum(['1h', '24h', '7d', '30d', '90d', 'all']).optional().default('7d'),
-  granularity: z.enum(['hour', 'day', 'week']).optional().default('day'),
+  botId: z.string().uuid('Invalid bot ID format').optional(),
+  botType: z.enum(['arbitrage', 'copy-trader', 'mev-sandwich'], {
+    errorMap: () => ({ message: 'Bot type must be one of: arbitrage, copy-trader, mev-sandwich' })
+  }).optional(),
+  chain: z.enum(['ethereum', 'bsc', 'polygon', 'arbitrum', 'optimism', 'solana'], {
+    errorMap: () => ({ message: 'Chain must be one of: ethereum, bsc, polygon, arbitrum, optimism, solana' })
+  }).optional(),
+  period: z.enum(['1h', '24h', '7d', '30d', '90d', 'all'], {
+    errorMap: () => ({ message: 'Period must be one of: 1h, 24h, 7d, 30d, 90d, all' })
+  }).optional().default('7d'),
+  granularity: z.enum(['hour', 'day', 'week'], {
+    errorMap: () => ({ message: 'Granularity must be one of: hour, day, week' })
+  }).optional().default('day'),
   includeRiskMetrics: z.string().transform(val => val === 'true').optional().default('true'),
   includeComparison: z.string().transform(val => val === 'true').optional().default('false'),
-  benchmarkType: z.enum(['hold', 'market', 'peer']).optional().default('hold')
+  benchmarkType: z.enum(['hold', 'market', 'peer'], {
+    errorMap: () => ({ message: 'Benchmark type must be one of: hold, market, peer' })
+  }).optional().default('hold'),
+  forceRefresh: z.string().transform(val => val === 'true').optional().default('false')
 });
 
-// Supabase returns bot_configurations as an array due to the join
+// Enhanced interfaces with better typing
 interface SupabaseTrade {
   status: any;
   profit_loss_usd?: any;
@@ -45,7 +147,6 @@ interface SupabaseTrade {
   }[];
 }
 
-// Normalized Trade type for internal use
 interface Trade {
   status: string;
   profit_loss_usd: string | null | undefined;
@@ -65,6 +166,43 @@ interface Trade {
 
 interface TimeGroup {
   [key: string]: Trade[];
+}
+
+interface PerformanceFilters {
+  botId?: string | undefined;
+  botType?: string | undefined;
+  chain?: string | undefined;
+  dateRange: { from: string; to: string };
+}
+
+/**
+ * Enhanced logging for performance API operations
+ */
+function logPerformanceOperation(
+  operation: string,
+  userId: string,
+  filters: any,
+  duration?: number,
+  error?: Error
+): void {
+  const logData = {
+    timestamp: new Date().toISOString(),
+    operation,
+    userId,
+    filters: JSON.stringify(filters),
+    duration: duration ? `${duration}ms` : undefined,
+    error: error ? {
+      message: error.message,
+      stack: error.stack?.split('\n')[0]
+    } : undefined,
+    cacheStats: performanceCache.getStats()
+  };
+  
+  if (error) {
+    console.error('[PERFORMANCE_API_ERROR]', logData);
+  } else {
+    console.log('[PERFORMANCE_API_SUCCESS]', logData);
+  }
 }
 
 // Helper function to normalize Supabase trade data
@@ -89,48 +227,91 @@ function normalizeSupabaseTrade(supabaseTrade: SupabaseTrade): Trade {
   };
 }
 
+/**
+ * Performance Analytics API Endpoint
+ * 
+ * @route GET /api/performance
+ * @description Comprehensive trading bot performance analytics with risk metrics and portfolio breakdown
+ * 
+ * @param {string} [botId] - UUID of specific bot to analyze
+ * @param {string} [botType] - Type of bot: arbitrage, copy-trader, mev-sandwich
+ * @param {string} [chain] - Blockchain: ethereum, bsc, polygon, arbitrum, optimism, solana
+ * @param {string} [period=7d] - Time period: 1h, 24h, 7d, 30d, 90d, all
+ * @param {string} [granularity=day] - Data granularity: hour, day, week
+ * @param {string} [includeRiskMetrics=true] - Include risk analysis
+ * @param {string} [includeComparison=false] - Include benchmark comparison
+ * @param {string} [benchmarkType=hold] - Benchmark type: hold, market, peer
+ * @param {string} [forceRefresh=false] - Force cache refresh
+ * 
+ * @returns {Object} Performance data including:
+ *   - performance: Core metrics (P&L, success rate, returns)
+ *   - timeSeries: Historical performance data
+ *   - riskMetrics: Risk analysis (Sharpe ratio, VaR, max drawdown)
+ *   - comparison: Benchmark comparison data
+ *   - portfolio: Asset and strategy breakdown
+ * 
+ * @throws {400} Invalid query parameters
+ * @throws {401} Unauthorized - invalid or missing JWT token
+ * @throws {404} No trading data found for the specified criteria
+ * @throws {429} Rate limit exceeded
+ * @throws {500} Internal server error
+ */
 export async function GET(request: NextRequest) {
+  const startTime = Date.now();
+  let userId: string = '';
+  let filters: any = {};
+  
   try {
-    // Rate limiting
+    // Enhanced rate limiting with specific limits for performance API
     const rateLimitResult = await rateLimiter.check(request);
+    
     if (!rateLimitResult.success) {
-      return NextResponse.json(
+      throw new PerformanceAPIError(
+        'Rate limit exceeded for performance API',
+        429,
+        'RATE_LIMIT_EXCEEDED',
         { 
-          error: 'Rate limit exceeded',
-          retryAfter: Math.ceil((rateLimitResult.resetTime - Date.now()) / 1000)
-        },
-        { status: 429 }
+          retryAfter: Math.ceil((rateLimitResult.resetTime - Date.now()) / 1000),
+          limit: PERFORMANCE_CONFIG.RATE_LIMIT_REQUESTS,
+          windowMs: PERFORMANCE_CONFIG.RATE_LIMIT_WINDOW_MS
+        }
       );
     }
 
-    // Authentication
+    // Authentication with enhanced error details
     const authResult = await verifyJWT(request);
     if (!authResult.success) {
-      return NextResponse.json(
-        { error: 'Unauthorized', details: authResult.error },
-        { status: 401 }
+      throw new PerformanceAPIError(
+        'Authentication failed',
+        401,
+        'AUTH_FAILED',
+        { details: authResult.error }
       );
     }
 
-    const userId = authResult.payload?.sub;
+    userId = authResult.payload?.sub || '';
     if (!userId) {
-      return NextResponse.json(
-        { error: 'Invalid token payload' },
-        { status: 401 }
+      throw new PerformanceAPIError(
+        'Invalid token payload - missing user ID',
+        401,
+        'INVALID_TOKEN_PAYLOAD'
       );
     }
+
+    // Enhanced input validation
     const url = new URL(request.url);
     const queryParams = Object.fromEntries(url.searchParams.entries());
 
-    // Validate query parameters
     const validationResult = PerformanceQuerySchema.safeParse(queryParams);
     if (!validationResult.success) {
-      return NextResponse.json(
+      throw new PerformanceAPIError(
+        'Invalid query parameters',
+        400,
+        'VALIDATION_ERROR',
         { 
-          error: 'Invalid query parameters',
-          details: validationResult.error.errors
-        },
-        { status: 400 }
+          errors: validationResult.error.errors,
+          received: queryParams
+        }
       );
     }
 
@@ -142,11 +323,29 @@ export async function GET(request: NextRequest) {
       granularity,
       includeRiskMetrics,
       includeComparison,
-      benchmarkType
+      benchmarkType,
+      forceRefresh
     } = validationResult.data;
+
+    filters = { botId, botType, chain, period, granularity };
 
     // Calculate date range based on period
     const dateRange = calculateDateRange(period);
+    const cacheKey = `performance:${userId}:${JSON.stringify({ botId, botType, chain, period, granularity })}`;
+
+    // Check cache first (unless force refresh)
+    if (!forceRefresh) {
+      const cachedData = performanceCache.get(cacheKey);
+      if (cachedData) {
+        logPerformanceOperation('GET_PERFORMANCE_CACHED', userId, filters, Date.now() - startTime);
+        return NextResponse.json({
+          success: true,
+          data: cachedData,
+          cached: true,
+          timestamp: new Date().toISOString()
+        });
+      }
+    }
 
     // Get current performance metrics
     const currentMetrics = await getCurrentPerformanceMetrics(userId, {
@@ -154,7 +353,16 @@ export async function GET(request: NextRequest) {
       botType,
       chain,
       dateRange
-    });
+    } as PerformanceFilters);
+
+    if (!currentMetrics) {
+      throw new PerformanceAPIError(
+        'No trading data found for the specified criteria',
+        404,
+        'NO_DATA_FOUND',
+        { filters: { botId, botType, chain, period } }
+      );
+    }
 
     // Get time series data
     const timeSeriesData = await getTimeSeriesData(userId, {
@@ -196,38 +404,81 @@ export async function GET(request: NextRequest) {
       dateRange
     });
 
+    const responseData = {
+      period: {
+        range: period,
+        from: dateRange.from,
+        to: dateRange.to,
+        granularity
+      },
+      performance: currentMetrics,
+      timeSeries: timeSeriesData,
+      riskMetrics,
+      comparison: comparisonData,
+      portfolio: portfolioBreakdown,
+      filters: {
+        botId,
+        botType,
+        chain
+      },
+      metadata: {
+        calculationConfig: {
+          riskFreeRate: PERFORMANCE_CONFIG.RISK_FREE_RATE_ANNUAL,
+          varConfidenceLevel: PERFORMANCE_CONFIG.VAR_CONFIDENCE_LEVEL
+        },
+        dataQuality: {
+          totalDataPoints: timeSeriesData.length,
+          completeness: timeSeriesData.length > 0 ? 100 : 0
+        }
+      }
+    };
+
+    // Cache the response
+    performanceCache.set(cacheKey, responseData);
+
+    logPerformanceOperation('GET_PERFORMANCE_SUCCESS', userId, filters, Date.now() - startTime);
+
     return NextResponse.json({
       success: true,
-      data: {
-        period: {
-          range: period,
-          from: dateRange.from,
-          to: dateRange.to,
-          granularity
-        },
-        performance: currentMetrics,
-        timeSeries: timeSeriesData,
-        riskMetrics,
-        comparison: comparisonData,
-        portfolio: portfolioBreakdown,
-        filters: {
-          botId,
-          botType,
-          chain
-        }
-      },
+      data: responseData,
+      cached: false,
       timestamp: new Date().toISOString()
     });
 
   } catch (error) {
-    console.error('API error:', error);
+    const duration = Date.now() - startTime;
+    
+    if (error instanceof PerformanceAPIError) {
+      logPerformanceOperation('GET_PERFORMANCE_ERROR', userId, filters, duration, error);
+      return NextResponse.json(
+        { 
+          success: false,
+          error: error.message,
+          errorCode: error.errorCode,
+          details: error.details
+        },
+        { status: error.statusCode }
+      );
+    }
+
+    // Unexpected errors
+    logPerformanceOperation('GET_PERFORMANCE_UNEXPECTED_ERROR', userId, filters, duration, error as Error);
+    console.error('Unexpected performance API error:', error);
+    
     return NextResponse.json(
-      { error: 'Internal server error' },
+      { 
+        success: false,
+        error: 'Internal server error',
+        errorCode: 'INTERNAL_ERROR'
+      },
       { status: 500 }
     );
   }
 }
 
+/**
+ * Calculate date range based on period with configurable defaults
+ */
 function calculateDateRange(period: string): { from: string; to: string } {
   const now = new Date();
   const to = now.toISOString();
@@ -251,7 +502,7 @@ function calculateDateRange(period: string): { from: string; to: string } {
       break;
     case 'all':
     default:
-      from = new Date(2023, 0, 1); // Start from beginning of 2023
+      from = new Date(PERFORMANCE_CONFIG.DEFAULT_START_YEAR, 0, 1);
       break;
   }
 
@@ -261,11 +512,14 @@ function calculateDateRange(period: string): { from: string; to: string } {
   };
 }
 
-async function getCurrentPerformanceMetrics(userId: string, filters: any) {
+/**
+ * Get current performance metrics with enhanced error handling
+ */
+async function getCurrentPerformanceMetrics(userId: string, filters: PerformanceFilters) {
   try {
     const supabase = getSupabaseClient();
     
-    // Build base query for trades
+    // Build base query for trades with optimization for large datasets
     let tradesQuery = supabase
       .from('trade_history')
       .select(`
@@ -282,7 +536,8 @@ async function getCurrentPerformanceMetrics(userId: string, filters: any) {
       `)
       .eq('bot_configurations.user_id', userId)
       .gte('executed_at', filters.dateRange.from)
-      .lte('executed_at', filters.dateRange.to);
+      .lte('executed_at', filters.dateRange.to)
+      .limit(PERFORMANCE_CONFIG.MAX_TRADES_FOR_DETAILED_ANALYSIS);
 
     // Apply filters
     if (filters.botId) tradesQuery = tradesQuery.eq('bot_id', filters.botId);
@@ -292,16 +547,24 @@ async function getCurrentPerformanceMetrics(userId: string, filters: any) {
     const { data: trades, error } = await tradesQuery;
 
     if (error) {
-      console.error('Trades query error:', error);
+      throw new PerformanceAPIError(
+        'Failed to fetch trade data',
+        500,
+        'DATABASE_ERROR',
+        { supabaseError: error }
+      );
+    }
+
+    if (!trades || trades.length === 0) {
       return null;
     }
 
     // Normalize Supabase response to Trade objects
-    const normalizedTrades: Trade[] = (trades as SupabaseTrade[] || []).map(normalizeSupabaseTrade);
+    const normalizedTrades: Trade[] = (trades as SupabaseTrade[]).map(normalizeSupabaseTrade);
     const completedTrades = normalizedTrades.filter(t => t.status === 'completed');
     const failedTrades = normalizedTrades.filter(t => t.status === 'failed');
 
-    // Calculate core metrics
+    // Calculate core metrics with enhanced precision
     const totalTrades = normalizedTrades.length;
     const successfulTrades = completedTrades.length;
     const successRate = totalTrades > 0 ? (successfulTrades / totalTrades) * 100 : 0;
@@ -328,8 +591,9 @@ async function getCurrentPerformanceMetrics(userId: string, filters: any) {
 
     // Calculate daily returns for additional metrics
     const dailyReturns = calculateDailyReturns(completedTrades);
-    const totalReturn = ((netProfit / Math.max(avgTradeSize * totalTrades, 1)) * 100);
+    const totalReturn = avgTradeSize > 0 ? ((netProfit / (avgTradeSize * totalTrades)) * 100) : 0;
 
+    // Enhanced precision with proper rounding
     return {
       summary: {
         totalTrades,
@@ -347,15 +611,30 @@ async function getCurrentPerformanceMetrics(userId: string, filters: any) {
       returns: {
         daily: dailyReturns,
         cumulative: calculateCumulativeReturns(dailyReturns)
+      },
+      dataQuality: {
+        completeness: (completedTrades.length / Math.max(totalTrades, 1)) * 100,
+        dataPoints: totalTrades,
+        timeSpan: filters.dateRange
       }
     };
 
   } catch (error) {
-    console.error('Performance metrics calculation error:', error);
-    return null;
+    if (error instanceof PerformanceAPIError) {
+      throw error;
+    }
+    throw new PerformanceAPIError(
+      'Performance metrics calculation failed',
+      500,
+      'CALCULATION_ERROR',
+      { originalError: error instanceof Error ? error.message : 'Unknown error' }
+    );
   }
 }
 
+/**
+ * Get time series data with enhanced caching and optimization
+ */
 async function getTimeSeriesData(userId: string, filters: any) {
   try {
     const supabase = getSupabaseClient();
@@ -382,8 +661,16 @@ async function getTimeSeriesData(userId: string, filters: any) {
 
     const { data: trades, error } = await query;
 
-    if (error || !trades) {
-      console.error('Time series query error:', error);
+    if (error) {
+      throw new PerformanceAPIError(
+        'Failed to fetch time series data',
+        500,
+        'DATABASE_ERROR',
+        { supabaseError: error }
+      );
+    }
+
+    if (!trades) {
       return [];
     }
 
@@ -418,15 +705,25 @@ async function getTimeSeriesData(userId: string, filters: any) {
       };
     });
 
-    return timeSeriesData;
+    return timeSeriesData.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
   } catch (error) {
-    console.error('Time series data error:', error);
-    return [];
+    if (error instanceof PerformanceAPIError) {
+      throw error;
+    }
+    throw new PerformanceAPIError(
+      'Time series data calculation failed',
+      500,
+      'TIMESERIES_ERROR',
+      { originalError: error instanceof Error ? error.message : 'Unknown error' }
+    );
   }
 }
 
-async function calculateRiskMetrics(userId: string, filters: any) {
+/**
+ * Calculate risk metrics with configurable parameters
+ */
+async function calculateRiskMetrics(userId: string, filters: PerformanceFilters) {
   try {
     const supabase = getSupabaseClient();
     
@@ -451,7 +748,16 @@ async function calculateRiskMetrics(userId: string, filters: any) {
 
     const { data: trades, error } = await query;
 
-    if (error || !trades || trades.length === 0) {
+    if (error) {
+      throw new PerformanceAPIError(
+        'Failed to fetch trade data for risk analysis',
+        500,
+        'DATABASE_ERROR',
+        { supabaseError: error }
+      );
+    }
+
+    if (!trades || trades.length === 0) {
       return null;
     }
 
@@ -460,21 +766,21 @@ async function calculateRiskMetrics(userId: string, filters: any) {
     const returns = normalizedTrades.map(trade => parseFloat(trade.profit_loss_usd || '0'));
     const sortedReturns = [...returns].sort((a, b) => a - b);
 
-    // Calculate risk metrics
+    // Calculate risk metrics with configurable parameters
     const totalReturn = returns.reduce((sum: number, r: number) => sum + r, 0);
     const avgReturn = totalReturn / returns.length;
     const variance = returns.reduce((sum: number, r: number) => sum + Math.pow(r - avgReturn, 2), 0) / returns.length;
     const volatility = Math.sqrt(variance);
 
-    // Value at Risk (VaR) at 95% confidence level
-    const var95Index = Math.floor(returns.length * 0.05);
-    const var95 = sortedReturns[var95Index] || 0;
+    // Value at Risk (VaR) with configurable confidence level
+    const varIndex = Math.floor(returns.length * (1 - PERFORMANCE_CONFIG.VAR_CONFIDENCE_LEVEL));
+    const var95 = sortedReturns[varIndex] || 0;
 
     // Maximum Drawdown
     const maxDrawdown = calculateMaxDrawdown(returns);
 
-    // Sharpe Ratio (assuming risk-free rate of 2% annually)
-    const riskFreeRate = 0.02 / 365; // Daily risk-free rate
+    // Sharpe Ratio with configurable risk-free rate
+    const riskFreeRate = PERFORMANCE_CONFIG.RISK_FREE_RATE_ANNUAL / 365; // Daily risk-free rate
     const excessReturn = avgReturn - riskFreeRate;
     const sharpeRatio = volatility > 0 ? excessReturn / volatility : 0;
 
@@ -500,15 +806,30 @@ async function calculateRiskMetrics(userId: string, filters: any) {
       totalReturn: Math.round(totalReturn * 100) / 100,
       bestTrade: Math.max(...returns),
       worstTrade: Math.min(...returns),
-      winRate: (returns.filter(r => r > 0).length / returns.length) * 100
+      winRate: (returns.filter(r => r > 0).length / returns.length) * 100,
+      configuration: {
+        riskFreeRate: PERFORMANCE_CONFIG.RISK_FREE_RATE_ANNUAL,
+        varConfidenceLevel: PERFORMANCE_CONFIG.VAR_CONFIDENCE_LEVEL,
+        sampleSize: returns.length
+      }
     };
 
   } catch (error) {
-    console.error('Risk metrics calculation error:', error);
-    return null;
+    if (error instanceof PerformanceAPIError) {
+      throw error;
+    }
+    throw new PerformanceAPIError(
+      'Risk metrics calculation failed',
+      500,
+      'RISK_CALCULATION_ERROR',
+      { originalError: error instanceof Error ? error.message : 'Unknown error' }
+    );
   }
 }
 
+/**
+ * Enhanced comparison data with better benchmark handling
+ */
 async function getComparisonData(userId: string, filters: any) {
   try {
     const supabase = getSupabaseClient();
@@ -526,7 +847,16 @@ async function getComparisonData(userId: string, filters: any) {
       .gte('executed_at', filters.dateRange.from)
       .lte('executed_at', filters.dateRange.to);
 
-    const { data: userTrades } = await userQuery;
+    const { data: userTrades, error } = await userQuery;
+    
+    if (error) {
+      throw new PerformanceAPIError(
+        'Failed to fetch user trade data for comparison',
+        500,
+        'DATABASE_ERROR',
+        { supabaseError: error }
+      );
+    }
     
     if (!userTrades || userTrades.length === 0) {
       return null;
@@ -536,36 +866,73 @@ async function getComparisonData(userId: string, filters: any) {
     const userTotalReturn = userReturns.reduce((sum, r) => sum + r, 0);
     const userAvgReturn = userTotalReturn / userReturns.length;
 
-    // This would implement comparison against different benchmarks
-    // For now, we'll return a structure with user performance vs benchmark
+    // Enhanced benchmark calculation based on benchmark type
+    let benchmarkData = {
+      return: 0,
+      volatility: 0,
+      sharpeRatio: 0
+    };
+
+    switch (filters.benchmarkType) {
+      case 'hold':
+        // Simple hold strategy (risk-free rate)
+        benchmarkData = {
+          return: PERFORMANCE_CONFIG.RISK_FREE_RATE_ANNUAL,
+          volatility: 0,
+          sharpeRatio: 0
+        };
+        break;
+      case 'market':
+        // Mock market performance (in production, fetch real market data)
+        benchmarkData = {
+          return: 8.5, // Example market return
+          volatility: 18.2,
+          sharpeRatio: 0.35
+        };
+        break;
+      case 'peer':
+        // Peer average (in production, calculate from other users)
+        benchmarkData = {
+          return: 6.2,
+          volatility: 15.8,
+          sharpeRatio: 0.28
+        };
+        break;
+    }
     
     return {
       benchmark: {
         type: filters.benchmarkType,
-        return: 5.2, // Example benchmark return
-        volatility: 15.5,
-        sharpeRatio: 0.34
+        return: benchmarkData.return,
+        volatility: benchmarkData.volatility,
+        sharpeRatio: benchmarkData.sharpeRatio
       },
       user: {
-        return: userTotalReturn,
-        avgReturn: userAvgReturn,
+        return: Math.round(userTotalReturn * 100) / 100,
+        avgReturn: Math.round(userAvgReturn * 100) / 100,
         trades: userTrades.length
       },
       relative: {
-        excessReturn: userTotalReturn - 5.2, // User performance vs benchmark
-        informationRatio: 0.18,
+        excessReturn: Math.round((userTotalReturn - benchmarkData.return) * 100) / 100,
+        informationRatio: 0.18, // Would need proper calculation
         beta: 0.85,
-        alpha: 1.2
+        alpha: Math.round((userAvgReturn - PERFORMANCE_CONFIG.RISK_FREE_RATE_ANNUAL / 365) * 100) / 100
       }
     };
 
   } catch (error) {
+    if (error instanceof PerformanceAPIError) {
+      throw error;
+    }
     console.error('Comparison data error:', error);
     return null;
   }
 }
 
-async function getPortfolioBreakdown(userId: string, filters: any) {
+/**
+ * Enhanced portfolio breakdown with better limits and error handling
+ */
+async function getPortfolioBreakdown(userId: string, filters: PerformanceFilters) {
   try {
     const supabase = getSupabaseClient();
     
@@ -596,7 +963,16 @@ async function getPortfolioBreakdown(userId: string, filters: any) {
 
     const { data: trades, error } = await query;
 
-    if (error || !trades) {
+    if (error) {
+      throw new PerformanceAPIError(
+        'Failed to fetch portfolio breakdown data',
+        500,
+        'DATABASE_ERROR',
+        { supabaseError: error }
+      );
+    }
+
+    if (!trades) {
       return null;
     }
 
@@ -611,8 +987,9 @@ async function getPortfolioBreakdown(userId: string, filters: any) {
 
     const processGroup = (group: Trade[]) => ({
       trades: group.length,
-      totalProfit: group.reduce((sum, t) => sum + parseFloat(t.profit_loss_usd || '0'), 0),
-      avgTradeSize: group.reduce((sum, t) => sum + parseFloat(t.amount_in || '0'), 0) / group.length
+      totalProfit: Math.round(group.reduce((sum, t) => sum + parseFloat(t.profit_loss_usd || '0'), 0) * 100) / 100,
+      avgTradeSize: Math.round((group.reduce((sum, t) => sum + parseFloat(t.amount_in || '0'), 0) / group.length) * 100) / 100,
+      winRate: Math.round((group.filter(t => parseFloat(t.profit_loss_usd || '0') > 0).length / group.length) * 100 * 100) / 100
     });
 
     return {
@@ -626,101 +1003,140 @@ async function getPortfolioBreakdown(userId: string, filters: any) {
         Object.entries(byTradeType).map(([key, trades]) => [key, processGroup(trades)])
       ),
       byToken: Object.fromEntries(
-        Object.entries(byToken).slice(0, 10).map(([key, trades]) => [key, processGroup(trades)])
-      )
+        Object.entries(byToken)
+          .slice(0, PERFORMANCE_CONFIG.MAX_TOKEN_BREAKDOWN_ITEMS)
+          .map(([key, trades]) => [key, processGroup(trades)])
+      ),
+      summary: {
+        totalChains: Object.keys(byChain).length,
+        totalBots: Object.keys(byBot).length,
+        totalTradeTypes: Object.keys(byTradeType).length,
+        totalTokens: Object.keys(byToken).length
+      }
     };
 
   } catch (error) {
+    if (error instanceof PerformanceAPIError) {
+      throw error;
+    }
     console.error('Portfolio breakdown error:', error);
     return null;
   }
 }
 
-// Helper functions
+// Helper functions with enhanced error handling
 function calculateDailyReturns(trades: Trade[]) {
-  const tradesByDay = groupBy(trades, (trade: Trade) => {
-    const date = new Date(trade.executed_at).toISOString().split('T')[0];
-    return date || 'unknown';
-  });
+  try {
+    const tradesByDay = groupBy(trades, (trade: Trade) => {
+      const date = new Date(trade.executed_at).toISOString().split('T')[0];
+      return date || 'unknown';
+    });
 
-  return Object.entries(tradesByDay).map(([date, dayTrades]) => ({
-    date,
-    return: dayTrades.reduce((sum, trade) => 
-      sum + parseFloat(trade.profit_loss_usd || '0'), 0)
-  }));
+    return Object.entries(tradesByDay)
+      .filter(([date]) => date !== 'unknown')
+      .map(([date, dayTrades]) => ({
+        date,
+        return: Math.round(dayTrades.reduce((sum, trade) => 
+          sum + parseFloat(trade.profit_loss_usd || '0'), 0) * 100) / 100
+      }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+  } catch (error) {
+    console.error('Daily returns calculation error:', error);
+    return [];
+  }
 }
 
 function calculateCumulativeReturns(dailyReturns: { date: string; return: number }[]) {
-  let cumulative = 0;
-  return dailyReturns.map(day => {
-    cumulative += day.return;
-    return {
-      date: day.date,
-      cumulativeReturn: cumulative
-    };
-  });
+  try {
+    let cumulative = 0;
+    return dailyReturns.map(day => {
+      cumulative += day.return;
+      return {
+        date: day.date,
+        cumulativeReturn: Math.round(cumulative * 100) / 100
+      };
+    });
+  } catch (error) {
+    console.error('Cumulative returns calculation error:', error);
+    return [];
+  }
 }
 
 function groupTradesByTime(trades: Trade[], granularity: string): TimeGroup {
-  return trades.reduce((groups, trade) => {
-    const date = new Date(trade.executed_at);
-    let key: string;
+  try {
+    return trades.reduce((groups, trade) => {
+      const date = new Date(trade.executed_at);
+      let key: string;
 
-    switch (granularity) {
-      case 'hour':
-        key = date.toISOString().slice(0, 13) + ':00:00.000Z';
-        break;
-      case 'week':
-        const weekStart = new Date(date);
-        weekStart.setDate(date.getDate() - date.getDay());
-        const weekKey = weekStart.toISOString().split('T')[0];
-        key = weekKey || 'unknown';
-        break;
-      case 'day':
-      default:
-        const dayKey = date.toISOString().split('T')[0];
-        key = dayKey || 'unknown';
-        break;
-    }
+      switch (granularity) {
+        case 'hour':
+          key = date.toISOString().slice(0, 13) + ':00:00.000Z';
+          break;
+        case 'week':
+          const weekStart = new Date(date);
+          weekStart.setDate(date.getDate() - date.getDay());
+          const weekKey = weekStart.toISOString().split('T')[0];
+          key = weekKey || 'unknown';
+          break;
+        case 'day':
+        default:
+          const dayKey = date.toISOString().split('T')[0];
+          key = dayKey || 'unknown';
+          break;
+      }
 
-    if (!groups[key]) {
-      groups[key] = [];
-    }
-    groups[key]!.push(trade);
-    return groups;
-  }, {} as TimeGroup);
+      if (!groups[key]) {
+        groups[key] = [];
+      }
+      groups[key]!.push(trade);
+      return groups;
+    }, {} as TimeGroup);
+  } catch (error) {
+    console.error('Group trades by time error:', error);
+    return {};
+  }
 }
 
 function calculateMaxDrawdown(returns: number[]): number {
-  let maxDrawdown = 0;
-  let peak = 0;
-  let cumulative = 0;
+  try {
+    let maxDrawdown = 0;
+    let peak = 0;
+    let cumulative = 0;
 
-  for (const ret of returns) {
-    cumulative += ret;
-    peak = Math.max(peak, cumulative);
-    const drawdown = (peak - cumulative) / Math.max(peak, 1);
-    maxDrawdown = Math.max(maxDrawdown, drawdown);
+    for (const ret of returns) {
+      cumulative += ret;
+      peak = Math.max(peak, cumulative);
+      const drawdown = (peak - cumulative) / Math.max(peak, 1);
+      maxDrawdown = Math.max(maxDrawdown, drawdown);
+    }
+
+    return -maxDrawdown; // Return as negative percentage
+  } catch (error) {
+    console.error('Max drawdown calculation error:', error);
+    return 0;
   }
-
-  return -maxDrawdown; // Return as negative percentage
 }
 
 function groupBy<T>(array: T[], keySelector: string | ((item: T) => string)): Record<string, T[]> {
-  return array.reduce((groups, item) => {
-    let key: string;
-    if (typeof keySelector === 'string') {
-      const value = (item as any)[keySelector];
-      key = value ? String(value) : 'unknown';
-    } else {
-      const result = keySelector(item);
-      key = result ?? 'unknown';
-    }
-    
-    if (!groups[key]) {
-      groups[key] = [];
-    }
-    groups[key]!.push(item);
-    return groups;
-  }, {} as Record<string, T[]>);
+  try {
+    return array.reduce((groups, item) => {
+      let key: string;
+      if (typeof keySelector === 'string') {
+        const value = (item as any)[keySelector];
+        key = value ? String(value) : 'unknown';
+      } else {
+        const result = keySelector(item);
+        key = result ?? 'unknown';
+      }
+      
+      if (!groups[key]) {
+        groups[key] = [];
+      }
+      groups[key]!.push(item);
+      return groups;
+    }, {} as Record<string, T[]>);
+  } catch (error) {
+    console.error('Group by error:', error);
+    return {};
+  }
 }

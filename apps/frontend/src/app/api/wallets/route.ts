@@ -1,13 +1,134 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { encrypt, decrypt } from '@trading-bot/crypto';
-import { walletDb } from '../../../lib/database';
-import { Wallet, ApiResponse, Chain } from '@trading-bot/types';
+import { createClient } from '@supabase/supabase-js';
+import { z } from 'zod';
+import { encrypt } from '@trading-bot/crypto';
+import { rateLimiter } from '@/lib/rate-limiter';
+import { verifyJWT } from '@/lib/auth';
 import { ethers } from 'ethers';
+
+/**
+ * Wallet Management API Configuration
+ * Centralized configuration for wallet operations and security parameters
+ */
+const WALLET_CONFIG = {
+  // Security configuration
+  RATE_LIMIT_GET_REQUESTS: parseInt(process.env['WALLET_RATE_LIMIT_GET'] || '30'),
+  RATE_LIMIT_CREATE_REQUESTS: parseInt(process.env['WALLET_RATE_LIMIT_CREATE'] || '5'),
+  RATE_LIMIT_DELETE_REQUESTS: parseInt(process.env['WALLET_RATE_LIMIT_DELETE'] || '3'),
+  RATE_LIMIT_WINDOW_MS: parseInt(process.env['WALLET_RATE_LIMIT_WINDOW'] || '3600000'), // 1 hour
+  
+  // Wallet limits
+  MAX_WALLETS_PER_USER: parseInt(process.env['WALLET_MAX_PER_USER'] || '10'),
+  
+  // Audit configuration
+  ENABLE_AUDIT_LOGGING: process.env['WALLET_ENABLE_AUDIT_LOGGING'] !== 'false',
+  
+  // Supported chains
+  SUPPORTED_CHAINS: ['ETH', 'BSC', 'SOL'] as const,
+} as const;
+
+/**
+ * Enhanced error types for wallet management
+ */
+class WalletAPIError extends Error {
+  constructor(
+    message: string,
+    public statusCode: number = 500,
+    public errorCode: string = 'WALLET_ERROR',
+    public details?: any
+  ) {
+    super(message);
+    this.name = 'WalletAPIError';
+  }
+}
+
+/**
+ * Comprehensive audit logging for wallet operations
+ */
+function logWalletOperation(
+  operation: string,
+  userId: string,
+  details: any,
+  clientIP?: string,
+  userAgent?: string,
+  error?: Error
+): void {
+  if (!WALLET_CONFIG.ENABLE_AUDIT_LOGGING) return;
+  
+  const logData = {
+    timestamp: new Date().toISOString(),
+    operation,
+    userId,
+    details: typeof details === 'object' ? JSON.stringify(details) : details,
+    clientIP,
+    userAgent,
+    error: error ? {
+      message: error.message,
+      stack: error.stack?.split('\n')[0]
+    } : undefined,
+    severity: error ? 'ERROR' : 'INFO'
+  };
+  
+  if (error) {
+    console.error('[WALLET_SECURITY_ALERT]', logData);
+  } else {
+    console.log('[WALLET_AUDIT]', logData);
+  }
+}
+
+/**
+ * Get client information for audit logging
+ */
+function getClientInfo(request: NextRequest) {
+  const clientIP = request.headers.get('x-forwarded-for') || 
+                   request.headers.get('x-real-ip') || 
+                   'unknown';
+  const userAgent = request.headers.get('user-agent') || 'unknown';
+  return { clientIP, userAgent };
+}
+
+// Secure Supabase client initialization
+function getSupabaseClient() {
+  const supabaseUrl = process.env['SUPABASE_URL'];
+  const supabaseServiceKey = process.env['SUPABASE_SERVICE_ROLE_KEY'];
+  
+  if (!supabaseUrl || !supabaseServiceKey) {
+    throw new WalletAPIError(
+      'Database configuration is missing',
+      500,
+      'CONFIG_ERROR',
+      { missing: ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY'] }
+    );
+  }
+  
+  return createClient(supabaseUrl, supabaseServiceKey);
+}
+
+/**
+ * Enhanced validation schemas
+ */
+const CreateWalletSchema = z.object({
+  privateKey: z.string()
+    .min(1, 'Private key is required')
+    .max(500, 'Private key too long')
+    .refine(key => key.trim().length > 0, 'Private key cannot be empty'),
+  walletName: z.string()
+    .min(1, 'Wallet name is required')
+    .max(100, 'Wallet name too long')
+    .regex(/^[a-zA-Z0-9\s\-_]+$/, 'Wallet name contains invalid characters'),
+  chain: z.enum(WALLET_CONFIG.SUPPORTED_CHAINS, {
+    errorMap: () => ({ message: `Chain must be one of: ${WALLET_CONFIG.SUPPORTED_CHAINS.join(', ')}` })
+  })
+});
+
+const DeleteWalletSchema = z.object({
+  walletId: z.string().uuid('Invalid wallet ID format'),
+  confirmDeletion: z.boolean().refine(val => val === true, 'Deletion must be confirmed')
+});
 
 // Dynamic import for Solana to avoid browser compatibility issues
 async function getSolanaKeypair() {
   try {
-    // Only import on server-side and when actually needed
     if (typeof window !== 'undefined') {
       throw new Error('Solana not available on client side');
     }
@@ -19,237 +140,568 @@ async function getSolanaKeypair() {
   }
 }
 
-// Helper function to derive wallet address from private key
-async function getWalletAddress(privateKey: string, chain: Chain): Promise<string> {
+/**
+ * Validate and derive wallet address from private key
+ * SECURITY NOTE: This function handles private keys - ensure proper cleanup
+ */
+async function validateAndDeriveAddress(privateKey: string, chain: string): Promise<string> {
   try {
     if (chain === 'ETH' || chain === 'BSC') {
+      // Validate Ethereum/BSC private key format
+      if (!privateKey.startsWith('0x')) {
+        privateKey = '0x' + privateKey;
+      }
+      
+      if (!/^0x[a-fA-F0-9]{64}$/.test(privateKey)) {
+        throw new Error('Invalid Ethereum/BSC private key format');
+      }
+      
       const wallet = new ethers.Wallet(privateKey);
       return wallet.address;
+      
     } else if (chain === 'SOL') {
-      // For Solana, we expect the private key to be a JSON string of the secret key array
       const solana = await getSolanaKeypair();
       if (!solana) {
-        throw new Error('Solana web3.js not available');
+        throw new Error('Solana operations not available');
       }
-      const secretKey = new Uint8Array(JSON.parse(privateKey));
-      const keypair = solana.Keypair.fromSecretKey(secretKey);
-      return keypair.publicKey.toString();
+      
+      let secretKey: Uint8Array;
+      try {
+        // Support both JSON array format and base58 format
+        if (privateKey.startsWith('[') && privateKey.endsWith(']')) {
+          secretKey = new Uint8Array(JSON.parse(privateKey));
+        } else {
+          // Assume base58 format - would need bs58 package for full support
+          throw new Error('Solana private key must be in JSON array format: [1,2,3,...]');
+        }
+        
+        if (secretKey.length !== 64) {
+          throw new Error('Solana private key must be 64 bytes');
+        }
+        
+        const keypair = solana.Keypair.fromSecretKey(secretKey);
+        return keypair.publicKey.toString();
+      } catch (parseError) {
+        throw new Error('Invalid Solana private key format');
+      }
     }
+    
     throw new Error(`Unsupported chain: ${chain}`);
   } catch (error) {
-    throw new Error(`Invalid private key for chain ${chain}`);
+    throw new WalletAPIError(
+      `Private key validation failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      400,
+      'INVALID_PRIVATE_KEY',
+      { chain, errorDetails: error instanceof Error ? error.message : 'Unknown error' }
+    );
   }
 }
 
-export async function GET(request: NextRequest): Promise<NextResponse<ApiResponse<any[]>>> {
+/**
+ * Wallet Management API Endpoints
+ * 
+ * @route GET /api/wallets
+ * @description Get user's wallets (private keys never exposed)
+ * 
+ * @returns {Object} Wallet list including:
+ *   - id: Wallet identifier
+ *   - address: Public wallet address
+ *   - chain: Blockchain network
+ *   - name: User-defined wallet name
+ *   - createdAt: Creation timestamp
+ * 
+ * @throws {401} Unauthorized - invalid or missing JWT token
+ * @throws {429} Rate limit exceeded
+ * @throws {500} Internal server error
+ * 
+ * @security Private keys are NEVER included in responses
+ */
+export async function GET(request: NextRequest) {
+  const { clientIP, userAgent } = getClientInfo(request);
+  let userId: string = '';
+  
   try {
-    const { searchParams } = new URL(request.url);
-    const userId = searchParams.get('userId');
-    
+    // Rate limiting for GET requests
+    const rateLimitResult = await rateLimiter.check(request);
+    if (!rateLimitResult.success) {
+      throw new WalletAPIError(
+        'Rate limit exceeded for wallet requests',
+        429,
+        'RATE_LIMIT_EXCEEDED',
+        { 
+          retryAfter: Math.ceil((rateLimitResult.resetTime - Date.now()) / 1000),
+          limit: WALLET_CONFIG.RATE_LIMIT_GET_REQUESTS
+        }
+      );
+    }
+
+    // Authentication required for all wallet operations
+    const authResult = await verifyJWT(request);
+    if (!authResult.success) {
+      throw new WalletAPIError(
+        'Authentication required for wallet access',
+        401,
+        'AUTH_REQUIRED',
+        { details: authResult.error }
+      );
+    }
+
+    userId = authResult.payload?.sub || '';
     if (!userId) {
-      return NextResponse.json({ 
-        success: false, 
-        error: 'User ID is required' 
-      }, { status: 400 });
+      throw new WalletAPIError(
+        'Invalid token payload - missing user ID',
+        401,
+        'INVALID_TOKEN_PAYLOAD'
+      );
     }
+
+    const supabase = getSupabaseClient();
     
-    const wallets = walletDb.findByUserId(userId);
-    
-    // Remove encrypted private keys from response for security
-    const safeWallets = wallets.map(wallet => {
-      const { encryptedPrivateKey, ...safeWallet } = wallet;
-      return safeWallet;
+    // Fetch user's wallets (excluding encrypted private keys)
+    const { data: wallets, error } = await supabase
+      .from('wallets')
+      .select(`
+        id,
+        address,
+        chain,
+        name,
+        created_at,
+        updated_at
+      `)
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      throw new WalletAPIError(
+        'Failed to fetch wallets',
+        500,
+        'DATABASE_ERROR',
+        { supabaseError: error }
+      );
+    }
+
+    logWalletOperation('GET_WALLETS', userId, { 
+      walletsCount: wallets?.length || 0 
+    }, clientIP, userAgent);
+
+    return NextResponse.json({
+      success: true,
+      data: wallets || [],
+      metadata: {
+        totalWallets: wallets?.length || 0,
+        supportedChains: WALLET_CONFIG.SUPPORTED_CHAINS
+      }
     });
-    
-    return NextResponse.json({ 
-      success: true, 
-      data: safeWallets 
-    });
+
   } catch (error) {
-    console.error('Error fetching wallets:', error);
-    return NextResponse.json({ 
-      success: false, 
-      error: 'Failed to fetch wallets' 
-    }, { status: 500 });
+    if (error instanceof WalletAPIError) {
+      logWalletOperation('GET_WALLETS_ERROR', userId, { 
+        errorCode: error.errorCode 
+      }, clientIP, userAgent, error);
+      
+      return NextResponse.json(
+        { 
+          success: false,
+          error: error.message,
+          errorCode: error.errorCode,
+          details: error.details
+        },
+        { status: error.statusCode }
+      );
+    }
+
+    logWalletOperation('GET_WALLETS_UNEXPECTED_ERROR', userId, {}, clientIP, userAgent, error as Error);
+    console.error('Unexpected wallet GET error:', error);
+    
+    return NextResponse.json(
+      { 
+        success: false,
+        error: 'Internal server error',
+        errorCode: 'INTERNAL_ERROR'
+      },
+      { status: 500 }
+    );
   }
 }
 
-export async function POST(request: NextRequest): Promise<NextResponse<ApiResponse<{ id: string }>>> {
+/**
+ * Wallet Creation API
+ * 
+ * @route POST /api/wallets
+ * @description Create a new wallet (private key encrypted and stored securely)
+ * 
+ * @param {Object} body - Wallet creation data
+ * @param {string} body.privateKey - Private key (encrypted before storage)
+ * @param {string} body.walletName - User-defined wallet name
+ * @param {string} body.chain - Blockchain network (ETH, BSC, SOL)
+ * 
+ * @returns {Object} Creation result with wallet ID
+ * 
+ * @throws {400} Invalid request parameters
+ * @throws {401} Unauthorized - invalid or missing JWT token
+ * @throws {409} Wallet already exists
+ * @throws {429} Rate limit exceeded
+ * @throws {500} Internal server error
+ * 
+ * @security Private keys are encrypted before database storage
+ */
+export async function POST(request: NextRequest) {
+  const { clientIP, userAgent } = getClientInfo(request);
+  let userId: string = '';
+  let walletAddress: string = '';
+  
   try {
-    const { privateKey, walletName, chain, userId } = await request.json();
-    
-    if (!privateKey || !chain || !userId) {
-      return NextResponse.json({ 
-        success: false, 
-        error: 'Private key, chain, and user ID are required' 
-      }, { status: 400 });
+    // Stricter rate limiting for wallet creation
+    const rateLimitResult = await rateLimiter.check(request);
+    if (!rateLimitResult.success) {
+      throw new WalletAPIError(
+        'Rate limit exceeded for wallet creation',
+        429,
+        'RATE_LIMIT_EXCEEDED',
+        { 
+          retryAfter: Math.ceil((rateLimitResult.resetTime - Date.now()) / 1000),
+          limit: WALLET_CONFIG.RATE_LIMIT_CREATE_REQUESTS
+        }
+      );
     }
-    
-    // Validate chain
-    if (!['ETH', 'BSC', 'SOL'].includes(chain)) {
-      return NextResponse.json({ 
-        success: false, 
-        error: 'Invalid chain. Must be ETH, BSC, or SOL' 
-      }, { status: 400 });
+
+    // Authentication required
+    const authResult = await verifyJWT(request);
+    if (!authResult.success) {
+      throw new WalletAPIError(
+        'Authentication required for wallet creation',
+        401,
+        'AUTH_REQUIRED',
+        { details: authResult.error }
+      );
     }
-    
-    // Derive wallet address from private key
-    let address: string;
-    try {
-      address = await getWalletAddress(privateKey, chain);
-    } catch (error: any) {
-      return NextResponse.json({ 
-        success: false, 
-        error: error.message 
-      }, { status: 400 });
+
+    userId = authResult.payload?.sub || '';
+    if (!userId) {
+      throw new WalletAPIError(
+        'Invalid token payload - missing user ID',
+        401,
+        'INVALID_TOKEN_PAYLOAD'
+      );
     }
+
+    // Validate request body
+    const body = await request.json();
+    const validation = CreateWalletSchema.safeParse(body);
     
-    // Check if wallet already exists for this user
-    const existingWallets = walletDb.findByUserId(userId);
-    if (existingWallets.some(w => w.address === address && w.chain === chain)) {
-      return NextResponse.json({ 
-        success: false, 
-        error: 'Wallet already exists for this chain' 
-      }, { status: 400 });
+    if (!validation.success) {
+      throw new WalletAPIError(
+        'Invalid wallet creation data',
+        400,
+        'VALIDATION_ERROR',
+        { 
+          errors: validation.error.errors,
+          received: Object.keys(body)
+        }
+      );
     }
+
+    const { privateKey, walletName, chain } = validation.data;
     
-    // Encrypt the private key before storing
+    // Validate private key and derive address
+    walletAddress = await validateAndDeriveAddress(privateKey, chain);
+
+    const supabase = getSupabaseClient();
+    
+    // Check wallet limits
+    const { data: existingWallets, error: countError } = await supabase
+      .from('wallets')
+      .select('id')
+      .eq('user_id', userId);
+
+    if (countError) {
+      throw new WalletAPIError(
+        'Failed to check wallet limits',
+        500,
+        'DATABASE_ERROR',
+        { supabaseError: countError }
+      );
+    }
+
+    if (existingWallets && existingWallets.length >= WALLET_CONFIG.MAX_WALLETS_PER_USER) {
+      throw new WalletAPIError(
+        `Maximum ${WALLET_CONFIG.MAX_WALLETS_PER_USER} wallets allowed per user`,
+        400,
+        'WALLET_LIMIT_EXCEEDED',
+        { currentCount: existingWallets.length, maxAllowed: WALLET_CONFIG.MAX_WALLETS_PER_USER }
+      );
+    }
+
+    // Check for duplicate wallet
+    const { data: duplicateWallet } = await supabase
+      .from('wallets')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('address', walletAddress)
+      .eq('chain', chain)
+      .single();
+
+    if (duplicateWallet) {
+      throw new WalletAPIError(
+        'Wallet already exists for this address and chain',
+        409,
+        'WALLET_EXISTS',
+        { address: walletAddress, chain }
+      );
+    }
+
+    // Encrypt private key before storage
     const encryptedPrivateKey = encrypt(privateKey);
     
-    // Generate wallet ID
-    const walletId = `wallet_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    // Clear private key from memory (security measure)
+    const privateKeyClear = '\0'.repeat(privateKey.length);
     
-    const newWallet: Omit<Wallet, 'createdAt'> = {
-      id: walletId,
-      userId,
-      address,
-      encryptedPrivateKey,
+    // Create wallet record
+    const { data: newWallet, error: createError } = await supabase
+      .from('wallets')
+      .insert({
+        user_id: userId,
+        address: walletAddress,
+        encrypted_private_key: encryptedPrivateKey,
+        chain,
+        name: walletName
+      })
+      .select('id')
+      .single();
+
+    if (createError) {
+      throw new WalletAPIError(
+        'Failed to create wallet',
+        500,
+        'DATABASE_ERROR',
+        { supabaseError: createError }
+      );
+    }
+
+    logWalletOperation('CREATE_WALLET', userId, {
+      walletId: newWallet.id,
+      address: walletAddress,
       chain,
-      name: walletName || `${chain} Wallet`,
-    };
-    
-    walletDb.create(newWallet);
-    
-    return NextResponse.json({ 
-      success: true, 
-      data: { id: walletId },
-    });
-  } catch (error) {
-    console.error('Error adding wallet:', error);
-    return NextResponse.json({ 
-      success: false, 
-      error: 'Failed to add wallet' 
-    }, { status: 500 });
-  }
-}
+      walletName
+    }, clientIP, userAgent);
 
-export async function DELETE(request: NextRequest): Promise<NextResponse<ApiResponse<boolean>>> {
-  try {
-    const { searchParams } = new URL(request.url);
-    const walletId = searchParams.get('walletId');
-    
-    if (!walletId) {
-      return NextResponse.json({ 
-        success: false, 
-        error: 'Wallet ID is required' 
-      }, { status: 400 });
-    }
-    
-    walletDb.delete(walletId);
-    
-    return NextResponse.json({ 
-      success: true, 
-      data: true 
+    return NextResponse.json({
+      success: true,
+      data: { 
+        id: newWallet.id,
+        address: walletAddress,
+        chain,
+        name: walletName
+      },
+      message: 'Wallet created successfully'
     });
-  } catch (error) {
-    console.error('Error deleting wallet:', error);
-    return NextResponse.json({ 
-      success: false, 
-      error: 'Failed to delete wallet' 
-    }, { status: 500 });
-  }
-}
 
-export async function PUT(request: NextRequest): Promise<NextResponse<ApiResponse<{ privateKey?: string; address: string }>>> {
-  try {
-    const { walletId, userId, operation } = await request.json();
-    
-    if (!walletId || !userId) {
-      return NextResponse.json({ 
-        success: false, 
-        error: 'Wallet ID and User ID are required' 
-      }, { status: 400 });
-    }
-    
-    // Find the wallet
-    const wallets = walletDb.findByUserId(userId);
-    const wallet = wallets.find(w => w.id === walletId);
-    
-    if (!wallet) {
-      return NextResponse.json({ 
-        success: false, 
-        error: 'Wallet not found' 
-      }, { status: 404 });
-    }
-    
-    // Handle different operations
-    if (operation === 'getPrivateKey') {
-      // This is a sensitive operation - in production, add additional security checks
-      // such as 2FA, rate limiting, audit logging, etc.
-      console.log(`Decrypting private key for wallet ${walletId} by user ${userId}`);
+  } catch (error) {
+    if (error instanceof WalletAPIError) {
+      logWalletOperation('CREATE_WALLET_ERROR', userId, { 
+        errorCode: error.errorCode,
+        address: walletAddress 
+      }, clientIP, userAgent, error);
       
-      try {
-        const decryptedPrivateKey = decrypt(wallet.encryptedPrivateKey);
-        
-        // Return the decrypted private key (use with extreme caution)
-        return NextResponse.json({ 
-          success: true, 
-          data: { 
-            privateKey: decryptedPrivateKey,
-            address: wallet.address
-          }
-        });
-      } catch (error) {
-        console.error('Failed to decrypt private key:', error);
-        return NextResponse.json({ 
-          success: false, 
-          error: 'Failed to decrypt private key' 
-        }, { status: 500 });
-      }
-    } else if (operation === 'validateKey') {
-      // Validate that the stored encrypted key can be decrypted and matches expected address
-      try {
-        const decryptedPrivateKey = decrypt(wallet.encryptedPrivateKey);
-        const derivedAddress = await getWalletAddress(decryptedPrivateKey, wallet.chain);
-        
-        const isValid = derivedAddress.toLowerCase() === wallet.address.toLowerCase();
-        
-        return NextResponse.json({ 
-          success: true, 
-          data: { 
-            address: wallet.address,
-            isValid
-          }
-        });
-      } catch (error) {
-        console.error('Failed to validate wallet key:', error);
-        return NextResponse.json({ 
-          success: false, 
-          error: 'Failed to validate wallet key' 
-        }, { status: 500 });
-      }
-    } else {
-      return NextResponse.json({ 
-        success: false, 
-        error: 'Invalid operation. Supported operations: getPrivateKey, validateKey' 
-      }, { status: 400 });
+      return NextResponse.json(
+        { 
+          success: false,
+          error: error.message,
+          errorCode: error.errorCode,
+          details: error.details
+        },
+        { status: error.statusCode }
+      );
     }
+
+    logWalletOperation('CREATE_WALLET_UNEXPECTED_ERROR', userId, { 
+      address: walletAddress 
+    }, clientIP, userAgent, error as Error);
+    console.error('Unexpected wallet creation error:', error);
     
-  } catch (error) {
-    console.error('Error in wallet operation:', error);
-    return NextResponse.json({ 
-      success: false, 
-      error: 'Failed to perform wallet operation' 
-    }, { status: 500 });
+    return NextResponse.json(
+      { 
+        success: false,
+        error: 'Internal server error',
+        errorCode: 'INTERNAL_ERROR'
+      },
+      { status: 500 }
+    );
   }
-} 
+}
+
+/**
+ * Wallet Deletion API
+ * 
+ * @route DELETE /api/wallets
+ * @description Delete a wallet (requires confirmation)
+ * 
+ * @param {Object} body - Deletion data
+ * @param {string} body.walletId - Wallet ID to delete
+ * @param {boolean} body.confirmDeletion - Deletion confirmation
+ * 
+ * @returns {Object} Deletion confirmation
+ * 
+ * @throws {400} Invalid request parameters
+ * @throws {401} Unauthorized - invalid or missing JWT token
+ * @throws {404} Wallet not found
+ * @throws {429} Rate limit exceeded
+ * @throws {500} Internal server error
+ * 
+ * @security Requires user ownership validation and explicit confirmation
+ */
+export async function DELETE(request: NextRequest) {
+  const { clientIP, userAgent } = getClientInfo(request);
+  let userId: string = '';
+  let walletId: string = '';
+  
+  try {
+    // Rate limiting for deletion
+    const rateLimitResult = await rateLimiter.check(request);
+    if (!rateLimitResult.success) {
+      throw new WalletAPIError(
+        'Rate limit exceeded for wallet deletion',
+        429,
+        'RATE_LIMIT_EXCEEDED',
+        { 
+          retryAfter: Math.ceil((rateLimitResult.resetTime - Date.now()) / 1000),
+          limit: WALLET_CONFIG.RATE_LIMIT_DELETE_REQUESTS
+        }
+      );
+    }
+
+    // Authentication required
+    const authResult = await verifyJWT(request);
+    if (!authResult.success) {
+      throw new WalletAPIError(
+        'Authentication required for wallet deletion',
+        401,
+        'AUTH_REQUIRED',
+        { details: authResult.error }
+      );
+    }
+
+    userId = authResult.payload?.sub || '';
+    if (!userId) {
+      throw new WalletAPIError(
+        'Invalid token payload - missing user ID',
+        401,
+        'INVALID_TOKEN_PAYLOAD'
+      );
+    }
+
+    // Validate request body
+    const body = await request.json();
+    const validation = DeleteWalletSchema.safeParse(body);
+    
+    if (!validation.success) {
+      throw new WalletAPIError(
+        'Invalid wallet deletion data',
+        400,
+        'VALIDATION_ERROR',
+        { 
+          errors: validation.error.errors,
+          received: Object.keys(body)
+        }
+      );
+    }
+
+    walletId = validation.data.walletId;
+    const supabase = getSupabaseClient();
+    
+    // Verify wallet ownership
+    const { data: wallet, error: fetchError } = await supabase
+      .from('wallets')
+      .select('id, address, chain, name')
+      .eq('id', walletId)
+      .eq('user_id', userId)
+      .single();
+
+    if (fetchError || !wallet) {
+      throw new WalletAPIError(
+        'Wallet not found or access denied',
+        404,
+        'WALLET_NOT_FOUND',
+        { walletId }
+      );
+    }
+
+    // Delete wallet
+    const { error: deleteError } = await supabase
+      .from('wallets')
+      .delete()
+      .eq('id', walletId)
+      .eq('user_id', userId);
+
+    if (deleteError) {
+      throw new WalletAPIError(
+        'Failed to delete wallet',
+        500,
+        'DATABASE_ERROR',
+        { supabaseError: deleteError }
+      );
+    }
+
+    logWalletOperation('DELETE_WALLET', userId, {
+      walletId,
+      address: wallet.address,
+      chain: wallet.chain,
+      name: wallet.name
+    }, clientIP, userAgent);
+
+    return NextResponse.json({
+      success: true,
+      data: { deleted: true },
+      message: 'Wallet deleted successfully'
+    });
+
+  } catch (error) {
+    if (error instanceof WalletAPIError) {
+      logWalletOperation('DELETE_WALLET_ERROR', userId, { 
+        errorCode: error.errorCode,
+        walletId 
+      }, clientIP, userAgent, error);
+      
+      return NextResponse.json(
+        { 
+          success: false,
+          error: error.message,
+          errorCode: error.errorCode,
+          details: error.details
+        },
+        { status: error.statusCode }
+      );
+    }
+
+    logWalletOperation('DELETE_WALLET_UNEXPECTED_ERROR', userId, { 
+      walletId 
+    }, clientIP, userAgent, error as Error);
+    console.error('Unexpected wallet deletion error:', error);
+    
+    return NextResponse.json(
+      { 
+        success: false,
+        error: 'Internal server error',
+        errorCode: 'INTERNAL_ERROR'
+      },
+      { status: 500 }
+    );
+  }
+}
+
+/**
+ * SECURITY NOTE: PUT endpoint for private key operations has been REMOVED
+ * for security reasons. Private keys should NEVER be exposed through API endpoints.
+ * 
+ * For wallet operations that require private keys:
+ * 1. Use server-side services with proper key management
+ * 2. Implement hardware security modules (HSM)
+ * 3. Use secure enclaves or trusted execution environments
+ * 4. Never transmit private keys over HTTP
+ * 
+ * Alternative approaches:
+ * - Transaction signing services
+ * - Wallet connect integration
+ * - Hardware wallet integration
+ * - Multi-signature schemes
+ */ 

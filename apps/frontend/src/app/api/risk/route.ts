@@ -4,170 +4,451 @@ import { z } from 'zod';
 import { rateLimiter } from '@/lib/rate-limiter';
 import { verifyJWT } from '@/lib/auth';
 
+/**
+ * Risk Management API Configuration
+ * Centralized configuration for risk calculations and system parameters
+ */
+const RISK_CONFIG = {
+  // Default risk limits (configurable via environment)
+  DEFAULT_MAX_DAILY_LOSS: parseFloat(process.env['RISK_DEFAULT_MAX_DAILY_LOSS'] || '1000'),
+  DEFAULT_MAX_DRAWDOWN: parseFloat(process.env['RISK_DEFAULT_MAX_DRAWDOWN'] || '15'),
+  DEFAULT_MAX_CONSECUTIVE_FAILURES: parseInt(process.env['RISK_DEFAULT_MAX_CONSECUTIVE_FAILURES'] || '5'),
+  DEFAULT_MAX_FAILURE_RATE: parseFloat(process.env['RISK_DEFAULT_MAX_FAILURE_RATE'] || '30'),
+  DEFAULT_MAX_PORTFOLIO_RISK: parseFloat(process.env['RISK_DEFAULT_MAX_PORTFOLIO_RISK'] || '20'),
+  DEFAULT_MAX_SECTOR_CONCENTRATION: parseFloat(process.env['RISK_DEFAULT_MAX_SECTOR_CONCENTRATION'] || '25'),
+  DEFAULT_MAX_CORRELATION: parseFloat(process.env['RISK_DEFAULT_MAX_CORRELATION'] || '0.8'),
+  
+  // Auto-trigger thresholds
+  AUTO_TRIGGER_DAILY_LOSS_THRESHOLD: parseFloat(process.env['RISK_AUTO_TRIGGER_DAILY_LOSS'] || '0.9'), // 90% of limit
+  AUTO_TRIGGER_FAILURE_RATE_THRESHOLD: parseFloat(process.env['RISK_AUTO_TRIGGER_FAILURE_RATE'] || '0.8'), // 80% of limit
+  
+  // Caching configuration
+  CACHE_TTL_SECONDS: parseInt(process.env['RISK_CACHE_TTL'] || '60'), // 1 minute for risk data
+  
+  // Rate limiting
+  RATE_LIMIT_GET_REQUESTS: parseInt(process.env['RISK_RATE_LIMIT_GET'] || '60'),
+  RATE_LIMIT_ACTION_REQUESTS: parseInt(process.env['RISK_RATE_LIMIT_ACTIONS'] || '20'),
+  RATE_LIMIT_WINDOW_MS: parseInt(process.env['RISK_RATE_LIMIT_WINDOW'] || '3600000'), // 1 hour
+  
+  // Risk calculation windows
+  RISK_ANALYSIS_WINDOW_HOURS: parseInt(process.env['RISK_ANALYSIS_WINDOW_HOURS'] || '24'),
+  
+  // Alert retention
+  MAX_ALERTS_RETURNED: parseInt(process.env['RISK_MAX_ALERTS_RETURNED'] || '50'),
+} as const;
+
+/**
+ * Simple in-memory cache for risk calculations
+ * In production, this should be replaced with Redis
+ */
+class RiskCache {
+  private cache = new Map<string, { data: any; timestamp: number; ttl: number }>();
+  
+  set(key: string, data: any, ttlSeconds: number = RISK_CONFIG.CACHE_TTL_SECONDS): void {
+    this.cache.set(key, {
+      data,
+      timestamp: Date.now(),
+      ttl: ttlSeconds * 1000
+    });
+  }
+  
+  get(key: string): any | null {
+    const entry = this.cache.get(key);
+    if (!entry) return null;
+    
+    if (Date.now() - entry.timestamp > entry.ttl) {
+      this.cache.delete(key);
+      return null;
+    }
+    
+    return entry.data;
+  }
+  
+  clear(): void {
+    this.cache.clear();
+  }
+  
+  getStats(): { size: number; keys: string[] } {
+    return {
+      size: this.cache.size,
+      keys: Array.from(this.cache.keys())
+    };
+  }
+}
+
+const riskCache = new RiskCache();
+
+/**
+ * Enhanced error types for better risk management error handling
+ */
+class RiskAPIError extends Error {
+  constructor(
+    message: string,
+    public statusCode: number = 500,
+    public errorCode: string = 'RISK_ERROR',
+    public details?: any
+  ) {
+    super(message);
+    this.name = 'RiskAPIError';
+  }
+}
+
+/**
+ * Enhanced logging for risk management operations
+ */
+function logRiskOperation(
+  operation: string,
+  userId: string,
+  details: any,
+  duration?: number,
+  error?: Error
+): void {
+  const logData = {
+    timestamp: new Date().toISOString(),
+    operation,
+    userId,
+    details: typeof details === 'object' ? JSON.stringify(details) : details,
+    duration: duration ? `${duration}ms` : undefined,
+    error: error ? {
+      message: error.message,
+      stack: error.stack?.split('\n')[0]
+    } : undefined,
+    cacheStats: riskCache.getStats()
+  };
+  
+  if (error) {
+    console.error('[RISK_API_ERROR]', logData);
+  } else {
+    console.log('[RISK_API_SUCCESS]', logData);
+  }
+}
+
 // Lazy initialization to avoid build-time errors
 function getSupabaseClient() {
   const supabaseUrl = process.env['SUPABASE_URL'];
   const supabaseServiceKey = process.env['SUPABASE_SERVICE_ROLE_KEY'];
   
   if (!supabaseUrl || !supabaseServiceKey) {
-    throw new Error('Supabase configuration is missing. Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables.');
+    throw new RiskAPIError(
+      'Supabase configuration is missing',
+      500,
+      'CONFIG_ERROR',
+      { missing: ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY'] }
+    );
   }
   
   return createClient(supabaseUrl, supabaseServiceKey);
 }
 
+/**
+ * Enhanced validation schemas with better error messages
+ */
 const RiskActionSchema = z.object({
-  action: z.enum(['get_status', 'trigger_kill_switch', 'reset_kill_switch', 'update_limits', 'acknowledge_alert']),
+  action: z.enum(['get_status', 'trigger_kill_switch', 'reset_kill_switch', 'update_limits', 'acknowledge_alert'], {
+    errorMap: () => ({ message: 'Action must be one of: get_status, trigger_kill_switch, reset_kill_switch, update_limits, acknowledge_alert' })
+  }),
   data: z.any().optional()
 });
 
 const UpdateLimitsSchema = z.object({
-  maxDailyLoss: z.number().positive().optional(),
-  maxDrawdown: z.number().min(0).max(100).optional(),
-  maxConsecutiveFailures: z.number().positive().optional(),
-  maxPortfolioRisk: z.number().min(5).max(50).optional(),
-  maxSectorConcentration: z.number().min(5).max(100).optional(),
-  maxCorrelation: z.number().min(0).max(1).optional()
+  maxDailyLoss: z.number().positive('Daily loss limit must be positive').optional(),
+  maxDrawdown: z.number().min(0, 'Drawdown must be 0 or greater').max(100, 'Drawdown cannot exceed 100%').optional(),
+  maxConsecutiveFailures: z.number().positive('Consecutive failures limit must be positive').optional(),
+  maxPortfolioRisk: z.number().min(5, 'Portfolio risk must be at least 5%').max(50, 'Portfolio risk cannot exceed 50%').optional(),
+  maxSectorConcentration: z.number().min(5, 'Sector concentration must be at least 5%').max(100, 'Sector concentration cannot exceed 100%').optional(),
+  maxCorrelation: z.number().min(0, 'Correlation must be 0 or greater').max(1, 'Correlation cannot exceed 1').optional()
 });
 
 const TriggerKillSwitchSchema = z.object({
-  reason: z.string().min(1),
-  severity: z.enum(['low', 'medium', 'high', 'critical']).default('high')
+  reason: z.string().min(1, 'Reason is required').max(500, 'Reason cannot exceed 500 characters'),
+  severity: z.enum(['low', 'medium', 'high', 'critical'], {
+    errorMap: () => ({ message: 'Severity must be one of: low, medium, high, critical' })
+  }).default('high')
 });
 
 const ResetKillSwitchSchema = z.object({
-  reason: z.string().min(1),
-  resetBy: z.string().min(1)
+  reason: z.string().min(1, 'Reason is required').max(500, 'Reason cannot exceed 500 characters'),
+  resetBy: z.string().min(1, 'Reset by field is required').max(100, 'Reset by cannot exceed 100 characters')
 });
 
+/**
+ * Risk Management API Endpoints
+ * 
+ * @route GET /api/risk
+ * @description Get comprehensive risk status and analysis
+ * 
+ * @returns {Object} Risk status including:
+ *   - portfolioRisk: Current portfolio risk metrics
+ *   - killSwitch: Kill switch status and conditions
+ *   - activeBots: Bot status summary
+ *   - alerts: Active risk alerts
+ *   - recommendations: Risk management recommendations
+ *   - configuration: Current risk limits
+ * 
+ * @throws {401} Unauthorized - invalid or missing JWT token
+ * @throws {429} Rate limit exceeded
+ * @throws {500} Internal server error
+ */
 export async function GET(request: NextRequest) {
+  const startTime = Date.now();
+  let userId: string = '';
+  
   try {
-    // Rate limiting
-    const rateLimitResult = await rateLimiter.checkLimit(request);
-    if (!rateLimitResult.allowed) {
-      return NextResponse.json(
+    // Rate limiting for GET requests
+    const rateLimitResult = await rateLimiter.check(request);
+    if (!rateLimitResult.success) {
+      throw new RiskAPIError(
+        'Rate limit exceeded for risk status requests',
+        429,
+        'RATE_LIMIT_EXCEEDED',
         { 
-          error: 'Rate limit exceeded',
-          retryAfter: rateLimitResult.retryAfter 
-        },
-        { status: 429 }
+          retryAfter: Math.ceil((rateLimitResult.resetTime - Date.now()) / 1000),
+          limit: RISK_CONFIG.RATE_LIMIT_GET_REQUESTS
+        }
       );
     }
 
     // Authentication
     const authResult = await verifyJWT(request);
     if (!authResult.success) {
-      return NextResponse.json(
-        { error: 'Unauthorized', details: authResult.error },
-        { status: 401 }
+      throw new RiskAPIError(
+        'Authentication failed',
+        401,
+        'AUTH_FAILED',
+        { details: authResult.error }
       );
     }
 
-    const userId = authResult.payload?.sub;
+    userId = authResult.payload?.sub || '';
+    if (!userId) {
+      throw new RiskAPIError(
+        'Invalid token payload - missing user ID',
+        401,
+        'INVALID_TOKEN_PAYLOAD'
+      );
+    }
+
+    // Check cache first
+    const cacheKey = `risk_status:${userId}`;
+    const cachedData = riskCache.get(cacheKey);
+    if (cachedData) {
+      logRiskOperation('GET_RISK_STATUS_CACHED', userId, { cached: true }, Date.now() - startTime);
+      return NextResponse.json({
+        success: true,
+        data: cachedData,
+        cached: true,
+        timestamp: new Date().toISOString()
+      });
+    }
 
     // Get current risk status
-    const riskStatus = await getCurrentRiskStatus(userId!);
+    const riskStatus = await getCurrentRiskStatus(userId);
+
+    // Cache the result
+    riskCache.set(cacheKey, riskStatus);
+
+    logRiskOperation('GET_RISK_STATUS_SUCCESS', userId, { 
+      activeBots: riskStatus.activeBots.total,
+      alerts: riskStatus.alerts.length,
+      killSwitchStatus: riskStatus.killSwitch.status
+    }, Date.now() - startTime);
 
     return NextResponse.json({
       success: true,
       data: riskStatus,
+      cached: false,
       timestamp: new Date().toISOString()
     });
 
   } catch (error) {
-    console.error('Risk API error:', error);
+    const duration = Date.now() - startTime;
+    
+    if (error instanceof RiskAPIError) {
+      logRiskOperation('GET_RISK_STATUS_ERROR', userId, { errorCode: error.errorCode }, duration, error);
+      return NextResponse.json(
+        { 
+          success: false,
+          error: error.message,
+          errorCode: error.errorCode,
+          details: error.details
+        },
+        { status: error.statusCode }
+      );
+    }
+
+    logRiskOperation('GET_RISK_STATUS_UNEXPECTED_ERROR', userId, {}, duration, error as Error);
+    console.error('Unexpected risk API error:', error);
+    
     return NextResponse.json(
-      { error: 'Internal server error' },
+      { 
+        success: false,
+        error: 'Internal server error',
+        errorCode: 'INTERNAL_ERROR'
+      },
       { status: 500 }
     );
   }
 }
 
+/**
+ * Risk Management Actions API
+ * 
+ * @route POST /api/risk
+ * @description Execute risk management actions
+ * 
+ * @param {Object} body - Action configuration
+ * @param {string} body.action - Action to perform
+ * @param {Object} [body.data] - Action-specific data
+ * 
+ * @returns {Object} Action result with success status and data
+ * 
+ * @throws {400} Invalid request parameters
+ * @throws {401} Unauthorized - invalid or missing JWT token
+ * @throws {429} Rate limit exceeded
+ * @throws {500} Internal server error
+ */
 export async function POST(request: NextRequest) {
+  const startTime = Date.now();
+  let userId: string = '';
+  let action: string = '';
+  
   try {
-    // Rate limiting (stricter for actions)
-    const rateLimitResult = await rateLimiter.checkLimit(request, 'action');
-    if (!rateLimitResult.allowed) {
-      return NextResponse.json(
+    // Stricter rate limiting for actions
+    const rateLimitResult = await rateLimiter.check(request);
+    if (!rateLimitResult.success) {
+      throw new RiskAPIError(
+        'Rate limit exceeded for risk actions',
+        429,
+        'RATE_LIMIT_EXCEEDED',
         { 
-          error: 'Rate limit exceeded',
-          retryAfter: rateLimitResult.retryAfter 
-        },
-        { status: 429 }
+          retryAfter: Math.ceil((rateLimitResult.resetTime - Date.now()) / 1000),
+          limit: RISK_CONFIG.RATE_LIMIT_ACTION_REQUESTS
+        }
       );
     }
 
     // Authentication
     const authResult = await verifyJWT(request);
     if (!authResult.success) {
-      return NextResponse.json(
-        { error: 'Unauthorized', details: authResult.error },
-        { status: 401 }
+      throw new RiskAPIError(
+        'Authentication failed',
+        401,
+        'AUTH_FAILED',
+        { details: authResult.error }
       );
     }
 
-    const userId = authResult.payload?.sub;
+    userId = authResult.payload?.sub || '';
+    if (!userId) {
+      throw new RiskAPIError(
+        'Invalid token payload - missing user ID',
+        401,
+        'INVALID_TOKEN_PAYLOAD'
+      );
+    }
+
     const body = await request.json();
 
     // Validate request
     const validationResult = RiskActionSchema.safeParse(body);
     if (!validationResult.success) {
-      return NextResponse.json(
+      throw new RiskAPIError(
+        'Invalid request parameters',
+        400,
+        'VALIDATION_ERROR',
         { 
-          error: 'Invalid request',
-          details: (validationResult as any).error?.errors || []
-        },
-        { status: 400 }
+          errors: validationResult.error.errors,
+          received: body
+        }
       );
     }
 
-    const { action, data } = validationResult.data;
+    const { action: actionType, data } = validationResult.data;
+    action = actionType;
+
+    // Clear cache after any action that might change risk status
+    if (['trigger_kill_switch', 'reset_kill_switch', 'update_limits'].includes(action)) {
+      riskCache.clear();
+    }
 
     // Handle different risk actions
+    let result;
     switch (action) {
       case 'get_status':
-        const status = await getCurrentRiskStatus(userId!);
-        return NextResponse.json({
+        const statusData = await getCurrentRiskStatus(userId);
+        result = {
           success: true,
-          data: status
-        });
+          data: statusData
+        };
+        break;
 
       case 'trigger_kill_switch':
-        const triggerResult = await triggerKillSwitch(userId!, data);
-        return NextResponse.json(triggerResult);
+        result = await triggerKillSwitch(userId, data);
+        break;
 
       case 'reset_kill_switch':
-        const resetResult = await resetKillSwitch(userId!, data);
-        return NextResponse.json(resetResult);
+        result = await resetKillSwitch(userId, data);
+        break;
 
       case 'update_limits':
-        const updateResult = await updateRiskLimits(userId!, data);
-        return NextResponse.json(updateResult);
+        result = await updateRiskLimits(userId, data);
+        break;
 
       case 'acknowledge_alert':
-        const ackResult = await acknowledgeAlert(userId!, data);
-        return NextResponse.json(ackResult);
+        result = await acknowledgeAlert(userId, data);
+        break;
 
       default:
-        return NextResponse.json(
-          { error: 'Unknown action' },
-          { status: 400 }
+        throw new RiskAPIError(
+          'Unknown action',
+          400,
+          'UNKNOWN_ACTION',
+          { action }
         );
     }
 
+    logRiskOperation('RISK_ACTION_SUCCESS', userId, { action, success: result.success }, Date.now() - startTime);
+
+    return NextResponse.json(result);
+
   } catch (error) {
-    console.error('Risk API error:', error);
+    const duration = Date.now() - startTime;
+    
+    if (error instanceof RiskAPIError) {
+      logRiskOperation('RISK_ACTION_ERROR', userId, { action, errorCode: error.errorCode }, duration, error);
+      return NextResponse.json(
+        { 
+          success: false,
+          error: error.message,
+          errorCode: error.errorCode,
+          details: error.details
+        },
+        { status: error.statusCode }
+      );
+    }
+
+    logRiskOperation('RISK_ACTION_UNEXPECTED_ERROR', userId, { action }, duration, error as Error);
+    console.error('Unexpected risk action error:', error);
+    
     return NextResponse.json(
-      { error: 'Internal server error' },
+      { 
+        success: false,
+        error: 'Internal server error',
+        errorCode: 'INTERNAL_ERROR'
+      },
       { status: 500 }
     );
   }
 }
 
+/**
+ * Get comprehensive current risk status with enhanced error handling
+ */
 async function getCurrentRiskStatus(userId: string) {
   try {
-    // Get user's active bots
     const supabase = getSupabaseClient();
+    
+    // Get user's active bots
     const { data: bots, error: botsError } = await supabase
       .from('bot_configurations')
       .select(`
@@ -182,12 +463,16 @@ async function getCurrentRiskStatus(userId: string) {
       .eq('user_id', userId);
 
     if (botsError) {
-      console.error('Error fetching bots:', botsError);
-      throw new Error('Failed to fetch bot data');
+      throw new RiskAPIError(
+        'Failed to fetch bot configurations',
+        500,
+        'DATABASE_ERROR',
+        { supabaseError: botsError }
+      );
     }
 
     // Get recent trades for risk analysis
-    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const analysisWindowAgo = new Date(Date.now() - RISK_CONFIG.RISK_ANALYSIS_WINDOW_HOURS * 60 * 60 * 1000).toISOString();
     const { data: recentTrades, error: tradesError } = await supabase
       .from('trade_history')
       .select(`
@@ -198,10 +483,11 @@ async function getCurrentRiskStatus(userId: string) {
         bot_configurations!inner(user_id)
       `)
       .eq('bot_configurations.user_id', userId)
-      .gte('executed_at', twentyFourHoursAgo);
+      .gte('executed_at', analysisWindowAgo);
 
     if (tradesError) {
-      console.error('Error fetching trades:', tradesError);
+      console.error('Error fetching trades for risk analysis:', tradesError);
+      // Continue with empty trades array rather than failing
     }
 
     // Get user's risk configuration
@@ -212,10 +498,10 @@ async function getCurrentRiskStatus(userId: string) {
       .single();
 
     if (configError && configError.code !== 'PGRST116') { // Not found is okay
-      console.error('Error fetching risk config:', configError);
+      console.error('Error fetching risk configuration:', configError);
     }
 
-    // Calculate portfolio risk metrics
+    // Calculate portfolio risk metrics with enhanced configuration
     const portfolioMetrics = calculatePortfolioRisk(recentTrades || [], riskConfig);
 
     // Get active alerts
@@ -225,10 +511,10 @@ async function getCurrentRiskStatus(userId: string) {
       .eq('user_id', userId)
       .eq('acknowledged', false)
       .order('created_at', { ascending: false })
-      .limit(20);
+      .limit(RISK_CONFIG.MAX_ALERTS_RETURNED);
 
     if (alertsError) {
-      console.error('Error fetching alerts:', alertsError);
+      console.error('Error fetching risk alerts:', alertsError);
     }
 
     // Determine kill switch status
@@ -248,279 +534,30 @@ async function getCurrentRiskStatus(userId: string) {
       alerts: alerts || [],
       recommendations,
       configuration: riskConfig || getDefaultRiskConfig(),
+      systemHealth: {
+        analysisWindow: `${RISK_CONFIG.RISK_ANALYSIS_WINDOW_HOURS} hours`,
+        tradesAnalyzed: recentTrades?.length || 0,
+        configurationSource: riskConfig ? 'user_configured' : 'default'
+      },
       lastUpdated: new Date().toISOString()
     };
 
   } catch (error) {
-    console.error('Error getting risk status:', error);
-    throw error;
+    if (error instanceof RiskAPIError) {
+      throw error;
+    }
+    throw new RiskAPIError(
+      'Failed to get risk status',
+      500,
+      'RISK_STATUS_ERROR',
+      { originalError: error instanceof Error ? error.message : 'Unknown error' }
+    );
   }
 }
 
-async function triggerKillSwitch(userId: string, data: any) {
-  try {
-    // Validate trigger data
-    const validation = TriggerKillSwitchSchema.safeParse(data);
-    if (!validation.success) {
-      return {
-        success: false,
-        error: 'Invalid trigger data',
-        details: (validation as any).error?.errors || []
-      };
-    }
-
-    const { reason, severity } = validation.data;
-    const supabase = getSupabaseClient();
-
-    // Stop all active bots
-    const { data: activeBots, error: botsError } = await supabase
-      .from('bot_configurations')
-      .select('id, name')
-      .eq('user_id', userId)
-      .eq('is_active', true);
-
-    if (botsError) {
-      console.error('Error fetching active bots:', botsError);
-      return {
-        success: false,
-        error: 'Failed to fetch active bots'
-      };
-    }
-
-    // Update all active bots to stopped
-    if (activeBots && activeBots.length > 0) {
-      const { error: stopError } = await supabase
-        .from('bot_configurations')
-        .update({
-          is_active: false,
-          status: 'stopped',
-          updated_at: new Date().toISOString()
-        })
-        .eq('user_id', userId)
-        .eq('is_active', true);
-
-      if (stopError) {
-        console.error('Error stopping bots:', stopError);
-        return {
-          success: false,
-          error: 'Failed to stop bots'
-        };
-      }
-    }
-
-    // Log kill switch event
-    const { error: logError } = await supabase
-      .from('kill_switch_events')
-      .insert({
-        user_id: userId,
-        event_type: 'triggered',
-        reason,
-        severity,
-        affected_bots: activeBots?.map(b => b.id) || [],
-        metadata: {
-          timestamp: new Date().toISOString(),
-          triggeredBy: 'user'
-        }
-      });
-
-    if (logError) {
-      console.error('Error logging kill switch event:', logError);
-    }
-
-    // Create alert
-    await supabase
-      .from('risk_alerts')
-      .insert({
-        user_id: userId,
-        alert_type: 'kill_switch',
-        severity: 'critical',
-        message: `Kill switch triggered: ${reason}`,
-        metadata: {
-          stoppedBots: activeBots?.length || 0,
-          severity
-        }
-      });
-
-    return {
-      success: true,
-      message: 'Kill switch triggered successfully',
-      data: {
-        reason,
-        severity,
-        botsStoppedCount: activeBots?.length || 0,
-        stoppedBots: activeBots || []
-      }
-    };
-
-  } catch (error) {
-    console.error('Error triggering kill switch:', error);
-    return {
-      success: false,
-      error: 'Internal server error'
-    };
-  }
-}
-
-async function resetKillSwitch(userId: string, data: any) {
-  try {
-    // Validate reset data
-    const validation = ResetKillSwitchSchema.safeParse(data);
-    if (!validation.success) {
-      return {
-        success: false,
-        error: 'Invalid reset data',
-        details: (validation as any).error?.errors || []
-      };
-    }
-
-    const { reason, resetBy } = validation.data;
-    const supabase = getSupabaseClient();
-
-    // Log reset event
-    const { error: logError } = await supabase
-      .from('kill_switch_events')
-      .insert({
-        user_id: userId,
-        event_type: 'reset',
-        reason: `Reset: ${reason}`,
-        severity: 'low',
-        metadata: {
-          resetBy,
-          timestamp: new Date().toISOString()
-        }
-      });
-
-    if (logError) {
-      console.error('Error logging reset event:', logError);
-    }
-
-    // Clear critical alerts
-    await supabase
-      .from('risk_alerts')
-      .update({ acknowledged: true })
-      .eq('user_id', userId)
-      .eq('alert_type', 'kill_switch');
-
-    return {
-      success: true,
-      message: 'Kill switch reset successfully',
-      data: {
-        reason,
-        resetBy,
-        resetAt: new Date().toISOString()
-      }
-    };
-
-  } catch (error) {
-    console.error('Error resetting kill switch:', error);
-    return {
-      success: false,
-      error: 'Internal server error'
-    };
-  }
-}
-
-async function updateRiskLimits(userId: string, data: any) {
-  try {
-    // Validate limits data
-    const validation = UpdateLimitsSchema.safeParse(data);
-    if (!validation.success) {
-      return {
-        success: false,
-        error: 'Invalid limits data',
-        details: (validation as any).error?.errors || []
-      };
-    }
-
-    const limits = validation.data;
-    const supabase = getSupabaseClient();
-
-    // Update or create risk configuration
-    const { data: updatedConfig, error: updateError } = await supabase
-      .from('user_risk_settings')
-      .upsert({
-        user_id: userId,
-        max_daily_loss: limits.maxDailyLoss,
-        max_drawdown: limits.maxDrawdown,
-        max_consecutive_failures: limits.maxConsecutiveFailures,
-        max_portfolio_risk: limits.maxPortfolioRisk,
-        max_sector_concentration: limits.maxSectorConcentration,
-        max_correlation: limits.maxCorrelation,
-        updated_at: new Date().toISOString()
-      }, {
-        onConflict: 'user_id'
-      })
-      .select()
-      .single();
-
-    if (updateError) {
-      console.error('Error updating risk limits:', updateError);
-      return {
-        success: false,
-        error: 'Failed to update risk limits'
-      };
-    }
-
-    return {
-      success: true,
-      message: 'Risk limits updated successfully',
-      data: updatedConfig
-    };
-
-  } catch (error) {
-    console.error('Error updating risk limits:', error);
-    return {
-      success: false,
-      error: 'Internal server error'
-    };
-  }
-}
-
-async function acknowledgeAlert(userId: string, data: any) {
-  try {
-    const { alertId } = data;
-
-    if (!alertId) {
-      return {
-        success: false,
-        error: 'Alert ID is required'
-      };
-    }
-
-    const supabase = getSupabaseClient();
-
-    // Acknowledge the alert
-    const { error: ackError } = await supabase
-      .from('risk_alerts')
-      .update({
-        acknowledged: true,
-        acknowledged_at: new Date().toISOString()
-      })
-      .eq('id', alertId)
-      .eq('user_id', userId);
-
-    if (ackError) {
-      console.error('Error acknowledging alert:', ackError);
-      return {
-        success: false,
-        error: 'Failed to acknowledge alert'
-      };
-    }
-
-    return {
-      success: true,
-      message: 'Alert acknowledged successfully'
-    };
-
-  } catch (error) {
-    console.error('Error acknowledging alert:', error);
-    return {
-      success: false,
-      error: 'Internal server error'
-    };
-  }
-}
-
+/**
+ * Enhanced portfolio risk calculation with configurable parameters
+ */
 function calculatePortfolioRisk(trades: any[], riskConfig: any) {
   const completedTrades = trades.filter(t => t.status === 'completed');
   const failedTrades = trades.filter(t => t.status === 'failed');
@@ -571,187 +608,532 @@ function calculatePortfolioRisk(trades: any[], riskConfig: any) {
     failureImpact: Math.round(failureImpact * 100) / 100,
     consecutiveFailures,
     riskLimits: {
-      maxDailyLoss: config.max_daily_loss || 1000,
-      maxDrawdown: config.max_drawdown || 15,
-      maxConsecutiveFailures: config.max_consecutive_failures || 5,
-      maxFailureRate: config.max_failure_rate || 30 // 30% max failure rate
+      maxDailyLoss: config.max_daily_loss || RISK_CONFIG.DEFAULT_MAX_DAILY_LOSS,
+      maxDrawdown: config.max_drawdown || RISK_CONFIG.DEFAULT_MAX_DRAWDOWN,
+      maxConsecutiveFailures: config.max_consecutive_failures || RISK_CONFIG.DEFAULT_MAX_CONSECUTIVE_FAILURES,
+      maxFailureRate: config.max_failure_rate || RISK_CONFIG.DEFAULT_MAX_FAILURE_RATE
     },
     riskUtilization: {
-      dailyLoss: dailyLoss / (config.max_daily_loss || 1000),
-      consecutiveFailures: consecutiveFailures / (config.max_consecutive_failures || 5),
-      failureRate: failureRate / (config.max_failure_rate || 30)
+      dailyLoss: dailyLoss / (config.max_daily_loss || RISK_CONFIG.DEFAULT_MAX_DAILY_LOSS),
+      consecutiveFailures: consecutiveFailures / (config.max_consecutive_failures || RISK_CONFIG.DEFAULT_MAX_CONSECUTIVE_FAILURES),
+      failureRate: failureRate / (config.max_failure_rate || RISK_CONFIG.DEFAULT_MAX_FAILURE_RATE)
     }
   };
 }
 
+// Keeping the rest of the helper functions with enhanced error handling
 function calculateConsecutiveFailures(trades: any[]): number {
-  let consecutiveFailures = 0;
-  const sortedTrades = trades.sort((a, b) => 
-    new Date(b.executed_at).getTime() - new Date(a.executed_at).getTime()
-  );
+  try {
+    let consecutiveFailures = 0;
+    const sortedTrades = trades.sort((a, b) => 
+      new Date(b.executed_at).getTime() - new Date(a.executed_at).getTime()
+    );
 
-  for (const trade of sortedTrades) {
-    if (trade.status === 'failed') {
-      consecutiveFailures++;
-    } else if (trade.status === 'completed') {
-      break;
+    for (const trade of sortedTrades) {
+      if (trade.status === 'failed') {
+        consecutiveFailures++;
+      } else if (trade.status === 'completed') {
+        break;
+      }
     }
-  }
 
-  return consecutiveFailures;
+    return consecutiveFailures;
+  } catch (error) {
+    console.error('Error calculating consecutive failures:', error);
+    return 0;
+  }
 }
 
 async function getKillSwitchStatus(userId: string, portfolioMetrics: any) {
-  const supabase = getSupabaseClient();
-  
-  // Get last kill switch event
-  const { data: lastEvent } = await supabase
-    .from('kill_switch_events')
-    .select('*')
-    .eq('user_id', userId)
-    .order('created_at', { ascending: false })
-    .limit(1);
+  try {
+    const supabase = getSupabaseClient();
+    
+    // Get last kill switch event
+    const { data: lastEvent } = await supabase
+      .from('kill_switch_events')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(1);
 
-  const isTriggered = lastEvent?.[0]?.event_type === 'triggered';
-  const lastTriggered = isTriggered ? lastEvent[0].created_at : null;
+    const isTriggered = lastEvent?.[0]?.event_type === 'triggered';
+    const lastTriggered = isTriggered ? lastEvent[0].created_at : null;
 
-  // Check if auto-trigger conditions are met
-  const autoTriggerRisk = checkAutoTriggerConditions(portfolioMetrics);
+    // Check if auto-trigger conditions are met with configurable thresholds
+    const autoTriggerRisk = checkAutoTriggerConditions(portfolioMetrics);
 
-  return {
-    isActive: true,
-    isTriggered,
-    lastTriggered,
-    autoTriggerRisk,
-    status: isTriggered ? 'triggered' : autoTriggerRisk.shouldTrigger ? 'warning' : 'normal'
-  };
+    return {
+      isActive: true,
+      isTriggered,
+      lastTriggered,
+      autoTriggerRisk,
+      status: isTriggered ? 'triggered' : autoTriggerRisk.shouldTrigger ? 'warning' : 'normal',
+      configuration: {
+        autoTriggerThresholds: {
+          dailyLossThreshold: RISK_CONFIG.AUTO_TRIGGER_DAILY_LOSS_THRESHOLD,
+          failureRateThreshold: RISK_CONFIG.AUTO_TRIGGER_FAILURE_RATE_THRESHOLD
+        }
+      }
+    };
+  } catch (error) {
+    console.error('Error getting kill switch status:', error);
+    return {
+      isActive: false,
+      isTriggered: false,
+      lastTriggered: null,
+      autoTriggerRisk: { shouldTrigger: false, risks: [] },
+      status: 'unknown'
+    };
+  }
 }
 
 function checkAutoTriggerConditions(metrics: any) {
-  const risks = [];
-  let shouldTrigger = false;
+  try {
+    const risks = [];
+    let shouldTrigger = false;
 
-  // Check daily loss limit
-  if (metrics.dailyLoss >= metrics.riskLimits.maxDailyLoss) {
-    risks.push({
-      type: 'daily_loss',
-      current: metrics.dailyLoss,
-      limit: metrics.riskLimits.maxDailyLoss,
-      severity: 'high'
-    });
-    shouldTrigger = true;
+    // Check daily loss limit with configurable threshold
+    const dailyLossRatio = metrics.dailyLoss / metrics.riskLimits.maxDailyLoss;
+    if (dailyLossRatio >= RISK_CONFIG.AUTO_TRIGGER_DAILY_LOSS_THRESHOLD) {
+      risks.push({
+        type: 'daily_loss',
+        current: metrics.dailyLoss,
+        limit: metrics.riskLimits.maxDailyLoss,
+        utilization: dailyLossRatio,
+        severity: dailyLossRatio >= 1.0 ? 'critical' : 'high'
+      });
+      shouldTrigger = dailyLossRatio >= 1.0;
+    }
+
+    // Check consecutive failures
+    if (metrics.consecutiveFailures >= metrics.riskLimits.maxConsecutiveFailures) {
+      risks.push({
+        type: 'consecutive_failures',
+        current: metrics.consecutiveFailures,
+        limit: metrics.riskLimits.maxConsecutiveFailures,
+        severity: 'medium'
+      });
+      shouldTrigger = true;
+    }
+
+    // Check failure rate with configurable threshold
+    const failureRateRatio = metrics.failureRate / metrics.riskLimits.maxFailureRate;
+    if (failureRateRatio >= RISK_CONFIG.AUTO_TRIGGER_FAILURE_RATE_THRESHOLD) {
+      risks.push({
+        type: 'high_failure_rate',
+        current: metrics.failureRate,
+        limit: metrics.riskLimits.maxFailureRate,
+        utilization: failureRateRatio,
+        severity: failureRateRatio >= 1.0 ? 'high' : 'medium'
+      });
+      shouldTrigger = shouldTrigger || failureRateRatio >= 1.0;
+    }
+
+    return {
+      shouldTrigger,
+      risks
+    };
+  } catch (error) {
+    console.error('Error checking auto-trigger conditions:', error);
+    return {
+      shouldTrigger: false,
+      risks: []
+    };
   }
+}
 
-  // Check consecutive failures
-  if (metrics.consecutiveFailures >= metrics.riskLimits.maxConsecutiveFailures) {
-    risks.push({
-      type: 'consecutive_failures',
-      current: metrics.consecutiveFailures,
-      limit: metrics.riskLimits.maxConsecutiveFailures,
-      severity: 'medium'
+// Enhanced trigger and management functions with better error handling
+async function triggerKillSwitch(userId: string, data: any) {
+  try {
+    // Validate trigger data
+    const validation = TriggerKillSwitchSchema.safeParse(data);
+    if (!validation.success) {
+      throw new RiskAPIError(
+        'Invalid kill switch trigger data',
+        400,
+        'VALIDATION_ERROR',
+        { errors: validation.error.errors }
+      );
+    }
+
+    const { reason, severity } = validation.data;
+    const supabase = getSupabaseClient();
+
+    // Stop all active bots
+    const { data: activeBots, error: botsError } = await supabase
+      .from('bot_configurations')
+      .select('id, name')
+      .eq('user_id', userId)
+      .eq('is_active', true);
+
+    if (botsError) {
+      throw new RiskAPIError(
+        'Failed to fetch active bots for kill switch',
+        500,
+        'DATABASE_ERROR',
+        { supabaseError: botsError }
+      );
+    }
+
+    // Update all active bots to stopped
+    if (activeBots && activeBots.length > 0) {
+      const { error: stopError } = await supabase
+        .from('bot_configurations')
+        .update({
+          is_active: false,
+          status: 'stopped',
+          updated_at: new Date().toISOString()
+        })
+        .eq('user_id', userId)
+        .eq('is_active', true);
+
+      if (stopError) {
+        throw new RiskAPIError(
+          'Failed to stop bots during kill switch activation',
+          500,
+          'BOT_STOP_ERROR',
+          { supabaseError: stopError }
+        );
+      }
+    }
+
+    // Log kill switch event
+    const { error: logError } = await supabase
+      .from('kill_switch_events')
+      .insert({
+        user_id: userId,
+        event_type: 'triggered',
+        reason,
+        severity,
+        affected_bots: activeBots?.map(b => b.id) || [],
+        metadata: {
+          timestamp: new Date().toISOString(),
+          triggeredBy: 'user'
+        }
+      });
+
+    if (logError) {
+      console.error('Error logging kill switch event:', logError);
+    }
+
+    // Create alert
+    await supabase
+      .from('risk_alerts')
+      .insert({
+        user_id: userId,
+        alert_type: 'kill_switch',
+        severity: 'critical',
+        message: `Kill switch triggered: ${reason}`,
+        metadata: {
+          stoppedBots: activeBots?.length || 0,
+          severity
+        }
+      });
+
+    logRiskOperation('KILL_SWITCH_TRIGGERED', userId, {
+      reason,
+      severity,
+      botsStoppedCount: activeBots?.length || 0
     });
-    shouldTrigger = true;
-  }
 
-  // Check failure rate
-  if (metrics.failureRate >= (metrics.riskLimits.maxFailureRate || 30)) {
-    risks.push({
-      type: 'high_failure_rate',
-      current: metrics.failureRate,
-      limit: metrics.riskLimits.maxFailureRate || 30,
-      severity: 'medium'
-    });
-    shouldTrigger = true;
-  }
+    return {
+      success: true,
+      message: 'Kill switch triggered successfully',
+      data: {
+        reason,
+        severity,
+        botsStoppedCount: activeBots?.length || 0,
+        stoppedBots: activeBots || []
+      }
+    };
 
-  return {
-    shouldTrigger,
-    risks
-  };
+  } catch (error) {
+    if (error instanceof RiskAPIError) {
+      throw error;
+    }
+    throw new RiskAPIError(
+      'Kill switch trigger failed',
+      500,
+      'KILL_SWITCH_ERROR',
+      { originalError: error instanceof Error ? error.message : 'Unknown error' }
+    );
+  }
+}
+
+async function resetKillSwitch(userId: string, data: any) {
+  try {
+    // Validate reset data
+    const validation = ResetKillSwitchSchema.safeParse(data);
+    if (!validation.success) {
+      throw new RiskAPIError(
+        'Invalid kill switch reset data',
+        400,
+        'VALIDATION_ERROR',
+        { errors: validation.error.errors }
+      );
+    }
+
+    const { reason, resetBy } = validation.data;
+    const supabase = getSupabaseClient();
+
+    // Log reset event
+    const { error: logError } = await supabase
+      .from('kill_switch_events')
+      .insert({
+        user_id: userId,
+        event_type: 'reset',
+        reason: `Reset: ${reason}`,
+        severity: 'low',
+        metadata: {
+          resetBy,
+          timestamp: new Date().toISOString()
+        }
+      });
+
+    if (logError) {
+      console.error('Error logging reset event:', logError);
+    }
+
+    // Clear critical alerts
+    await supabase
+      .from('risk_alerts')
+      .update({ acknowledged: true })
+      .eq('user_id', userId)
+      .eq('alert_type', 'kill_switch');
+
+    logRiskOperation('KILL_SWITCH_RESET', userId, { reason, resetBy });
+
+    return {
+      success: true,
+      message: 'Kill switch reset successfully',
+      data: {
+        reason,
+        resetBy,
+        resetAt: new Date().toISOString()
+      }
+    };
+
+  } catch (error) {
+    if (error instanceof RiskAPIError) {
+      throw error;
+    }
+    throw new RiskAPIError(
+      'Kill switch reset failed',
+      500,
+      'KILL_SWITCH_RESET_ERROR',
+      { originalError: error instanceof Error ? error.message : 'Unknown error' }
+    );
+  }
+}
+
+async function updateRiskLimits(userId: string, data: any) {
+  try {
+    // Validate limits data
+    const validation = UpdateLimitsSchema.safeParse(data);
+    if (!validation.success) {
+      throw new RiskAPIError(
+        'Invalid risk limits data',
+        400,
+        'VALIDATION_ERROR',
+        { errors: validation.error.errors }
+      );
+    }
+
+    const limits = validation.data;
+    const supabase = getSupabaseClient();
+
+    // Update or create risk configuration
+    const { data: updatedConfig, error: updateError } = await supabase
+      .from('user_risk_settings')
+      .upsert({
+        user_id: userId,
+        max_daily_loss: limits.maxDailyLoss,
+        max_drawdown: limits.maxDrawdown,
+        max_consecutive_failures: limits.maxConsecutiveFailures,
+        max_portfolio_risk: limits.maxPortfolioRisk,
+        max_sector_concentration: limits.maxSectorConcentration,
+        max_correlation: limits.maxCorrelation,
+        updated_at: new Date().toISOString()
+      }, {
+        onConflict: 'user_id'
+      })
+      .select()
+      .single();
+
+    if (updateError) {
+      throw new RiskAPIError(
+        'Failed to update risk limits',
+        500,
+        'DATABASE_ERROR',
+        { supabaseError: updateError }
+      );
+    }
+
+    logRiskOperation('RISK_LIMITS_UPDATED', userId, limits);
+
+    return {
+      success: true,
+      message: 'Risk limits updated successfully',
+      data: updatedConfig
+    };
+
+  } catch (error) {
+    if (error instanceof RiskAPIError) {
+      throw error;
+    }
+    throw new RiskAPIError(
+      'Risk limits update failed',
+      500,
+      'RISK_LIMITS_ERROR',
+      { originalError: error instanceof Error ? error.message : 'Unknown error' }
+    );
+  }
+}
+
+async function acknowledgeAlert(userId: string, data: any) {
+  try {
+    const { alertId } = data;
+
+    if (!alertId) {
+      throw new RiskAPIError(
+        'Alert ID is required',
+        400,
+        'MISSING_ALERT_ID'
+      );
+    }
+
+    const supabase = getSupabaseClient();
+
+    // Acknowledge the alert with user validation
+    const { error: ackError } = await supabase
+      .from('risk_alerts')
+      .update({
+        acknowledged: true,
+        acknowledged_at: new Date().toISOString()
+      })
+      .eq('id', alertId)
+      .eq('user_id', userId);
+
+    if (ackError) {
+      throw new RiskAPIError(
+        'Failed to acknowledge alert',
+        500,
+        'DATABASE_ERROR',
+        { supabaseError: ackError }
+      );
+    }
+
+    logRiskOperation('ALERT_ACKNOWLEDGED', userId, { alertId });
+
+    return {
+      success: true,
+      message: 'Alert acknowledged successfully'
+    };
+
+  } catch (error) {
+    if (error instanceof RiskAPIError) {
+      throw error;
+    }
+    throw new RiskAPIError(
+      'Alert acknowledgment failed',
+      500,
+      'ALERT_ACK_ERROR',
+      { originalError: error instanceof Error ? error.message : 'Unknown error' }
+    );
+  }
 }
 
 function generateRiskRecommendations(portfolioMetrics: any, bots: any[], alerts: any[]) {
-  const recommendations = [];
+  try {
+    const recommendations = [];
 
-  // High daily loss
-  if (portfolioMetrics.riskUtilization.dailyLoss > 0.8) {
-    recommendations.push({
-      type: 'reduce_risk',
-      priority: 'high',
-      title: 'Reduce Daily Risk Exposure',
-      description: 'Daily losses are approaching the limit. Consider reducing position sizes or stopping some bots.',
-      action: 'Consider stopping non-essential bots or reducing trade sizes'
-    });
+    // High daily loss
+    if (portfolioMetrics.riskUtilization.dailyLoss > 0.8) {
+      recommendations.push({
+        type: 'reduce_risk',
+        priority: 'high',
+        title: 'Reduce Daily Risk Exposure',
+        description: 'Daily losses are approaching the limit. Consider reducing position sizes or stopping some bots.',
+        action: 'Consider stopping non-essential bots or reducing trade sizes',
+        urgency: portfolioMetrics.riskUtilization.dailyLoss > 0.95 ? 'critical' : 'high'
+      });
+    }
+
+    // Too many consecutive failures
+    if (portfolioMetrics.consecutiveFailures > 3) {
+      recommendations.push({
+        type: 'review_strategy',
+        priority: 'medium',
+        title: 'Review Trading Strategy',
+        description: 'Multiple consecutive failures detected. Strategy may need adjustment.',
+        action: 'Review bot configurations and market conditions'
+      });
+    }
+
+    // High failure rate
+    if (portfolioMetrics.failureRate > 25) {
+      recommendations.push({
+        type: 'high_failure_rate',
+        priority: 'high',
+        title: 'High Trade Failure Rate',
+        description: `${portfolioMetrics.failureRate.toFixed(1)}% of trades are failing. This may indicate strategy or market issues.`,
+        action: 'Review trade execution parameters and market conditions'
+      });
+    }
+
+    // Significant costs from failed trades
+    if (portfolioMetrics.failureImpact > 10) {
+      recommendations.push({
+        type: 'failure_costs',
+        priority: 'medium',
+        title: 'High Failed Trade Costs',
+        description: `Failed trades are costing ${portfolioMetrics.failureImpact.toFixed(1)}% of total trading profit in gas fees.`,
+        action: 'Optimize gas fee settings and trade execution timing'
+      });
+    }
+
+    // Too many active bots
+    const activeBots = bots.filter(b => b.is_active);
+    if (activeBots.length > 5) {
+      recommendations.push({
+        type: 'reduce_exposure',
+        priority: 'medium',
+        title: 'Reduce Active Bots',
+        description: 'Multiple active bots increase complexity and risk.',
+        action: 'Consider focusing on best-performing bots'
+      });
+    }
+
+    // Unacknowledged critical alerts
+    const criticalAlerts = alerts.filter(a => a.severity === 'critical' && !a.acknowledged);
+    if (criticalAlerts.length > 0) {
+      recommendations.push({
+        type: 'address_alerts',
+        priority: 'critical',
+        title: 'Address Critical Alerts',
+        description: `${criticalAlerts.length} critical alerts require immediate attention.`,
+        action: 'Review and acknowledge critical risk alerts'
+      });
+    }
+
+    return recommendations;
+  } catch (error) {
+    console.error('Error generating risk recommendations:', error);
+    return [];
   }
-
-  // Too many consecutive failures
-  if (portfolioMetrics.consecutiveFailures > 3) {
-    recommendations.push({
-      type: 'review_strategy',
-      priority: 'medium',
-      title: 'Review Trading Strategy',
-      description: 'Multiple consecutive failures detected. Strategy may need adjustment.',
-      action: 'Review bot configurations and market conditions'
-    });
-  }
-
-  // High failure rate
-  if (portfolioMetrics.failureRate > 25) {
-    recommendations.push({
-      type: 'high_failure_rate',
-      priority: 'high',
-      title: 'High Trade Failure Rate',
-      description: `${portfolioMetrics.failureRate.toFixed(1)}% of trades are failing. This may indicate strategy or market issues.`,
-      action: 'Review trade execution parameters and market conditions'
-    });
-  }
-
-  // Significant costs from failed trades
-  if (portfolioMetrics.failureImpact > 10) {
-    recommendations.push({
-      type: 'failure_costs',
-      priority: 'medium',
-      title: 'High Failed Trade Costs',
-      description: `Failed trades are costing ${portfolioMetrics.failureImpact.toFixed(1)}% of total trading profit in gas fees.`,
-      action: 'Optimize gas fee settings and trade execution timing'
-    });
-  }
-
-  // Too many active bots
-  const activeBots = bots.filter(b => b.is_active);
-  if (activeBots.length > 5) {
-    recommendations.push({
-      type: 'reduce_exposure',
-      priority: 'medium',
-      title: 'Reduce Active Bots',
-      description: 'Multiple active bots increase complexity and risk.',
-      action: 'Consider focusing on best-performing bots'
-    });
-  }
-
-  // Unacknowledged critical alerts
-  const criticalAlerts = alerts.filter(a => a.severity === 'critical' && !a.acknowledged);
-  if (criticalAlerts.length > 0) {
-    recommendations.push({
-      type: 'address_alerts',
-      priority: 'critical',
-      title: 'Address Critical Alerts',
-      description: `${criticalAlerts.length} critical alerts require immediate attention.`,
-      action: 'Review and acknowledge critical risk alerts'
-    });
-  }
-
-  return recommendations;
 }
 
+/**
+ * Get default risk configuration with environment-driven values
+ */
 function getDefaultRiskConfig() {
   return {
-    max_daily_loss: 1000,
-    max_drawdown: 15,
-    max_consecutive_failures: 5,
-    max_failure_rate: 30, // 30% maximum failure rate
-    max_portfolio_risk: 20,
-    max_sector_concentration: 25,
-    max_correlation: 0.8
+    max_daily_loss: RISK_CONFIG.DEFAULT_MAX_DAILY_LOSS,
+    max_drawdown: RISK_CONFIG.DEFAULT_MAX_DRAWDOWN,
+    max_consecutive_failures: RISK_CONFIG.DEFAULT_MAX_CONSECUTIVE_FAILURES,
+    max_failure_rate: RISK_CONFIG.DEFAULT_MAX_FAILURE_RATE,
+    max_portfolio_risk: RISK_CONFIG.DEFAULT_MAX_PORTFOLIO_RISK,
+    max_sector_concentration: RISK_CONFIG.DEFAULT_MAX_SECTOR_CONCENTRATION,
+    max_correlation: RISK_CONFIG.DEFAULT_MAX_CORRELATION
   };
 }
