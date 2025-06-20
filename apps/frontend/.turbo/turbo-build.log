@@ -5,59 +5,3 @@
    ▲ Next.js 14.1.0
 
    Creating an optimized production build ...
- ✓ Compiled successfully
-   Skipping linting
-   Checking validity of types ...
-   Collecting page data ...
-Database initialized successfully
-Database initialized successfully
-Database initialized successfully
-   Generating static pages (0/16) ...
-Database initialized successfully
-API error: ex [Error]: Dynamic server usage: Page couldn't be rendered statically because it used `headers`. See more info here: https://nextjs.org/docs/messages/dynamic-server-error
-    at eP (C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@14.1.0_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\compiled\next-server\app-route.runtime.prod.js:6:29358)
-    at Module.eE (C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@14.1.0_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\compiled\next-server\app-route.runtime.prod.js:6:29694)
-    at i (C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@14.1.0_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\compiled\next-server\app-route.runtime.prod.js:6:34572)
-    at Object.get (C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@14.1.0_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\compiled\next-server\app-route.runtime.prod.js:6:34788)
-    at i.getIdentifier (C:\Users\User1\Downloads\TradingBot\apps\frontend\.next\server\app\api\risk\route.js:15:10259)
-    at i.check (C:\Users\User1\Downloads\TradingBot\apps\frontend\.next\server\app\api\risk\route.js:15:9884)
-    at f (C:\Users\User1\Downloads\TradingBot\apps\frontend\.next\server\app\api\performance\route.js:1:2511)
-    at C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@14.1.0_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\compiled\next-server\app-route.runtime.prod.js:6:42490
-    at C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@14.1.0_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\server\lib\trace\tracer.js:133:36
-    at NoopContextManager.with (C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@14.1.0_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\compiled\@opentelemetry\api\index.js:1:7062) {
-  description: "Page couldn't be rendered statically because it used `headers`. See more info here: https://nextjs.org/docs/messages/dynamic-server-error",
-  digest: 'DYNAMIC_SERVER_USAGE'
-}
-   Generating static pages (4/16) 
-   Generating static pages (8/16) 
-Database initialized successfully
-Database initialized successfully
-   Generating static pages (12/16) 
- ✓ Generating static pages (16/16) 
-   Finalizing page optimization ...
-   Collecting build traces ...
-
-Route (app)                              Size     First Load JS
-┌ ○ /                                    635 B          84.8 kB
-├ ○ /_not-found                          883 B          85.1 kB
-├ λ /api/auth/login                      0 B                0 B
-├ λ /api/bots                            0 B                0 B
-├ λ /api/performance                     0 B                0 B
-├ λ /api/risk                            0 B                0 B
-├ λ /api/trades                          0 B                0 B
-├ λ /api/wallets                         0 B                0 B
-├ ○ /dashboard                           1.7 kB         85.9 kB
-├ ○ /dashboard/arbitrage                 1.01 kB        85.2 kB
-├ ○ /dashboard/copy-trader               1.1 kB         85.3 kB
-├ ○ /dashboard/sandwich                  1.15 kB        85.3 kB
-├ ○ /login                               1.24 kB        85.4 kB
-└ ○ /wallets                             1.26 kB        85.4 kB
-+ First Load JS shared by all            84.2 kB
-  ├ chunks/14720756-8b469c39ab952a51.js  53.4 kB
-  ├ chunks/726-71be7be3d00e37da.js       28.9 kB
-  └ other shared chunks (total)          1.9 kB
-
-
-○  (Static)   prerendered as static content
-λ  (Dynamic)  server-rendered on demand using Node.js
-

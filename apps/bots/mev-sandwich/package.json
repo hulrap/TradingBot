@@ -19,7 +19,7 @@
     "@trading-bot/crypto": "workspace:*",
     "@trading-bot/paper-trading": "workspace:*",
     "@flashbots/ethers-provider-bundle": "^1.0.0",
-    "ethers": "^6.11.1",
+    "ethers": "^6.14.4",
     "winston": "^3.11.0",
     "dotenv": "^16.4.5",
     "node-cron": "^3.0.3",

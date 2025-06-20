@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import winston from 'winston';
 import { ethers } from 'ethers';
-import { Connection, PublicKey, Transaction as SolanaTransaction, SystemProgram } from '@solana/web3.js';
+import { Connection, PublicKey, Transaction as SolanaTransaction, SystemProgram, VersionedTransaction } from '@solana/web3.js';
 import { RPCManager, RPCRequest } from './rpc-manager';
 import { ConnectionPool } from './connection-pool';
 
@@ -148,6 +148,7 @@ export class ChainAbstraction extends EventEmitter {
   private connectionPool: ConnectionPool;
   private chains: Map<SupportedChain, ChainConfig> = new Map();
   private providers: Map<SupportedChain, ethers.Provider> = new Map();
+  private websocketProviders: Map<SupportedChain, ethers.WebSocketProvider> = new Map();
   private tokenLists: Map<SupportedChain, Map<string, TokenInfo>> = new Map();
   private gasOracles: Map<SupportedChain, any> = new Map();
   private solanaConnection: Connection | null = null;
@@ -746,29 +747,138 @@ export class ChainAbstraction extends EventEmitter {
 
   // Private helper methods for Solana
 
+  private async getSolanaConnection(): Promise<Connection> {
+    if (!this.solanaConnection) {
+      const chainConfig = this.getChainConfig('solana');
+      if (chainConfig) {
+        this.solanaConnection = new Connection(chainConfig.rpcUrls[0], 'confirmed');
+      } else {
+        throw new Error('Solana chain configuration not found');
+      }
+    }
+    return this.solanaConnection;
+  }
+
   private async getSolanaSlot(): Promise<number> {
-    // Implement Solana slot fetching
-    throw new Error('Solana slot fetching not implemented');
+    const connection = await this.getSolanaConnection();
+    return await connection.getSlot();
   }
 
   private async getSolanaBlock(slot: number): Promise<BlockInfo> {
-    // Implement Solana block fetching
-    throw new Error('Solana block fetching not implemented');
+    const connection = await this.getSolanaConnection();
+    const block = await connection.getBlock(slot, {
+      maxSupportedTransactionVersion: 0,
+      transactionDetails: 'signatures'
+    });
+    
+    if (!block) {
+      throw new Error(`Solana block ${slot} not found`);
+    }
+
+    return {
+      number: slot,
+      hash: block.blockhash,
+      parentHash: block.previousBlockhash,
+      timestamp: block.blockTime || 0,
+      gasLimit: '0', // Solana doesn't use gas concept
+      gasUsed: '0',
+      baseFeePerGas: undefined,
+      transactions: block.transactions?.map(tx => typeof tx === 'string' ? tx : tx.transaction.signatures[0]) || []
+    };
   }
 
   private async getSolanaTransaction(signature: string): Promise<TransactionReceipt | null> {
-    // Implement Solana transaction fetching
-    throw new Error('Solana transaction fetching not implemented');
+    const connection = await this.getSolanaConnection();
+    const transaction = await connection.getTransaction(signature, {
+      maxSupportedTransactionVersion: 0
+    });
+    
+    if (!transaction) {
+      return null;
+    }
+
+    const accountKeys = transaction.transaction.message.getAccountKeys();
+
+    return {
+      hash: signature,
+      blockNumber: transaction.slot,
+      blockHash: transaction.transaction.message.recentBlockhash,
+      transactionIndex: 0,
+      from: accountKeys.get(0)?.toString() || '',
+      to: accountKeys.get(1)?.toString(),
+      gasUsed: transaction.meta?.fee?.toString() || '0',
+      effectiveGasPrice: '0',
+      status: transaction.meta?.err ? 0 : 1,
+      logs: transaction.meta?.logMessages?.map((log, index) => ({
+        address: '',
+        topics: [],
+        data: log,
+        blockNumber: transaction.slot,
+        transactionHash: signature,
+        logIndex: index
+      })) || [],
+      confirmations: 1
+    };
   }
 
   private async fetchSolanaTokenInfo(mint: string): Promise<TokenInfo | null> {
-    // Implement Solana token info fetching
-    throw new Error('Solana token info fetching not implemented');
+    try {
+      const connection = await this.getSolanaConnection();
+      const mintPubkey = new PublicKey(mint);
+      
+      // Get mint info
+      const mintInfo = await connection.getParsedAccountInfo(mintPubkey);
+      if (!mintInfo.value || !mintInfo.value.data) {
+        return null;
+      }
+
+      const parsedData = mintInfo.value.data as any;
+      if (parsedData.program !== 'spl-token' || parsedData.parsed?.type !== 'mint') {
+        return null;
+      }
+
+      const mintData = parsedData.parsed.info;
+      
+      return {
+        address: mint,
+        name: `Token ${mint.slice(0, 8)}...`, // Fallback name
+        symbol: `${mint.slice(0, 4).toUpperCase()}...`, // Fallback symbol
+        decimals: mintData.decimals,
+        chainId: 101
+      };
+    } catch (error) {
+      this.logger.warn('Failed to fetch Solana token info', { mint, error });
+      return null;
+    }
   }
 
   private async getSolanaTokenBalance(mint: string, owner: string): Promise<string> {
-    // Implement Solana token balance fetching
-    throw new Error('Solana token balance fetching not implemented');
+    try {
+      const connection = await this.getSolanaConnection();
+      const ownerPubkey = new PublicKey(owner);
+      
+      if (mint === 'native' || mint === 'So11111111111111111111111111111111111111112') {
+        // SOL balance
+        const balance = await connection.getBalance(ownerPubkey);
+        return balance.toString();
+      } else {
+        // SPL token balance
+        const mintPubkey = new PublicKey(mint);
+        const tokenAccounts = await connection.getTokenAccountsByOwner(ownerPubkey, {
+          mint: mintPubkey
+        });
+        
+        if (tokenAccounts.value.length === 0) {
+          return '0';
+        }
+        
+        const accountInfo = await connection.getTokenAccountBalance(tokenAccounts.value[0].pubkey);
+        return accountInfo.value.amount;
+      }
+    } catch (error) {
+      this.logger.warn('Failed to get Solana token balance', { mint, owner, error });
+      return '0';
+    }
   }
 
   private async getSolanaSwapQuote(
@@ -777,13 +887,85 @@ export class ChainAbstraction extends EventEmitter {
     amount: string,
     slippage: number
   ): Promise<SwapQuote> {
-    // Implement Jupiter API integration for Solana swaps
-    throw new Error('Solana swap quotes not implemented');
+    try {
+      // Use Jupiter API for Solana swap quotes
+      const params = new URLSearchParams({
+        inputMint,
+        outputMint,
+        amount,
+        slippageBps: (slippage * 100).toString()
+      });
+
+      const response = await fetch(`https://quote-api.jup.ag/v6/quote?${params}`);
+      const quote = await response.json() as any;
+
+      if (!response.ok || quote.error) {
+        throw new Error(quote.error || 'Jupiter API error');
+      }
+
+      const inputToken = await this.fetchSolanaTokenInfo(inputMint);
+      const outputToken = await this.fetchSolanaTokenInfo(outputMint);
+
+      return {
+        inputToken: inputToken || { address: inputMint, name: 'Unknown', symbol: 'UNK', decimals: 9 },
+        outputToken: outputToken || { address: outputMint, name: 'Unknown', symbol: 'UNK', decimals: 9 },
+        inputAmount: amount,
+        outputAmount: quote.outAmount,
+        route: quote.routePlan?.map((step: any) => ({
+          protocol: step.swapInfo?.label || 'Jupiter',
+          percentage: 100
+        })) || [],
+        gasEstimate: {
+          gasLimit: '200000'
+        },
+        priceImpact: quote.priceImpactPct?.toString() || '0',
+        minimumReceived: quote.otherAmountThreshold || quote.outAmount,
+        slippage: slippage.toString()
+      };
+    } catch (error) {
+      this.logger.error('Failed to get Solana swap quote', { inputMint, outputMint, amount, error });
+      throw error;
+    }
   }
 
   private async executeSolanaSwap(quote: SwapQuote, signer: any): Promise<TransactionReceipt> {
-    // Implement Solana swap execution
-    throw new Error('Solana swap execution not implemented');
+    try {
+      const connection = await this.getSolanaConnection();
+      
+      // Get swap transaction from Jupiter
+      const swapResponse = await fetch('https://quote-api.jup.ag/v6/swap', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          quoteResponse: quote,
+          userPublicKey: signer.publicKey.toString(),
+          wrapAndUnwrapSol: true
+        })
+      });
+
+      const swapData = await swapResponse.json() as any;
+      const { swapTransaction } = swapData;
+      
+      // Deserialize transaction
+      const transactionBuf = Uint8Array.from(Buffer.from(swapTransaction, 'base64'));
+      const transaction = VersionedTransaction.deserialize(transactionBuf);
+      
+      // Sign and send transaction
+      transaction.sign([signer]);
+      const signature = await connection.sendTransaction(transaction);
+      
+      // Wait for confirmation
+      await connection.confirmTransaction(signature, 'confirmed');
+      
+      // Get transaction details
+      const txDetails = await this.getSolanaTransaction(signature);
+      return txDetails!;
+    } catch (error) {
+      this.logger.error('Failed to execute Solana swap', { quote, error });
+      throw error;
+    }
   }
 
   // Private helper methods for EVM chains
@@ -875,13 +1057,206 @@ export class ChainAbstraction extends EventEmitter {
     };
   }
 
+  // WebSocket Support
+  public async createWebSocketConnection(chain: SupportedChain): Promise<void> {
+    const chainConfig = this.getChainConfig(chain);
+    if (!chainConfig || !chainConfig.wsUrls.length) {
+      throw new Error(`No WebSocket URLs configured for chain: ${chain}`);
+    }
+
+    try {
+      const wsProvider = new ethers.WebSocketProvider(chainConfig.wsUrls[0]);
+      await wsProvider._waitUntilReady();
+      
+      this.websocketProviders.set(chain, wsProvider);
+      
+      // Set up event listeners
+      wsProvider.on('block', (blockNumber: number) => {
+        this.emit('newBlock', { chain, blockNumber });
+      });
+
+      wsProvider.on('pending', (txHash: string) => {
+        this.emit('pendingTransaction', { chain, txHash });
+      });
+
+      wsProvider.on('error', (error: Error) => {
+        this.logger.error('WebSocket error', { chain, error: error.message });
+        this.emit('websocketError', { chain, error });
+      });
+
+      this.logger.info('WebSocket connection established', { chain });
+      this.emit('websocketConnected', { chain });
+    } catch (error) {
+      this.logger.error('Failed to create WebSocket connection', { chain, error });
+      throw error;
+    }
+  }
+
+  public async subscribeToAddress(chain: SupportedChain, address: string): Promise<void> {
+    const wsProvider = this.websocketProviders.get(chain);
+    if (!wsProvider) {
+      throw new Error(`No WebSocket connection for chain: ${chain}`);
+    }
+
+    // Subscribe to address activity
+    wsProvider.on({
+      address: address
+    }, (log: any) => {
+      this.emit('addressActivity', { chain, address, log });
+    });
+  }
+
+  public async subscribeToToken(chain: SupportedChain, tokenAddress: string): Promise<void> {
+    const wsProvider = this.websocketProviders.get(chain);
+    if (!wsProvider) {
+      throw new Error(`No WebSocket connection for chain: ${chain}`);
+    }
+
+    // Subscribe to token transfer events
+    const transferFilter = {
+      address: tokenAddress,
+      topics: [
+        ethers.id('Transfer(address,address,uint256)') // Transfer event signature
+      ]
+    };
+
+    wsProvider.on(transferFilter, (log: any) => {
+      this.emit('tokenTransfer', { chain, tokenAddress, log });
+    });
+  }
+
+  public getWebSocketProvider(chain: SupportedChain): ethers.WebSocketProvider | undefined {
+    return this.websocketProviders.get(chain);
+  }
+
+  public isWebSocketConnected(chain: SupportedChain): boolean {
+    const wsProvider = this.websocketProviders.get(chain);
+    return wsProvider ? wsProvider.websocket.readyState === 1 : false;
+  }
+
+  public async closeWebSocketConnection(chain: SupportedChain): Promise<void> {
+    const wsProvider = this.websocketProviders.get(chain);
+    if (wsProvider) {
+      await wsProvider.destroy();
+      this.websocketProviders.delete(chain);
+      this.emit('websocketDisconnected', { chain });
+    }
+  }
+
   public destroy(): void {
+    // Clean up WebSocket connections
+    this.websocketProviders.forEach(async (wsProvider, chain) => {
+      try {
+        await wsProvider.destroy();
+      } catch (error) {
+        this.logger.warn('Error closing WebSocket connection', { chain, error });
+      }
+    });
+    this.websocketProviders.clear();
+
     // Clean up providers and connections
     this.providers.clear();
     this.chains.clear();
     this.tokenLists.clear();
     this.gasOracles.clear();
     this.removeAllListeners();
+  }
+
+  // Token Approval Management
+  public async approveToken(
+    chain: SupportedChain,
+    tokenAddress: string,
+    spenderAddress: string,
+    amount: string,
+    signer: ethers.Signer
+  ): Promise<TransactionReceipt> {
+    if (chain === 'solana') {
+      throw new Error('Token approvals not applicable to Solana');
+    }
+
+    const abi = ['function approve(address spender, uint256 amount) external returns (bool)'];
+    const provider = await this.getProvider(chain);
+    const contract = new ethers.Contract(tokenAddress, abi, signer);
+
+    const tx = await contract.approve(spenderAddress, amount);
+    const receipt = await tx.wait();
+
+    return {
+      hash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      blockHash: receipt.blockHash,
+      transactionIndex: receipt.index,
+      from: receipt.from,
+      to: receipt.to,
+      gasUsed: receipt.gasUsed.toString(),
+      effectiveGasPrice: receipt.gasPrice.toString(),
+      status: receipt.status || 0,
+      logs: receipt.logs.map((log: any) => ({
+        address: log.address,
+        topics: [...log.topics],
+        data: log.data,
+        blockNumber: log.blockNumber,
+        transactionHash: log.transactionHash,
+        logIndex: log.index
+      })),
+      confirmations: await receipt.confirmations()
+    };
+  }
+
+  public async getAllowance(
+    chain: SupportedChain,
+    tokenAddress: string,
+    ownerAddress: string,
+    spenderAddress: string
+  ): Promise<string> {
+    if (chain === 'solana') {
+      return '0'; // Solana doesn't use allowances
+    }
+
+    const abi = ['function allowance(address owner, address spender) view returns (uint256)'];
+    const provider = await this.getProvider(chain);
+    const contract = new ethers.Contract(tokenAddress, abi, provider);
+
+    const allowance = await contract.allowance(ownerAddress, spenderAddress);
+    return allowance.toString();
+  }
+
+  public async checkAndApprove(
+    chain: SupportedChain,
+    tokenAddress: string,
+    ownerAddress: string,
+    spenderAddress: string,
+    requiredAmount: string,
+    signer: ethers.Signer
+  ): Promise<boolean> {
+    if (chain === 'solana') {
+      return true; // Solana doesn't require approvals
+    }
+
+    try {
+      const currentAllowance = await this.getAllowance(chain, tokenAddress, ownerAddress, spenderAddress);
+      const requiredBN = BigInt(requiredAmount);
+      const currentBN = BigInt(currentAllowance);
+
+      if (currentBN >= requiredBN) {
+        return true; // Sufficient allowance already exists
+      }
+
+      // Approve the required amount (or max if preferred)
+      const approveAmount = ethers.MaxUint256.toString(); // Max approval for gas efficiency
+      await this.approveToken(chain, tokenAddress, spenderAddress, approveAmount, signer);
+      
+      return true;
+    } catch (error) {
+      this.logger.error('Failed to check and approve token', {
+        chain,
+        tokenAddress,
+        spenderAddress,
+        requiredAmount,
+        error
+      });
+      return false;
+    }
   }
 
   // Missing methods that are used by bot packages
@@ -897,6 +1272,14 @@ export class ChainAbstraction extends EventEmitter {
 
   public async getBalance(address: string, tokenAddress?: string): Promise<string> {
     // TODO: Implement balance fetching
-    throw new Error('Balance fetching not yet implemented');
+    if (tokenAddress) {
+      // For now, redirect to existing getTokenBalance method
+      return this.getTokenBalance('ethereum' as SupportedChain, tokenAddress, address);
+    } else {
+      // Get native balance
+      const provider = await this.getProvider('ethereum' as SupportedChain);
+      const balance = await provider.getBalance(address);
+      return balance.toString();
+    }
   }
 }

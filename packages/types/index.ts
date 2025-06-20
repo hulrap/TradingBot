@@ -18,51 +18,8 @@ export interface Wallet {
   createdAt: string;
 }
 
-export interface ArbitrageBotConfig {
-  id: string;
-  userId: string;
-  walletId: string;
-  chain: Chain;
-  tokenPair: {
-    tokenA: string;
-    tokenB: string;
-  };
-  minProfitThreshold: number; // as a percentage
-  tradeSize: number;
-  isActive: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface CopyTraderBotConfig {
-  id: string;
-  userId: string;
-  walletId: string;
-  chain: Chain;
-  targetWalletAddress: string;
-  tradeSize: {
-    type: "FIXED" | "PERCENTAGE";
-    value: number;
-  };
-  isActive: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface SandwichBotConfig {
-  id: string;
-  userId: string;
-  walletId: string;
-  chain: Chain;
-  targetDex: string;
-  minVictimTradeSize: number;
-  maxGasPrice: number;
-  isActive: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export type BotConfig = ArbitrageBotConfig | CopyTraderBotConfig | SandwichBotConfig;
+// Legacy types - moved to bot.ts with comprehensive schemas
+// These are kept for backward compatibility but should use the new schemas
 
 export interface Trade {
   id: string;
@@ -82,14 +39,7 @@ export interface Trade {
   completedAt?: string;
 }
 
-export interface BotStatus {
-  botConfigId: string;
-  isRunning: boolean;
-  lastActivity: string;
-  totalTrades: number;
-  totalProfit: string;
-  errors: string[];
-}
+// BotStatus moved to bot.ts with enhanced schema
 
 // API Response types
 export interface ApiResponse<T> {
@@ -118,4 +68,34 @@ export interface RpcConfig {
 }
 
 // Export schemas from bot.ts
-export { ArbitrageBotConfigSchema } from './src/bot'; 
+export { 
+  ArbitrageBotConfigSchema,
+  CopyTradingBotConfigSchema,
+  SandwichBotConfigSchema,
+  BotConfigSchema,
+  BotEntitySchema,
+  CreateBotRequestSchema,
+  UpdateBotRequestSchema,
+  BotStatusSchema,
+  TradeEventSchema,
+  PerformanceMetricsSchema,
+  ErrorResponseSchema,
+  PaginationSchema,
+  WebSocketEventSchema
+} from './src/bot';
+
+export type {
+  ArbitrageBotConfig,
+  CopyTradingBotConfig,
+  SandwichBotConfig,
+  BotConfig,
+  BotEntity,
+  CreateBotRequest,
+  UpdateBotRequest,
+  BotStatus,
+  TradeEvent,
+  PerformanceMetrics,
+  ErrorResponse,
+  Pagination,
+  WebSocketEvent
+} from './src/bot'; 

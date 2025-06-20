@@ -17,7 +17,7 @@
     "@solana/web3.js": "^1.87.6",
     "axios": "^1.7.2",
     "better-sqlite3": "^10.0.0",
-    "ethers": "^6.11.1",
+    "ethers": "^6.14.4",
     "winston": "^3.11.0",
     "events": "^3.3.0",
     "dotenv": "^16.4.5",

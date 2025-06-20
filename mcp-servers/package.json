@@ -1,0 +1,41 @@
+{
+  "name": "@trading-bot/mcp-servers",
+  "version": "1.0.0",
+  "description": "MCP servers for Vercel, Supabase, and Render integration",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start:vercel": "node dist/vercel-server.js",
+    "start:supabase": "node dist/supabase-server.js",
+    "start:render": "node dist/render-server.js",
+    "dev:vercel": "tsx vercel-server.ts",
+    "dev:supabase": "tsx supabase-server.ts",
+    "dev:render": "tsx render-server.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  },
+  "bin": {
+    "vercel-mcp": "./dist/vercel-server.js",
+    "supabase-mcp": "./dist/supabase-server.js",
+    "render-mcp": "./dist/render-server.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "mcp",
+    "vercel",
+    "supabase",
+    "render",
+    "trading-bot"
+  ],
+  "author": "Trading Bot Platform",
+  "license": "MIT"
+} 

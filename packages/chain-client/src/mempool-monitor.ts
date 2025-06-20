@@ -2,6 +2,8 @@ import { ethers } from 'ethers';
 import { Connection, PublicKey, VersionedTransaction } from '@solana/web3.js';
 import WebSocket from 'ws';
 import { EventEmitter } from 'events';
+import { PriceOracle, TokenPrice } from './price-oracle';
+import winston from 'winston';
 
 export interface MempoolConfig {
   enableRealtimeSubscription: boolean;
@@ -61,6 +63,8 @@ export class MempoolMonitor extends EventEmitter {
   private providers = new Map<string, ethers.Provider>();
   private solanaConnection?: Connection;
   private websockets = new Map<string, WebSocket>();
+  private priceOracle: PriceOracle;
+  private logger: winston.Logger;
   
   private isMonitoring = false;
   private stats: MempoolStats;
@@ -68,9 +72,11 @@ export class MempoolMonitor extends EventEmitter {
   private batchTimers = new Map<string, NodeJS.Timeout>();
   private reconnectAttempts = new Map<string, number>();
 
-  constructor(config: MempoolConfig) {
+  constructor(config: MempoolConfig, priceOracle: PriceOracle, logger: winston.Logger) {
     super();
     this.config = config;
+    this.priceOracle = priceOracle;
+    this.logger = logger;
     
     this.stats = {
       totalTransactions: 0,
@@ -368,24 +374,74 @@ export class MempoolMonitor extends EventEmitter {
   }
 
   /**
-   * Check if transaction is a DEX transaction
+   * Check if transaction is a DEX transaction with comprehensive router detection
    */
   private isDexTransaction(tx: PendingTransaction, whitelistedDexes: string[]): boolean {
     if (!tx.to) return false;
 
-    // Check against known DEX router addresses
-    const dexRouters: Record<string, string> = {
-      'uniswap-v2': '0x7a250d5630b4cf539739df2c5dacb4c659f2488d',
-      'uniswap-v3': '0xe592427a0aece92de3edee1f18e0157c05861564',
-      'pancakeswap': '0x10ed43c718714eb63d5aa57b78b54704e256024e',
-      'sushiswap': '0x1b02da8cb0d097eb8d57a175b88c7d8b47997506'
+    // Comprehensive DEX router addresses by chain
+    const dexRoutersByChain: Record<string, Record<string, string[]>> = {
+      ethereum: {
+        'uniswap-v2': ['0x7a250d5630b4cf539739df2c5dacb4c659f2488d'],
+        'uniswap-v3': ['0xe592427a0aece92de3edee1f18e0157c05861564', '0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45'],
+        'sushiswap': ['0x1b02da8cb0d097eb8d57a175b88c7d8b47997506'],
+        '1inch': ['0x1111111254eeb25477b68fb85ed929f73a960582'],
+        'curve': ['0x99a58482bd75cbab83b27ec03ca68ff489b5788f'],
+        'balancer': ['0xba12222222228d8ba445958a75a0704d566bf2c8']
+      },
+      bsc: {
+        'pancakeswap-v2': ['0x10ed43c718714eb63d5aa57b78b54704e256024e'],
+        'pancakeswap-v3': ['0x13f4ea83d0bd40e75c8222255bc855a974568dd4'],
+        'biswap': ['0x3a6d8ca21d1cf76f653a67577fa0d27453350dd8'],
+        '1inch': ['0x1111111254eeb25477b68fb85ed929f73a960582']
+      },
+      polygon: {
+        'uniswap-v3': ['0xe592427a0aece92de3edee1f18e0157c05861564'],
+        'quickswap': ['0xa5e0829caced8ffdd4de3c43696c57f7d7a678ff'],
+        'sushiswap': ['0x1b02da8cb0d097eb8d57a175b88c7d8b47997506'],
+        '1inch': ['0x1111111254eeb25477b68fb85ed929f73a960582']
+      },
+      arbitrum: {
+        'uniswap-v3': ['0xe592427a0aece92de3edee1f18e0157c05861564'],
+        'camelot': ['0xc873fecbd354f5a56e00e710b90ef4201db2448d'],
+        'sushiswap': ['0x1b02da8cb0d097eb8d57a175b88c7d8b47997506']
+      },
+      optimism: {
+        'uniswap-v3': ['0xe592427a0aece92de3edee1f18e0157c05861564']
+      }
     };
 
+    // Get routers for the current chain
+    const chainRouters = dexRoutersByChain[tx.chain] || {};
     const txToLower = tx.to.toLowerCase();
     
+    // Check if any whitelisted DEX matches
     for (const dexName of whitelistedDexes) {
-      const routerAddress = dexRouters[dexName];
-      if (routerAddress && routerAddress.toLowerCase() === txToLower) {
+      const routerAddresses = chainRouters[dexName] || [];
+      for (const routerAddress of routerAddresses) {
+        if (routerAddress.toLowerCase() === txToLower) {
+          return true;
+        }
+      }
+    }
+
+    // Additional check: detect common DEX function signatures
+    if (tx.data && tx.data.length >= 10) {
+      const functionSelector = tx.data.slice(0, 10).toLowerCase();
+      const dexFunctionSelectors = [
+        '0x38ed1739', // swapExactTokensForTokens
+        '0x7ff36ab5', // swapExactETHForTokens  
+        '0x18cbafe5', // swapExactTokensForETH
+        '0x8803dbee', // swapTokensForExactTokens
+        '0x414bf389', // swapExactETHForTokensSupportingFeeOnTransferTokens
+        '0xb6f9de95', // swapExactTokensForETHSupportingFeeOnTransferTokens
+        '0x472b43f3', // swapExactInputSingle (Uniswap V3)
+        '0x09b81346', // exactInputSingle (Uniswap V3)
+        '0x5ae401dc', // multicall (Uniswap V3)
+        '0xac9650d8'  // multicall (alternative)
+      ];
+      
+      if (dexFunctionSelectors.includes(functionSelector)) {
         return true;
       }
     }
@@ -394,23 +450,52 @@ export class MempoolMonitor extends EventEmitter {
   }
 
   /**
-   * Estimate transaction value in USD
+   * Estimate transaction value in USD using PriceOracle
    */
   private async estimateTransactionValue(tx: any, chain: string): Promise<number> {
     try {
       const value = parseFloat(tx.value || '0');
-      
-      // Simplified conversion rates - in production use price oracles
-      const conversionRates: Record<string, number> = {
-        ethereum: 1800, // ETH price
-        bsc: 300,       // BNB price
-        solana: 20      // SOL price
+      if (value === 0) return 0;
+
+      // Get native token address for the chain
+      const nativeTokenAddresses: Record<string, string> = {
+        ethereum: 'native',
+        bsc: 'native', 
+        polygon: 'native',
+        arbitrum: 'native',
+        optimism: 'native',
+        solana: 'So11111111111111111111111111111111111111112' // Wrapped SOL
       };
 
-      const rate = conversionRates[chain] || 0;
-      return (value / 1e18) * rate;
+      const tokenAddress = nativeTokenAddresses[chain];
+      if (!tokenAddress) {
+        this.logger.warn('Unknown chain for price estimation', { chain });
+        return 0;
+      }
+
+      // Get price from oracle
+      const tokenPrice = await this.priceOracle.getTokenPrice(tokenAddress, chain);
+      if (!tokenPrice) {
+        // Fallback to hardcoded rates if oracle fails
+        const fallbackRates: Record<string, number> = {
+          ethereum: 1800,
+          bsc: 300,
+          polygon: 0.8,
+          arbitrum: 1800,
+          optimism: 1800,
+          solana: 20
+        };
+        const rate = fallbackRates[chain] || 0;
+        const decimals = chain === 'solana' ? 9 : 18;
+        return (value / Math.pow(10, decimals)) * rate;
+      }
+
+      // Calculate USD value using oracle price
+      const decimals = chain === 'solana' ? 9 : 18;
+      return (value / Math.pow(10, decimals)) * tokenPrice.priceUsd;
 
     } catch (error) {
+      this.logger.warn('Failed to estimate transaction value', { chain, error });
       return 0;
     }
   }

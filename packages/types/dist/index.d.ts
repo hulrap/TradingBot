@@ -15,48 +15,6 @@ export interface Wallet {
     name?: string;
     createdAt: string;
 }
-export interface ArbitrageBotConfig {
-    id: string;
-    userId: string;
-    walletId: string;
-    chain: Chain;
-    tokenPair: {
-        tokenA: string;
-        tokenB: string;
-    };
-    minProfitThreshold: number;
-    tradeSize: number;
-    isActive: boolean;
-    createdAt: string;
-    updatedAt: string;
-}
-export interface CopyTraderBotConfig {
-    id: string;
-    userId: string;
-    walletId: string;
-    chain: Chain;
-    targetWalletAddress: string;
-    tradeSize: {
-        type: "FIXED" | "PERCENTAGE";
-        value: number;
-    };
-    isActive: boolean;
-    createdAt: string;
-    updatedAt: string;
-}
-export interface SandwichBotConfig {
-    id: string;
-    userId: string;
-    walletId: string;
-    chain: Chain;
-    targetDex: string;
-    minVictimTradeSize: number;
-    maxGasPrice: number;
-    isActive: boolean;
-    createdAt: string;
-    updatedAt: string;
-}
-export type BotConfig = ArbitrageBotConfig | CopyTraderBotConfig | SandwichBotConfig;
 export interface Trade {
     id: string;
     botConfigId: string;
@@ -73,14 +31,6 @@ export interface Trade {
     status: "PENDING" | "SUCCESS" | "FAILED";
     createdAt: string;
     completedAt?: string;
-}
-export interface BotStatus {
-    botConfigId: string;
-    isRunning: boolean;
-    lastActivity: string;
-    totalTrades: number;
-    totalProfit: string;
-    errors: string[];
 }
 export interface ApiResponse<T> {
     data?: T;
@@ -101,5 +51,6 @@ export interface RpcConfig {
     websocketUrl?: string;
     apiKey?: string;
 }
-export { ArbitrageBotConfigSchema } from './src/bot';
+export { ArbitrageBotConfigSchema, CopyTradingBotConfigSchema, SandwichBotConfigSchema, BotConfigSchema, BotEntitySchema, CreateBotRequestSchema, UpdateBotRequestSchema, BotStatusSchema, TradeEventSchema, PerformanceMetricsSchema, ErrorResponseSchema, PaginationSchema, WebSocketEventSchema } from './src/bot';
+export type { ArbitrageBotConfig, CopyTradingBotConfig, SandwichBotConfig, BotConfig, BotEntity, CreateBotRequest, UpdateBotRequest, BotStatus, TradeEvent, PerformanceMetrics, ErrorResponse, Pagination, WebSocketEvent } from './src/bot';
 //# sourceMappingURL=index.d.ts.map

@@ -44,6 +44,25 @@ export interface PriceComparisonResult {
   recommendedPrice: number;
 }
 
+/**
+ * Multi-source price oracle system that aggregates token prices from various sources
+ * with intelligent caching, rate limiting, and confidence scoring.
+ * 
+ * Features:
+ * - Multiple redundant price sources (CoinGecko, DexScreener, Jupiter, etc.)
+ * - Intelligent caching with TTL to reduce API calls
+ * - Rate limiting to prevent API quota violations
+ * - Cross-source price validation and confidence scoring
+ * - Automatic source health monitoring
+ * - Graceful fallback mechanisms
+ * 
+ * @example
+ * ```typescript
+ * const oracle = new PriceOracle(config, logger);
+ * const price = await oracle.getTokenPrice('0x...', 'ethereum');
+ * const comparison = await oracle.comparePricesAcrossSources('0x...', 'ethereum');
+ * ```
+ */
 export class PriceOracle extends EventEmitter {
   private logger: winston.Logger;
   private config: PriceOracleConfig;
@@ -58,6 +77,13 @@ export class PriceOracle extends EventEmitter {
     averageResponseTime: 0
   };
 
+  /**
+   * Creates a new PriceOracle instance with the specified configuration.
+   * Automatically sets up price sources, caching, and health monitoring.
+   * 
+   * @param config - Configuration object containing source settings, cache timeout, etc.
+   * @param logger - Winston logger instance for logging operations
+   */
   constructor(config: PriceOracleConfig, logger: winston.Logger) {
     super();
     this.config = config;
@@ -146,6 +172,25 @@ export class PriceOracle extends EventEmitter {
     this.rateLimits.set(source.id, { count: 0, resetTime: Date.now() + 60000 });
   }
 
+  /**
+   * Retrieves the current price for a token from the best available source.
+   * 
+   * This method implements intelligent source selection, trying sources in priority order
+   * while respecting rate limits. Results are cached to minimize API calls.
+   * 
+   * @param address - Token contract address (or 'native' for native tokens)
+   * @param chain - Blockchain name (ethereum, bsc, polygon, etc.)
+   * @returns Promise resolving to TokenPrice object or null if not found
+   * 
+   * @example
+   * ```typescript
+   * // Get USDC price on Ethereum
+   * const price = await oracle.getTokenPrice('0xA0b86a33E6441e27a4E54E7cb03FA3a84F8C0F4F', 'ethereum');
+   * if (price) {
+   *   console.log(`USDC: $${price.priceUsd}`);
+   * }
+   * ```
+   */
   async getTokenPrice(address: string, chain: string): Promise<TokenPrice | null> {
     const cacheKey = `${chain}-${address.toLowerCase()}`;
     
@@ -205,6 +250,25 @@ export class PriceOracle extends EventEmitter {
     }
   }
 
+  /**
+   * Retrieves prices for multiple tokens efficiently using batched requests.
+   * 
+   * This method processes tokens in batches to respect rate limits and includes
+   * small delays between batches to prevent overwhelming APIs.
+   * 
+   * @param addresses - Array of token contract addresses
+   * @param chain - Blockchain name (ethereum, bsc, polygon, etc.)
+   * @returns Promise resolving to Map of address -> TokenPrice
+   * 
+   * @example
+   * ```typescript
+   * const tokens = ['0x...', '0x...', '0x...'];
+   * const prices = await oracle.getMultipleTokenPrices(tokens, 'ethereum');
+   * prices.forEach((price, address) => {
+   *   console.log(`${address}: $${price.priceUsd}`);
+   * });
+   * ```
+   */
   async getMultipleTokenPrices(addresses: string[], chain: string): Promise<Map<string, TokenPrice>> {
     const results = new Map<string, TokenPrice>();
     
@@ -431,25 +495,77 @@ export class PriceOracle extends EventEmitter {
   }
 
   private async fetchCoinMarketCapPrice(source: PriceSource, address: string, chain: string): Promise<TokenPrice | null> {
-    // CoinMarketCap requires token ID, not address - would need mapping
-    // This is a simplified implementation
-    const url = `${source.baseUrl}/cryptocurrency/quotes/latest`;
-    const params = {
-      address: address,
-      convert: 'USD'
-    };
-
-    const response = await axios.get(url, {
-      params,
-      timeout: source.timeout,
-      headers: {
-        'Accept': 'application/json',
-        'X-CMC_PRO_API_KEY': source.apiKey || ''
+    try {
+      if (!source.apiKey) {
+        throw new Error('CoinMarketCap API key is required');
       }
-    });
 
-    // Implementation would depend on CoinMarketCap API structure
-    return null;
+      // First, try to get token info by contract address
+      const infoUrl = `${source.baseUrl}/cryptocurrency/info`;
+      const infoParams = {
+        address: address,
+        aux: 'urls,logo,description,tags,platform,date_added,notice,status'
+      };
+
+      const infoResponse = await axios.get(infoUrl, {
+        params: infoParams,
+        timeout: source.timeout,
+        headers: {
+          'Accept': 'application/json',
+          'X-CMC_PRO_API_KEY': source.apiKey
+        }
+      });
+
+      if (!infoResponse.data.data || Object.keys(infoResponse.data.data).length === 0) {
+        return null; // Token not found in CoinMarketCap
+      }
+
+      // Get the token ID from the response
+      const tokenData = Object.values(infoResponse.data.data)[0] as any;
+      const tokenId = tokenData.id;
+
+      // Now get the price data using the token ID
+      const priceUrl = `${source.baseUrl}/cryptocurrency/quotes/latest`;
+      const priceParams = {
+        id: tokenId.toString(),
+        convert: 'USD'
+      };
+
+      const priceResponse = await axios.get(priceUrl, {
+        params: priceParams,
+        timeout: source.timeout,
+        headers: {
+          'Accept': 'application/json',
+          'X-CMC_PRO_API_KEY': source.apiKey
+        }
+      });
+
+      const priceData = priceResponse.data.data[tokenId];
+      if (!priceData || !priceData.quote || !priceData.quote.USD) {
+        return null;
+      }
+
+      const quote = priceData.quote.USD;
+
+      return {
+        address,
+        symbol: priceData.symbol || 'UNKNOWN',
+        priceUsd: quote.price || 0,
+        priceChange24h: quote.percent_change_24h || 0,
+        volume24h: quote.volume_24h || 0,
+        marketCap: quote.market_cap || 0,
+        lastUpdated: new Date(quote.last_updated).getTime(),
+        source: source.id,
+        confidence: 92 // CoinMarketCap is generally reliable
+      };
+    } catch (error: any) {
+      this.logger.debug('CoinMarketCap price fetch failed', {
+        address,
+        chain,
+        error: error.response?.data || error.message
+      });
+      return null;
+    }
   }
 
   private async fetchMoralisPrice(source: PriceSource, address: string, chain: string): Promise<TokenPrice | null> {

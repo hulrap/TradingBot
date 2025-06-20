@@ -64,6 +64,34 @@ export {
   type PriceComparisonResult
 } from './price-oracle';
 
+// Enhanced Chain Client Exports
+export {
+  EnhancedChainClient,
+  createEnhancedChainClient,
+  type EnhancedChainClientConfig,
+  type TradeExecutionResult,
+  type OpportunityMetrics
+} from './enhanced-chain-client';
+
+// Zero-Latency Infrastructure Exports
+export {
+  ZeroLatencyOracle
+} from './zero-latency-oracle';
+
+export {
+  RealTimeGasTracker
+} from './realtime-gas-tracker';
+
+export {
+  SmartRouteEngine
+} from './smart-route-engine';
+
+export {
+  createZeroLatencyConfig,
+  CostTracker,
+  type ZeroLatencyConfig
+} from './zero-latency-config';
+
 // Factory function for creating chain clients
 export function createChainClient(chain: string, privateKey: string, rpcUrl: string) {
   // Create logger

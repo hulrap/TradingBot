@@ -5,7 +5,34 @@ import { Connection } from '@solana/web3.js';
 import { FlashbotsClient, type FlashbotsConfig } from './flashbots-client';
 import { JitoClient, type JitoConfig } from './jito-client';
 import { BscMevClient, type BscMevConfig } from './bsc-mev-client';
-import { MempoolMonitor, type MempoolConfig, type PendingTransaction } from '@trading-bot/chain-client';
+import { MempoolMonitor } from '@trading-bot/chain-client';
+
+// Local type definitions to avoid import issues
+interface MempoolConfig {
+  enableRealtimeSubscription: boolean;
+  subscriptionFilters: {
+    minTradeValue: string;
+    maxGasPrice: string;
+    whitelistedDexes: string[];
+    blacklistedTokens: string[];
+  };
+  batchSize: number;
+  processingDelayMs: number;
+  heartbeatIntervalMs: number;
+  reconnectDelayMs: number;
+  maxReconnectAttempts: number;
+}
+
+interface PendingTransaction {
+  hash: string;
+  to?: string;
+  from: string;
+  value: string;
+  gasPrice: string;
+  gasLimit: string;
+  data?: string;
+  timestamp: number;
+}
 import { SandwichDetector, type SandwichOpportunity } from './sandwich-detector';
 import { ProfitCalculator } from './profit-calculator';
 import { SandwichExecutionEngine, type ExecutionParams } from './execution-engine';
@@ -65,7 +92,7 @@ class AdvancedMevSandwichBot {
   private bscMevClient?: BscMevClient;
   
   // Advanced sandwich components
-  private mempoolMonitor?: MempoolMonitor;
+  private mempoolMonitor?: any; // MempoolMonitor instance
   private sandwichDetector?: SandwichDetector;
   private profitCalculator!: ProfitCalculator;
   private executionEngine?: SandwichExecutionEngine;
@@ -342,7 +369,28 @@ class AdvancedMevSandwichBot {
       maxReconnectAttempts: 5
     };
 
-    this.mempoolMonitor = new MempoolMonitor(mempoolConfig);
+    // Initialize price oracle for mempool monitor
+    const priceOracle = new (require('@trading-bot/chain-client').PriceOracle)({
+      sources: [
+        {
+          id: 'coingecko',
+          name: 'CoinGecko',
+          priority: 1,
+          isActive: true,
+          rateLimit: 50,
+          timeout: 10000,
+          supportedChains: this.config.enabledChains,
+          baseUrl: 'https://api.coingecko.com/api/v3',
+        }
+      ],
+      cacheTimeout: 30,
+      maxRetries: 3,
+      retryDelay: 1000,
+      enableBackupSources: true,
+      priceDeviationThreshold: 5,
+    }, logger);
+
+    this.mempoolMonitor = new MempoolMonitor(mempoolConfig, priceOracle, logger);
     
     // Initialize sandwich detector with local config
     const sandwichConfig = {
@@ -475,7 +523,7 @@ class AdvancedMevSandwichBot {
       await this.processSandwichOpportunity(opportunity);
     });
 
-    this.sandwichDetector.on('error', (error) => {
+    this.sandwichDetector.on('error', (error: Error) => {
       logger.error('Sandwich detector error', { error: error.message });
     });
   }
@@ -714,14 +762,14 @@ class AdvancedMevSandwichBot {
   private startAdvancedSandwichDetection(): void {
     // Start shared mempool monitor
     if (this.mempoolMonitor && !this.mempoolMonitor.isActive()) {
-      this.mempoolMonitor.startMonitoring().catch(error => {
+      this.mempoolMonitor.startMonitoring().catch((error: Error) => {
         logger.error('Failed to start mempool monitoring', { error: error.message });
       });
     }
 
     // Start sandwich detector
     if (this.sandwichDetector && !this.sandwichDetector.getStats().isMonitoring) {
-      this.sandwichDetector.startMonitoring().catch(error => {
+      this.sandwichDetector.startMonitoring().catch((error: Error) => {
         logger.error('Failed to start sandwich detection', { error: error.message });
       });
     }

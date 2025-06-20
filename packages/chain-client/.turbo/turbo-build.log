@@ -4,15 +4,15 @@
 
 [34mCLI[39m Building entry: src/index.ts
 [34mCLI[39m Using tsconfig: tsconfig.json
-[34mCLI[39m tsup v8.0.2
+[34mCLI[39m tsup v8.5.0
 [34mCLI[39m Using tsup config: C:\Users\User1\Downloads\TradingBot\packages\chain-client\tsup.config.ts
 [34mCLI[39m Target: node18
 [34mCLI[39m Cleaning output folder
 [34mCJS[39m Build start
 [34mESM[39m Build start
-[32mESM[39m [1mdist\index.mjs     [22m[32m109.13 KB[39m
-[32mESM[39m [1mdist\index.mjs.map [22m[32m226.39 KB[39m
-[32mESM[39m ⚡️ Build success in 1162ms
-[32mCJS[39m [1mdist\index.js     [22m[32m110.01 KB[39m
-[32mCJS[39m [1mdist\index.js.map [22m[32m226.39 KB[39m
-[32mCJS[39m ⚡️ Build success in 1165ms
+[32mCJS[39m [1mdist\index.js     [22m[32m203.45 KB[39m
+[32mCJS[39m [1mdist\index.js.map [22m[32m485.85 KB[39m
+[32mCJS[39m ⚡️ Build success in 2040ms
+[32mESM[39m [1mdist\index.mjs     [22m[32m201.97 KB[39m
+[32mESM[39m [1mdist\index.mjs.map [22m[32m485.71 KB[39m
+[32mESM[39m ⚡️ Build success in 2037ms

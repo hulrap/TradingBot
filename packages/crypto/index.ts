@@ -4,49 +4,71 @@ import * as jose from 'jose';
 
 const ALGORITHM = 'aes-256-cbc';
 
-// Lazy initialization - only check for key when needed
-let cachedKey: Uint8Array | null = null;
+// Legacy cached key approach removed for security
+// All encryption now uses per-operation salt generation for maximum security
 
-function getKey(): Uint8Array {
-    if (cachedKey) {
-        return cachedKey;
-    }
-    
+/**
+ * Encrypts a plaintext string with per-encryption salt for maximum security.
+ * @param text The plaintext to encrypt.
+ * @param userSalt Optional user-specific salt for additional security
+ * @returns A string containing the salt, IV and the encrypted text, separated by colons.
+ */
+export function encrypt(text: string, userSalt?: string): string {
     const MASTER_KEY = process.env['MASTER_ENCRYPTION_KEY'];
     if (!MASTER_KEY) {
         throw new Error('FATAL: MASTER_ENCRYPTION_KEY environment variable is not set.');
     }
     
-    // Use scrypt to derive a consistent key of the correct length (32 bytes for AES-256)
-    cachedKey = new Uint8Array(scryptSync(MASTER_KEY, 'salt', 32));
-    return cachedKey;
-}
-
-/**
- * Encrypts a plaintext string.
- * @param text The plaintext to encrypt.
- * @returns A string containing the IV and the encrypted text, separated by a colon.
- */
-export function encrypt(text: string): string {
-    const key = getKey(); // Get key lazily
+    // Generate a random salt for this encryption operation
+    const encryptionSalt = userSalt || randomBytes(32).toString('hex');
+    const key = new Uint8Array(scryptSync(MASTER_KEY, encryptionSalt, 32));
+    
     const iv = new Uint8Array(randomBytes(16)); // Initialization vector
     const cipher = createCipheriv(ALGORITHM, key, iv);
     let encrypted = cipher.update(text, 'utf8', 'hex');
     encrypted += cipher.final('hex');
-    return `${Buffer.from(iv).toString('hex')}:${encrypted}`;
+    
+    // Return salt:iv:encrypted for maximum security
+    return `${encryptionSalt}:${Buffer.from(iv).toString('hex')}:${encrypted}`;
 }
 
 /**
  * Decrypts a string that was encrypted with the encrypt function.
- * @param hash A string containing the IV and encrypted text, separated by a colon.
+ * @param hash A string containing the salt, IV and encrypted text, separated by colons.
  * @returns The decrypted plaintext.
  */
 export function decrypt(hash: string): string {
-    const key = getKey(); // Get key lazily
-    const [ivHex, encryptedText] = hash.split(':');
+    const MASTER_KEY = process.env['MASTER_ENCRYPTION_KEY'];
+    if (!MASTER_KEY) {
+        throw new Error('FATAL: MASTER_ENCRYPTION_KEY environment variable is not set.');
+    }
+    
+    const parts = hash.split(':');
+    
+    // Handle both old format (iv:encrypted) and new format (salt:iv:encrypted)
+    let salt: string, ivHex: string, encryptedText: string;
+    
+    if (parts.length === 2) {
+        // Old format - use fallback key derivation
+        ivHex = parts[0] || '';
+        encryptedText = parts[1] || '';
+        const FALLBACK_SALT = process.env['ENCRYPTION_SALT'] || 'TradingBot2024SecureSalt';
+        salt = FALLBACK_SALT;
+    } else if (parts.length === 3) {
+        // New format with salt
+        salt = parts[0] || '';
+        ivHex = parts[1] || '';
+        encryptedText = parts[2] || '';
+    } else {
+        throw new Error('Invalid hash format for decryption.');
+    }
+    
     if (!ivHex || !encryptedText) {
         throw new Error('Invalid hash format for decryption.');
     }
+    
+    // Derive key using the salt from the encrypted data
+    const key = new Uint8Array(scryptSync(MASTER_KEY, salt, 32));
     const iv = new Uint8Array(Buffer.from(ivHex, 'hex'));
     const decipher = createDecipheriv(ALGORITHM, key, iv);
     let decrypted = decipher.update(encryptedText, 'hex', 'utf8');

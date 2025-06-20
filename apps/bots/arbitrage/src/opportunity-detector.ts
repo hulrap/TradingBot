@@ -1,6 +1,37 @@
 import { EventEmitter } from 'events';
 import { ethers } from 'ethers';
-import { MempoolMonitor, type MempoolConfig, type PendingTransaction } from '@trading-bot/chain-client';
+import { 
+  MempoolMonitor, 
+  PriceOracle
+} from '@trading-bot/chain-client';
+import winston from 'winston';
+
+// Local type definitions to avoid import issues
+interface MempoolConfig {
+  enableRealtimeSubscription: boolean;
+  subscriptionFilters: {
+    minTradeValue: string;
+    maxGasPrice: string;
+    whitelistedDexes: string[];
+    blacklistedTokens: string[];
+  };
+  batchSize: number;
+  processingDelayMs: number;
+  heartbeatIntervalMs: number;
+  reconnectDelayMs: number;
+  maxReconnectAttempts: number;
+}
+
+interface PendingTransaction {
+  hash: string;
+  to?: string;
+  from: string;
+  value: string;
+  gasPrice: string;
+  gasLimit: string;
+  data?: string;
+  timestamp: number;
+}
 
 export interface ArbitrageOpportunity {
   id: string;
@@ -67,8 +98,10 @@ export interface ArbitrageConfig {
  */
 export class ArbitrageDetector extends EventEmitter {
   private config: ArbitrageConfig;
-  private mempoolMonitor: MempoolMonitor;
+  private mempoolMonitor!: any; // MempoolMonitor instance
   private providers = new Map<string, ethers.Provider>();
+  private logger: winston.Logger;
+  private priceOracle: any; // PriceOracle instance
   
   private isScanning = false;
   private priceCache = new Map<string, Map<string, PriceData>>(); // token -> exchange -> price
@@ -77,20 +110,56 @@ export class ArbitrageDetector extends EventEmitter {
   // Exchange configurations
   private exchanges = new Map<string, ExchangeData>();
   
-  constructor(config: ArbitrageConfig) {
+  constructor(config: ArbitrageConfig, logger?: winston.Logger) {
     super();
     this.config = config;
     
+    // Initialize logger
+    this.logger = logger || winston.createLogger({
+      level: 'info',
+      format: winston.format.combine(
+        winston.format.timestamp(),
+        winston.format.json()
+      ),
+      transports: [
+        new winston.transports.Console()
+      ]
+    });
+    
+    // Initialize price oracle
+    this.priceOracle = new PriceOracle({
+      sources: [
+        {
+          id: 'coingecko',
+          name: 'CoinGecko',
+          priority: 1,
+          isActive: true,
+          rateLimit: 50,
+          timeout: 10000,
+          supportedChains: config.enabledChains,
+          baseUrl: 'https://api.coingecko.com/api/v3',
+        }
+      ],
+      cacheTimeout: 30,
+      maxRetries: 3,
+      retryDelay: 1000,
+      enableBackupSources: true,
+      priceDeviationThreshold: 5,
+    }, this.logger);
+    
     // Initialize exchanges
     this.initializeExchanges();
-    
+    this.initializeMempoolMonitor();
+  }
+
+  private initializeMempoolMonitor(): void {
     // Create mempool monitor with arbitrage-specific config
     const mempoolConfig: MempoolConfig = {
       enableRealtimeSubscription: true,
       subscriptionFilters: {
         minTradeValue: '1000', // $1k minimum for arbitrage
-        maxGasPrice: config.maxGasPrice,
-        whitelistedDexes: config.enabledExchanges,
+        maxGasPrice: this.config.maxGasPrice,
+        whitelistedDexes: this.config.enabledExchanges,
         blacklistedTokens: []
       },
       batchSize: 5,
@@ -100,7 +169,8 @@ export class ArbitrageDetector extends EventEmitter {
       maxReconnectAttempts: 5
     };
     
-    this.mempoolMonitor = new MempoolMonitor(mempoolConfig);
+    // Initialize mempool monitor with proper dependencies
+    this.mempoolMonitor = new MempoolMonitor(mempoolConfig, this.priceOracle, this.logger);
     this.setupMempoolEvents();
   }
 

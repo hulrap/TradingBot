@@ -1,0 +1,31 @@
+{
+  "mcpServers": {
+    "vercel": {
+      "command": "node",
+      "args": ["./mcp-servers/dist/vercel-server.js"],
+      "env": {
+        "VERCEL_TOKEN": "your-vercel-token-here",
+        "VERCEL_TEAM_ID": "your-team-id-here",
+        "VERCEL_PROJECT_ID": "your-project-id-here"
+      }
+    },
+    "supabase": {
+      "command": "node", 
+      "args": ["./mcp-servers/dist/supabase-server.js"],
+      "env": {
+        "SUPABASE_URL": "your-supabase-url-here",
+        "SUPABASE_SERVICE_ROLE_KEY": "your-service-role-key-here",
+        "SUPABASE_PROJECT_REF": "your-project-ref-here",
+        "SUPABASE_ACCESS_TOKEN": "your-access-token-here"
+      }
+    },
+    "render": {
+      "command": "node",
+      "args": ["./mcp-servers/dist/render-server.js"],
+      "env": {
+        "RENDER_API_KEY": "your-render-api-key-here",
+        "RENDER_OWNER_ID": "your-owner-id-here"
+      }
+    }
+  }
+} 
