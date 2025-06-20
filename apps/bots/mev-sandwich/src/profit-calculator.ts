@@ -1,5 +1,6 @@
 import { ethers } from 'ethers';
 import { LAMPORTS_PER_SOL } from '@solana/web3.js';
+import axios from 'axios';
 
 export interface ProfitParams {
   victimAmountIn: string;
@@ -16,6 +17,20 @@ export interface ProfitParams {
   gasPrice: string; // In gwei for EVM chains, lamports for Solana
   chain: 'ethereum' | 'bsc' | 'solana';
   dexType: string;
+}
+
+export interface PriceOracleConfig {
+  coinGeckoApiKey?: string;
+  chainlinkRpcUrl?: string;
+  pythApiUrl?: string;
+  enableBackupOracles: boolean;
+}
+
+export interface GasEstimationConfig {
+  provider?: ethers.JsonRpcProvider;
+  networkMultiplier: number;
+  maxGasPrice: string;
+  priorityFeeBoost: number;
 }
 
 export interface ProfitCalculation {
@@ -50,6 +65,11 @@ export interface OptimizationResult {
 }
 
 export class ProfitCalculator {
+  private priceCache = new Map<string, { price: number; timestamp: number }>();
+  private gasCache = new Map<string, { gasPrice: string; timestamp: number }>();
+  private priceConfig: PriceOracleConfig;
+  private gasConfig: GasEstimationConfig;
+
   // Gas cost estimates by chain and operation
   private readonly GAS_ESTIMATES = {
     ethereum: {
@@ -76,13 +96,238 @@ export class ProfitCalculator {
     solana: 2.0    // 100% tip multiplier for Jito
   };
 
-  constructor() {}
+  constructor(priceConfig?: PriceOracleConfig, gasConfig?: GasEstimationConfig) {
+    this.priceConfig = {
+      enableBackupOracles: true,
+      ...priceConfig
+    };
+    this.gasConfig = {
+      networkMultiplier: 1.2,
+      maxGasPrice: '300',
+      priorityFeeBoost: 50,
+      ...gasConfig
+    };
+  }
 
   /**
-   * Calculate optimal front-run amount and expected profit
+   * Get real-time token price from multiple oracle sources
+   */
+  private async getTokenPrice(address: string, chain: string): Promise<number> {
+    const cacheKey = `${chain}_${address}`;
+    const cached = this.priceCache.get(cacheKey);
+    
+    // Use cache if less than 30 seconds old
+    if (cached && Date.now() - cached.timestamp < 30000) {
+      return cached.price;
+    }
+
+    try {
+      let price = 0;
+
+      // Try CoinGecko first (most reliable)
+      price = await this.getCoinGeckoPrice(address, chain);
+      
+      if (price === 0 && this.priceConfig.enableBackupOracles) {
+        // Try Chainlink as backup for mainnet
+        if (chain === 'ethereum' && this.priceConfig.chainlinkRpcUrl) {
+          price = await this.getChainlinkPrice(address);
+        }
+        
+        // Try Pyth for Solana
+        if (chain === 'solana' && this.priceConfig.pythApiUrl) {
+          price = await this.getPythPrice(address);
+        }
+      }
+
+      // Cache the result
+      this.priceCache.set(cacheKey, { price, timestamp: Date.now() });
+      return price;
+    } catch (error) {
+      console.warn(`Failed to fetch price for ${address} on ${chain}:`, error);
+      
+      // Return cached price if available, otherwise 0
+      return cached?.price || 0;
+    }
+  }
+
+  private async getCoinGeckoPrice(address: string, chain: string): Promise<number> {
+    try {
+      const platformMap: Record<string, string> = {
+        ethereum: 'ethereum',
+        bsc: 'binance-smart-chain',
+        solana: 'solana'
+      };
+
+      const platform = platformMap[chain];
+      if (!platform) return 0;
+
+      const apiKey = this.priceConfig.coinGeckoApiKey;
+      const baseUrl = 'https://api.coingecko.com/api/v3';
+      const url = `${baseUrl}/simple/token_price/${platform}`;
+      
+      const headers: any = { 'accept': 'application/json' };
+      if (apiKey) {
+        headers['x-cg-demo-api-key'] = apiKey;
+      }
+
+      const response = await axios.get(url, {
+        params: {
+          contract_addresses: address,
+          vs_currencies: 'usd'
+        },
+        headers,
+        timeout: 5000
+      });
+
+      const price = response.data[address.toLowerCase()]?.usd;
+      return price || 0;
+    } catch (error) {
+      console.warn('CoinGecko API error:', error);
+      return 0;
+    }
+  }
+
+  private async getChainlinkPrice(address: string): Promise<number> {
+    try {
+      if (!this.priceConfig.chainlinkRpcUrl) return 0;
+
+      // This would implement Chainlink price feed integration
+      // For now, return 0 to indicate unavailable
+      console.log(`Chainlink price lookup for ${address} not implemented`);
+      return 0;
+    } catch (error) {
+      console.warn('Chainlink price fetch error:', error);
+      return 0;
+    }
+  }
+
+  private async getPythPrice(address: string): Promise<number> {
+    try {
+      if (!this.priceConfig.pythApiUrl) return 0;
+
+      // This would implement Pyth price feed integration
+      // For now, return 0 to indicate unavailable
+      console.log(`Pyth price lookup for ${address} not implemented`);
+      return 0;
+    } catch (error) {
+      console.warn('Pyth price fetch error:', error);
+      return 0;
+    }
+  }
+
+  /**
+   * Get dynamic gas price from network
+   */
+  private async getDynamicGasPrice(chain: string): Promise<string> {
+    const cacheKey = `gas_${chain}`;
+    const cached = this.gasCache.get(cacheKey);
+    
+    // Use cache if less than 15 seconds old
+    if (cached && Date.now() - cached.timestamp < 15000) {
+      return cached.gasPrice;
+    }
+
+    try {
+      let gasPrice = '10'; // Default fallback
+
+      if (chain === 'ethereum' || chain === 'bsc') {
+        gasPrice = await this.getEvmGasPrice(chain);
+      } else if (chain === 'solana') {
+        gasPrice = await this.getSolanaGasPrice();
+      }
+
+      // Cache the result
+      this.gasCache.set(cacheKey, { gasPrice, timestamp: Date.now() });
+      return gasPrice;
+    } catch (error) {
+      console.warn(`Failed to fetch gas price for ${chain}:`, error);
+      return cached?.gasPrice || '10';
+    }
+  }
+
+  private async getEvmGasPrice(chain: string): Promise<string> {
+    try {
+      if (!this.gasConfig.provider) {
+        // Fallback to public APIs
+        return await this.getGasPriceFromApi(chain);
+      }
+
+      const feeData = await this.gasConfig.provider.getFeeData();
+      let gasPrice = feeData.gasPrice || ethers.parseUnits('10', 'gwei');
+
+      // Apply MEV premium
+      const multiplier = this.MEV_GAS_MULTIPLIERS[chain as keyof typeof this.MEV_GAS_MULTIPLIERS] || 1.5;
+      gasPrice = gasPrice * BigInt(Math.floor(multiplier * 100)) / BigInt(100);
+
+      // Cap at maximum
+      const maxGasPrice = ethers.parseUnits(this.gasConfig.maxGasPrice, 'gwei');
+      if (gasPrice > maxGasPrice) {
+        gasPrice = maxGasPrice;
+      }
+
+      return ethers.formatUnits(gasPrice, 'gwei');
+    } catch (error) {
+      console.warn('EVM gas price fetch error:', error);
+      return '10';
+    }
+  }
+
+  private async getGasPriceFromApi(chain: string): Promise<string> {
+    try {
+      if (chain === 'ethereum') {
+        const response = await axios.get('https://api.etherscan.io/api', {
+          params: {
+            module: 'gastracker',
+            action: 'gasoracle',
+            apikey: 'YourApiKeyToken'
+          },
+          timeout: 5000
+        });
+        
+        const fastGasPrice = response.data.result?.FastGasPrice;
+        return fastGasPrice ? (parseFloat(fastGasPrice) * 1.2).toString() : '20';
+      } else if (chain === 'bsc') {
+        // BSC gas price API
+        const response = await axios.get('https://api.bscscan.com/api', {
+          params: {
+            module: 'gastracker',
+            action: 'gasoracle'
+          },
+          timeout: 5000
+        });
+        
+        const fastGasPrice = response.data.result?.FastGasPrice;
+        return fastGasPrice ? (parseFloat(fastGasPrice) * 1.1).toString() : '5';
+      }
+      
+      return '10';
+    } catch (error) {
+      console.warn('Gas price API error:', error);
+      return '10';
+    }
+  }
+
+  private async getSolanaGasPrice(): Promise<string> {
+    try {
+      // For Solana, this would fetch compute unit prices
+      // For now, return a reasonable default priority fee
+      const baseFee = 5000; // Base compute unit fee in lamports
+      const priorityMultiplier = this.gasConfig.priorityFeeBoost / 100 + 1;
+      return Math.floor(baseFee * priorityMultiplier).toString();
+    } catch (error) {
+      console.warn('Solana gas price fetch error:', error);
+      return '5000';
+    }
+  }
+
+  /**
+   * Calculate optimal front-run amount and expected profit with real data
    */
   async calculateOptimalProfit(params: ProfitParams): Promise<OptimizationResult> {
-    const victimAmount = parseFloat(ethers.formatUnits(params.victimAmountIn, params.tokenInDecimals));
+    // Update params with real-time data
+    const updatedParams = await this.updateParamsWithRealData(params);
+    
+    const victimAmount = parseFloat(ethers.formatUnits(updatedParams.victimAmountIn, updatedParams.tokenInDecimals));
     
     // Test different front-run amounts (10% to 100% of victim trade)
     const testRatios = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
@@ -93,15 +338,12 @@ export class ProfitCalculator {
 
     for (const ratio of testRatios) {
       const frontRunAmount = victimAmount * ratio;
-      // Create modified params with front-run amount for simulation
       const simulationParams = {
-        ...params,
-        // Use calculated front-run amount for this simulation
-        victimAmountIn: ethers.parseUnits(frontRunAmount.toString(), params.tokenInDecimals).toString()
+        ...updatedParams,
+        victimAmountIn: ethers.parseUnits(frontRunAmount.toString(), updatedParams.tokenInDecimals).toString()
       };
       
       const result = await this.calculateProfit(simulationParams);
-
       simulationResults.push(result);
 
       const netProfitValue = parseFloat(result.breakdownUsd.netProfitUsd.toString());
@@ -112,7 +354,6 @@ export class ProfitCalculator {
     }
 
     if (!optimalResult) {
-      // Return empty result if no profitable scenario found
       optimalResult = simulationResults[0] || this.createEmptyResult();
     }
 
@@ -130,6 +371,30 @@ export class ProfitCalculator {
       gasEfficiency: isFinite(gasEfficiency) ? gasEfficiency : 0,
       riskAdjustedReturn
     };
+  }
+
+  /**
+   * Update profit calculation parameters with real-time data
+   */
+  private async updateParamsWithRealData(params: ProfitParams): Promise<ProfitParams> {
+    try {
+      // Get real-time prices
+      const [tokenInPrice, tokenOutPrice, dynamicGasPrice] = await Promise.all([
+        this.getTokenPrice(params.tokenInAddress, params.chain),
+        this.getTokenPrice(params.tokenOutAddress, params.chain),
+        this.getDynamicGasPrice(params.chain)
+      ]);
+
+      return {
+        ...params,
+        tokenInPrice: tokenInPrice || params.tokenInPrice, // Fallback to provided price
+        tokenOutPrice: tokenOutPrice || params.tokenOutPrice,
+        gasPrice: dynamicGasPrice || params.gasPrice
+      };
+    } catch (error) {
+      console.warn('Failed to update params with real data:', error);
+      return params; // Return original params if update fails
+    }
   }
 
   /**
@@ -159,13 +424,13 @@ export class ProfitCalculator {
         params.poolFee
       );
 
-      // Calculate USD values
+      // Calculate USD values using real prices
       const frontRunCostUsd = frontRunAmount * params.tokenInPrice;
       const backRunRevenueUsd = sandwichResult.backRunOutput * params.tokenInPrice;
       const victimTradeValueUsd = victimAmountIn * params.tokenInPrice;
 
-      // Calculate gas costs
-      const gasCostData = this.calculateGasCosts(params.gasPrice, params.chain);
+      // Calculate gas costs with real data
+      const gasCostData = await this.calculateGasCosts(params.gasPrice, params.chain);
       const gasCostUsd = gasCostData.totalCostUsd;
 
       // Calculate profits
@@ -261,7 +526,7 @@ export class ProfitCalculator {
   /**
    * Calculate gas costs for sandwich attack
    */
-  private calculateGasCosts(gasPrice: string, chain: 'ethereum' | 'bsc' | 'solana'): {
+  private async calculateGasCosts(gasPrice: string, chain: 'ethereum' | 'bsc' | 'solana'): Promise<{
     totalCost: string;
     totalCostUsd: number;
     breakdown: {
@@ -269,7 +534,7 @@ export class ProfitCalculator {
       backRunCost: string;
       totalGasUnits: number;
     };
-  } {
+  }> {
     const gasEstimates = this.GAS_ESTIMATES[chain];
     const gasPriceValue = parseFloat(gasPrice);
     const mevMultiplier = this.MEV_GAS_MULTIPLIERS[chain];
@@ -280,7 +545,7 @@ export class ProfitCalculator {
       const priorityFee = gasPriceValue * mevMultiplier;
       const totalCostLamports = totalComputeUnits * priorityFee;
       const totalCostSol = totalCostLamports / LAMPORTS_PER_SOL;
-      const solPrice = 100; // Simplified SOL price
+      const solPrice = await this.getTokenPrice('So11111111111111111111111111111111111111112', 'solana') || 100;
       const totalCostUsd = totalCostSol * solPrice;
 
       return {
@@ -299,8 +564,11 @@ export class ProfitCalculator {
       const totalCostWei = BigInt(Math.floor(totalGasUnits * effectiveGasPrice * 1e9));
       const totalCostEth = parseFloat(ethers.formatEther(totalCostWei));
       
-      // Simplified ETH/BNB price
-      const nativeTokenPrice = chain === 'ethereum' ? 3000 : 300;
+      // Get real native token prices
+      const nativeTokenAddress = chain === 'ethereum' 
+        ? '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2' // WETH
+        : '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c'; // WBNB
+      const nativeTokenPrice = await this.getTokenPrice(nativeTokenAddress, chain) || (chain === 'ethereum' ? 3000 : 300);
       const totalCostUsd = totalCostEth * nativeTokenPrice;
 
       return {

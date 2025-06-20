@@ -7,7 +7,10 @@ const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
   title: "Trading Bot Control Panel",
-  description: "Manage your multi-chain trading bots.",
+  description: "Manage your multi-chain trading bots with advanced risk management and analytics.",
+  viewport: "width=device-width, initial-scale=1",
+  robots: "noindex, nofollow", // Prevent indexing of trading interface
+  authors: [{ name: "Trading Bot Team" }],
 };
 
 export default function RootLayout({
@@ -17,9 +20,11 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <AuthProvider>
-        <body className={inter.className}>{children}</body>
-      </AuthProvider>
+      <body className={inter.className}>
+        <AuthProvider>
+          {children}
+        </AuthProvider>
+      </body>
     </html>
   );
 } 

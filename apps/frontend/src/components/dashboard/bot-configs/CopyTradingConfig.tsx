@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -15,7 +15,9 @@ import {
   CheckCircle,
   Filter,
   DollarSign,
-  Clock
+  Clock,
+  Shield,
+  Activity
 } from 'lucide-react';
 import { BotConfiguration, CopyTradingConfiguration, TradeFilter } from '../BotConfigurationDashboard';
 
@@ -24,7 +26,97 @@ interface CopyTradingConfigProps {
   onChange: (config: BotConfiguration) => void;
 }
 
-// Sample popular wallets to copy (in real app, would be from API)
+// Enhanced wallet validation
+const validateWalletAddress = (address: string): { isValid: boolean; error?: string } => {
+  if (!address) return { isValid: false, error: 'Address is required' };
+  
+  // Basic Ethereum address validation
+  const ethAddressRegex = /^0x[a-fA-F0-9]{40}$/;
+  if (!ethAddressRegex.test(address)) {
+    return { isValid: false, error: 'Invalid Ethereum address format' };
+  }
+  
+  // Basic checksum validation (simplified)
+  if (address !== address.toLowerCase() && address !== address.toUpperCase()) {
+    // Mixed case - should validate checksum in production
+    console.warn('Mixed case address detected - checksum validation needed');
+  }
+  
+  return { isValid: true };
+};
+
+// Enhanced risk assessment with more sophisticated modeling
+const calculateAdvancedRisk = (config: CopyTradingConfiguration): {
+  level: 'low' | 'medium' | 'high' | 'extreme';
+  color: string;
+  factors: Record<string, boolean>;
+  score: number;
+} => {
+  const riskFactors = {
+    // Financial risk factors
+    highCopyAmount: getEstimatedCopyAmount(config) > 500,
+    veryHighCopyAmount: getEstimatedCopyAmount(config) > 2000,
+    noStopLoss: !config.stopLoss || config.stopLoss > 15,
+    extremeStopLoss: !config.stopLoss || config.stopLoss > 25,
+    
+    // Timing and execution risks
+    shortDelay: config.delayMs < 1000,
+    veryShortDelay: config.delayMs < 500,
+    
+    // Filter and protection risks
+    noFilters: config.tradeFilters.filter(f => f.enabled).length === 0,
+    fewFilters: config.tradeFilters.filter(f => f.enabled).length < 2,
+    
+    // MEV and competition risks
+    noTakeProfit: !config.takeProfit,
+    aggressiveTakeProfit: Boolean(config.takeProfit && config.takeProfit > 50),
+    
+    // Token list risks
+    noTokenLimits: config.whitelistedTokens.length === 0 && config.blacklistedTokens.length === 0,
+    largeBlacklist: config.blacklistedTokens.length > 10
+  };
+
+  // Calculate weighted risk score
+  const weights = {
+    veryHighCopyAmount: 3,
+    extremeStopLoss: 3,
+    veryShortDelay: 2,
+    highCopyAmount: 2,
+    noStopLoss: 2,
+    shortDelay: 1.5,
+    noFilters: 1.5,
+    noTakeProfit: 1,
+    fewFilters: 1,
+    noTokenLimits: 1,
+    aggressiveTakeProfit: 0.5,
+    largeBlacklist: 0.5
+  };
+
+  const score = Object.entries(riskFactors)
+    .filter(([_, value]) => value)
+    .reduce((sum, [key, _]) => sum + (weights[key as keyof typeof weights] || 1), 0);
+
+  if (score >= 8) return { level: 'extreme', color: 'text-red-700', factors: riskFactors, score };
+  if (score >= 5) return { level: 'high', color: 'text-red-600', factors: riskFactors, score };
+  if (score >= 3) return { level: 'medium', color: 'text-yellow-600', factors: riskFactors, score };
+  return { level: 'low', color: 'text-green-600', factors: riskFactors, score };
+};
+
+const getEstimatedCopyAmount = (config: CopyTradingConfiguration): number => {
+  const sampleTradeSize = 1000; // USD
+  switch (config.copyMode) {
+    case 'fixed_amount':
+      return config.fixedAmount || 0;
+    case 'percentage':
+      return sampleTradeSize * (config.copyPercentage || 0) / 100;
+    case 'proportional':
+      return sampleTradeSize * 0.1; // Assume 10% of portfolio
+    default:
+      return 0;
+  }
+};
+
+// Sample wallets with enhanced data structure
 const POPULAR_WALLETS = [
   {
     address: '0x8ba1f109551bD432803012645Hac136c22C08',
@@ -33,7 +125,11 @@ const POPULAR_WALLETS = [
     winRate: 89.2,
     avgReturn: 12.4,
     trades: 342,
-    verified: true
+    verified: true,
+    riskLevel: 'low' as const,
+    avgTradeSize: 2500,
+    lastActive: '2 hours ago',
+    tags: ['defi', 'conservative', 'large-cap']
   },
   {
     address: '0x742d35Cc6634C0532925a3b8D62103Ae4E168681',
@@ -42,7 +138,11 @@ const POPULAR_WALLETS = [
     winRate: 94.1,
     avgReturn: 8.7,
     trades: 1247,
-    verified: true
+    verified: true,
+    riskLevel: 'medium' as const,
+    avgTradeSize: 1200,
+    lastActive: '30 minutes ago',
+    tags: ['arbitrage', 'mev', 'high-frequency']
   },
   {
     address: '0x45f783CCE6B7FF23B2ab2D70e416cdb7D6055f51',
@@ -51,35 +151,55 @@ const POPULAR_WALLETS = [
     winRate: 76.8,
     avgReturn: 24.6,
     trades: 892,
-    verified: false
+    verified: false,
+    riskLevel: 'high' as const,
+    avgTradeSize: 5000,
+    lastActive: '1 hour ago',
+    tags: ['mev', 'sandwich', 'high-risk']
   }
 ];
 
-// Available filter types
+// Available filter types with enhanced options
 const FILTER_TYPES = [
-  { value: 'token', label: 'Token', description: 'Filter by specific token' },
-  { value: 'amount', label: 'Amount', description: 'Filter by trade amount' },
-  { value: 'gas', label: 'Gas Price', description: 'Filter by gas price' },
-  { value: 'time', label: 'Time', description: 'Filter by time of day' }
+  { value: 'token', label: 'Token', description: 'Filter by specific token symbol' },
+  { value: 'amount', label: 'Amount', description: 'Filter by trade amount (USD)' },
+  { value: 'gas', label: 'Gas Price', description: 'Filter by gas price (Gwei)' },
+  { value: 'time', label: 'Time', description: 'Filter by time of day' },
+  { value: 'volatility', label: 'Volatility', description: 'Filter by token volatility' },
+  { value: 'market_cap', label: 'Market Cap', description: 'Filter by token market cap' }
 ];
 
 const FILTER_CONDITIONS = [
   { value: 'equals', label: 'Equals', types: ['token', 'amount', 'gas', 'time'] },
-  { value: 'greater_than', label: 'Greater than', types: ['amount', 'gas', 'time'] },
-  { value: 'less_than', label: 'Less than', types: ['amount', 'gas', 'time'] },
-  { value: 'contains', label: 'Contains', types: ['token'] }
+  { value: 'greater_than', label: 'Greater than', types: ['amount', 'gas', 'time', 'volatility', 'market_cap'] },
+  { value: 'less_than', label: 'Less than', types: ['amount', 'gas', 'time', 'volatility', 'market_cap'] },
+  { value: 'contains', label: 'Contains', types: ['token'] },
+  { value: 'between', label: 'Between', types: ['amount', 'gas', 'volatility', 'market_cap'] }
 ];
 
 export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showWalletSelector, setShowWalletSelector] = useState(false);
+  const [walletValidation, setWalletValidation] = useState<{ isValid: boolean; error?: string }>({ isValid: true });
+  
   const copyConfig = config.configuration as CopyTradingConfiguration;
+
+  // Memoized calculations for performance
+  const riskAssessment = useMemo(() => calculateAdvancedRisk(copyConfig), [copyConfig]);
+  const estimatedCopyAmount = useMemo(() => getEstimatedCopyAmount(copyConfig), [copyConfig]);
 
   const updateConfig = (updates: Partial<CopyTradingConfiguration>) => {
     onChange({
       ...config,
       configuration: { ...copyConfig, ...updates }
     });
+  };
+
+  // Enhanced wallet validation with real-time feedback
+  const handleWalletChange = (address: string) => {
+    const validation = validateWalletAddress(address);
+    setWalletValidation(validation);
+    updateConfig({ targetWallet: address });
   };
 
   const addFilter = () => {
@@ -134,40 +254,33 @@ export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) 
     });
   };
 
-  const getEstimatedCopyAmount = () => {
-    const sampleTradeSize = 1000; // USD
-    switch (copyConfig.copyMode) {
-      case 'fixed_amount':
-        return copyConfig.fixedAmount || 0;
-      case 'percentage':
-        return sampleTradeSize * (copyConfig.copyPercentage || 0) / 100;
-      case 'proportional':
-        return sampleTradeSize * 0.1; // Assume 10% of portfolio
-      default:
-        return 0;
-    }
-  };
-
-  const getRiskLevel = () => {
-    const riskFactors = {
-      highCopyAmount: getEstimatedCopyAmount() > 500,
-      noStopLoss: !copyConfig.stopLoss || copyConfig.stopLoss > 10,
-      shortDelay: copyConfig.delayMs < 1000,
-      noFilters: copyConfig.tradeFilters.filter(f => f.enabled).length === 0
-    };
-
-    const riskCount = Object.values(riskFactors).filter(Boolean).length;
-    
-    if (riskCount >= 3) return { level: 'high', color: 'text-red-600' };
-    if (riskCount >= 2) return { level: 'medium', color: 'text-yellow-600' };
-    return { level: 'low', color: 'text-green-600' };
-  };
-
-  const risk = getRiskLevel();
   const selectedWallet = POPULAR_WALLETS.find(w => w.address === copyConfig.targetWallet);
 
   return (
     <div className="space-y-6">
+      {/* MEV Protection Warning */}
+      {riskAssessment.level === 'high' || riskAssessment.level === 'extreme' ? (
+        <Card className="border-red-200 bg-red-50">
+          <CardContent className="p-4">
+            <div className="flex items-start gap-2">
+              <AlertCircle className="h-5 w-5 text-red-600 mt-0.5" />
+              <div>
+                <div className="font-medium text-red-800 mb-1">High Risk Configuration Detected</div>
+                <div className="text-sm text-red-700 space-y-1">
+                  <p>Your copy trading configuration has a high risk level (Score: {riskAssessment.score}). Consider:</p>
+                  <ul className="list-disc list-inside space-y-1 ml-4">
+                    <li>Implementing MEV protection to avoid front-running</li>
+                    <li>Using longer delays to reduce competition</li>
+                    <li>Adding more trade filters for safety</li>
+                    <li>Setting appropriate stop-loss limits</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
+
       {/* Configuration Overview */}
       <Card>
         <CardHeader>
@@ -177,12 +290,13 @@ export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) 
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div className="text-center p-4 border rounded-lg">
-              <div className="text-2xl font-bold text-green-600">
-                ${getEstimatedCopyAmount().toFixed(0)}
+              <div className="text-2xl font-bold text-green-600 flex items-center justify-center gap-1">
+                <DollarSign className="h-6 w-6" />
+                {estimatedCopyAmount.toFixed(0)}
               </div>
-              <div className="text-sm text-muted-foreground">Est. Copy Amount</div>
+              <div className="text-sm text-muted-foreground">Est. Copy Amount (USD)</div>
             </div>
             <div className="text-center p-4 border rounded-lg">
               <div className="text-2xl font-bold text-blue-600">
@@ -191,8 +305,20 @@ export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) 
               <div className="text-sm text-muted-foreground">Active Filters</div>
             </div>
             <div className="text-center p-4 border rounded-lg">
-              <div className={`text-2xl font-bold ${risk.color}`}>{risk.level.toUpperCase()}</div>
+              <div className={`text-2xl font-bold ${riskAssessment.color} flex items-center justify-center gap-1`}>
+                {riskAssessment.level === 'extreme' && <AlertCircle className="h-6 w-6" />}
+                {riskAssessment.level === 'high' && <AlertCircle className="h-6 w-6" />}
+                {riskAssessment.level === 'medium' && <Activity className="h-6 w-6" />}
+                {riskAssessment.level === 'low' && <Shield className="h-6 w-6" />}
+                {riskAssessment.level.toUpperCase()}
+              </div>
               <div className="text-sm text-muted-foreground">Risk Level</div>
+            </div>
+            <div className="text-center p-4 border rounded-lg">
+              <div className="text-2xl font-bold text-purple-600">
+                {copyConfig.delayMs / 1000}s
+              </div>
+              <div className="text-sm text-muted-foreground">Copy Delay</div>
             </div>
           </div>
         </CardContent>
@@ -221,24 +347,56 @@ export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) 
             <input
               type="text"
               value={copyConfig.targetWallet}
-              onChange={(e) => updateConfig({ targetWallet: e.target.value })}
-              className="w-full p-3 border rounded-md font-mono text-sm"
+              onChange={(e) => handleWalletChange(e.target.value)}
+              className={`w-full p-3 border rounded-md font-mono text-sm ${
+                !walletValidation.isValid ? 'border-red-500 bg-red-50' : 'border-border'
+              }`}
               placeholder="0x..."
             />
+            {!walletValidation.isValid && walletValidation.error && (
+              <p className="text-sm text-red-600 flex items-center gap-1">
+                <AlertCircle className="h-4 w-4" />
+                {walletValidation.error}
+              </p>
+            )}
+            {walletValidation.isValid && copyConfig.targetWallet && (
+              <p className="text-sm text-green-600 flex items-center gap-1">
+                <CheckCircle className="h-4 w-4" />
+                Valid Ethereum address
+              </p>
+            )}
+            
             {selectedWallet && (
               <div className="p-3 bg-green-50 border border-green-200 rounded-md">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between mb-2">
                   <div>
-                    <div className="font-medium">{selectedWallet.name}</div>
+                    <div className="font-medium flex items-center gap-2">
+                      {selectedWallet.name}
+                      <Badge variant="outline" className={`text-xs ${
+                        selectedWallet.riskLevel === 'low' ? 'bg-green-100 text-green-800' :
+                        selectedWallet.riskLevel === 'medium' ? 'bg-yellow-100 text-yellow-800' :
+                        'bg-red-100 text-red-800'
+                      }`}>
+                        {selectedWallet.riskLevel} risk
+                      </Badge>
+                    </div>
                     <div className="text-sm text-muted-foreground">{selectedWallet.description}</div>
+                    <div className="flex flex-wrap gap-1 mt-1">
+                      {selectedWallet.tags.map((tag) => (
+                        <Badge key={tag} variant="outline" className="text-xs">
+                          {tag}
+                        </Badge>
+                      ))}
+                    </div>
                   </div>
                   {selectedWallet.verified && (
                     <Badge variant="outline" className="bg-green-100 text-green-800">
+                      <CheckCircle className="h-3 w-3 mr-1" />
                       Verified
                     </Badge>
                   )}
                 </div>
-                <div className="grid grid-cols-3 gap-4 mt-3 text-sm">
+                <div className="grid grid-cols-4 gap-4 mt-3 text-sm">
                   <div>
                     <div className="text-muted-foreground">Win Rate</div>
                     <div className="font-medium">{selectedWallet.winRate}%</div>
@@ -250,6 +408,10 @@ export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) 
                   <div>
                     <div className="text-muted-foreground">Trades</div>
                     <div className="font-medium">{selectedWallet.trades}</div>
+                  </div>
+                  <div>
+                    <div className="text-muted-foreground">Last Active</div>
+                    <div className="font-medium text-green-600">{selectedWallet.lastActive}</div>
                   </div>
                 </div>
               </div>
@@ -266,13 +428,21 @@ export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) 
                     className={`p-4 border rounded-lg cursor-pointer transition-colors hover:bg-accent ${
                       copyConfig.targetWallet === wallet.address ? 'border-primary bg-primary/5' : ''
                     }`}
-                    onClick={() => updateConfig({ targetWallet: wallet.address })}
+                    onClick={() => handleWalletChange(wallet.address)}
                   >
                     <div className="flex items-center justify-between mb-2">
                       <div className="flex items-center gap-2">
                         <div className="font-medium">{wallet.name}</div>
+                        <Badge variant="outline" className={`text-xs ${
+                          wallet.riskLevel === 'low' ? 'bg-green-100 text-green-800' :
+                          wallet.riskLevel === 'medium' ? 'bg-yellow-100 text-yellow-800' :
+                          'bg-red-100 text-red-800'
+                        }`}>
+                          {wallet.riskLevel} risk
+                        </Badge>
                         {wallet.verified && (
                           <Badge variant="outline" className="bg-green-100 text-green-800 text-xs">
+                            <CheckCircle className="h-3 w-3 mr-1" />
                             Verified
                           </Badge>
                         )}
@@ -282,7 +452,14 @@ export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) 
                       </div>
                     </div>
                     <div className="text-sm text-muted-foreground mb-2">{wallet.description}</div>
-                    <div className="grid grid-cols-3 gap-4 text-sm">
+                    <div className="flex flex-wrap gap-1 mb-3">
+                      {wallet.tags.map((tag) => (
+                        <Badge key={tag} variant="outline" className="text-xs">
+                          {tag}
+                        </Badge>
+                      ))}
+                    </div>
+                    <div className="grid grid-cols-4 gap-4 text-sm">
                       <div>
                         <div className="text-muted-foreground">Win Rate</div>
                         <div className="font-medium text-green-600">{wallet.winRate}%</div>
@@ -294,6 +471,10 @@ export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) 
                       <div>
                         <div className="text-muted-foreground">Trades</div>
                         <div className="font-medium">{wallet.trades}</div>
+                      </div>
+                      <div>
+                        <div className="text-muted-foreground">Avg Size</div>
+                        <div className="font-medium">${wallet.avgTradeSize}</div>
                       </div>
                     </div>
                   </div>

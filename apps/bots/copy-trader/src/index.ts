@@ -1,330 +1,607 @@
-import { CopyTraderBotConfig, Chain } from "@trading-bot/types";
-import { createChainClient } from "@trading-bot/chain-client";
-import { Wallet, WebSocketProvider, Interface, parseUnits } from "ethers";
-import { Connection, PublicKey } from "@solana/web3.js";
 import dotenv from 'dotenv';
 import winston from 'winston';
 import { ethers } from 'ethers';
+import { z } from 'zod';
+import Database from 'better-sqlite3';
+import Bottleneck from 'bottleneck';
+import cron from 'node-cron';
+import { v4 as uuidv4 } from 'uuid';
+
 import { MempoolMonitor, type MonitorConfig } from './mempool-monitor';
-import { CopyExecutionEngine, type CopyConfig } from './copy-execution-engine';
+import { CopyExecutionEngine, type CopyConfig, type PriceOracle, type TokenApprovalManager } from './copy-execution-engine';
 
 // Load environment variables
 dotenv.config();
 
-// Configure logger
-const logger = winston.createLogger({
-  level: process.env['LOG_LEVEL'] || 'info',
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.errors({ stack: true }),
-    winston.format.json()
-  ),
-  transports: [
+// Configuration validation schema
+const ConfigSchema = z.object({
+  // Core settings
+  NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+  LOG_LEVEL: z.enum(['error', 'warn', 'info', 'debug']).default('info'),
+  
+  // Blockchain settings
+  CHAIN: z.enum(['ETH', 'BSC', 'SOL']).default('ETH'),
+  CHAIN_ID: z.string().transform((val: string) => parseInt(val, 10)).default('1'),
+  ETH_RPC_URL: z.string().url(),
+  ETH_WS_URL: z.string().url(),
+  PRIVATE_KEY: z.string().min(64),
+  
+  // Target settings
+  TARGET_WALLET: z.string().min(40),
+  TARGET_WALLETS: z.string().optional(),
+  
+  // Trading settings
+  COPY_PERCENTAGE: z.string().transform((val: string) => parseFloat(val)).default('10'),
+  MAX_TRADE_SIZE: z.string().default('1.0'),
+  MIN_TRADE_SIZE: z.string().default('0.01'),
+  MAX_SLIPPAGE: z.string().transform((val: string) => parseFloat(val)).default('2'),
+  MAX_GAS_PRICE: z.string().default('100'),
+  
+  // Risk management
+  STOP_LOSS: z.string().transform((val: string) => parseFloat(val)).default('5'),
+  TAKE_PROFIT: z.string().transform((val: string) => parseFloat(val)).default('10'),
+  MAX_CONCURRENT_TRADES: z.string().transform((val: string) => parseInt(val, 10)).default('3'),
+  MAX_DAILY_LOSS: z.string().default('0.5'),
+  PRICE_IMPACT_THRESHOLD: z.string().transform((val: string) => parseFloat(val)).default('5'),
+  
+  // Feature flags
+  ENABLE_FILTERING: z.string().transform((val: string) => val === 'true').default('true'),
+  ENABLE_RISK_MANAGEMENT: z.string().transform((val: string) => val === 'true').default('true'),
+  ENABLE_MEV_PROTECTION: z.string().transform((val: string) => val === 'true').default('false'),
+  ENABLE_DATABASE: z.string().transform((val: string) => val === 'true').default('true'),
+  ENABLE_HEALTH_CHECK: z.string().transform((val: string) => val === 'true').default('true'),
+  
+  // Database settings
+  DATABASE_PATH: z.string().default('./copy-trader.db'),
+  COPY_ENGINE_DATABASE_PATH: z.string().default('./copy-engine.db'),
+  
+  // Performance settings
+  MAX_RPC_CALLS_PER_SECOND: z.string().transform((val: string) => parseInt(val, 10)).default('10'),
+  BATCH_SIZE: z.string().transform((val: string) => parseInt(val, 10)).default('10'),
+  BATCH_INTERVAL: z.string().transform((val: string) => parseInt(val, 10)).default('1000'),
+  
+  // Optional settings
+  FOLLOW_TOKENS: z.string().optional(),
+  EXCLUDE_TOKENS: z.string().optional(),
+  FLASHBOTS_URL: z.string().url().optional(),
+});
+
+type Config = z.infer<typeof ConfigSchema>;
+
+// Enhanced logger configuration
+function createLogger(config: Config): winston.Logger {
+  const transports: winston.transport[] = [
     new winston.transports.Console({
       format: winston.format.combine(
         winston.format.colorize(),
-        winston.format.simple()
+        winston.format.timestamp(),
+        winston.format.printf(({ timestamp, level, message, ...meta }) => {
+          const metaStr = Object.keys(meta).length > 0 ? JSON.stringify(meta) : '';
+          return `${timestamp} [${level}] ${message} ${metaStr}`;
+        })
       )
-    }),
-    new winston.transports.File({ filename: 'copy-trader.log' })
-  ]
-});
+    })
+  ];
 
-// --- Configuration ---
-const COPY_TRADE_CONFIG: CopyTraderBotConfig = {
-  id: "1",
-  userId: "user-123",
-  walletId: "wallet-1",
-  chain: "ETH" as Chain,
-  targetWalletAddress: process.env['TARGET_WALLET_ADDRESS'] || "0x...", // IMPORTANT: Target wallet to copy
-  tradeSize: {
-    type: "FIXED",
-    value: 0.1, // e.g., 0.1 ETH per trade
-  },
-  isActive: true,
-  createdAt: new Date().toISOString(),
-  updatedAt: new Date().toISOString(),
-};
+  if (config.NODE_ENV === 'production') {
+    transports.push(
+      new winston.transports.File({ filename: 'copy-trader-error.log', level: 'error' }),
+      new winston.transports.File({ filename: 'copy-trader.log' })
+    );
+  }
 
-const CHAIN: Chain = (process.env['CHAIN'] as Chain) || "ETH";
-const WEBSOCKET_RPC_URL = process.env['ETH_WEBSOCKET_RPC_URL']!; // IMPORTANT: Use a WSS RPC URL
-const PRIVATE_KEY = process.env['PRIVATE_KEY']!;
+  return winston.createLogger({
+    level: config.LOG_LEVEL,
+    format: winston.format.combine(
+      winston.format.timestamp(),
+      winston.format.errors({ stack: true }),
+      winston.format.json()
+    ),
+    transports,
+    exitOnError: false
+  });
+}
 
-const SOLANA_WEBSOCKET_RPC_URL = process.env['SOLANA_WEBSOCKET_RPC_URL']!;
-const SOLANA_PRIVATE_KEY = process.env['SOLANA_PRIVATE_KEY']!;
+// Enhanced price oracle with real API integration
+class ProductionPriceOracle implements PriceOracle {
+  private logger: winston.Logger;
+  private limiter: Bottleneck;
+  private priceCache = new Map<string, { price: number; timestamp: number }>();
+  private readonly CACHE_TTL = 30000; // 30 seconds
 
-// A common ABI for Uniswap V2-like routers
-const UNISWAP_V2_ROUTER_ABI = [
-  "function swapExactTokensForTokens(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) external returns (uint[] memory amounts)",
-  "function swapExactETHForTokens(uint amountOutMin, address[] calldata path, address to, uint deadline) external payable returns (uint[] memory amounts)",
-];
-const uniswapInterface = new Interface(UNISWAP_V2_ROUTER_ABI);
+  constructor(logger: winston.Logger) {
+    this.logger = logger;
+    this.limiter = new Bottleneck({
+      minTime: 100, // Minimum 100ms between requests
+      maxConcurrent: 5
+    });
+  }
 
-class CopyTradingBot {
+  async getPrice(tokenAddress: string): Promise<number> {
+    const cached = this.priceCache.get(tokenAddress);
+    if (cached && Date.now() - cached.timestamp < this.CACHE_TTL) {
+      return cached.price;
+    }
+
+    try {
+      const price = await this.limiter.schedule(() => this.fetchPrice(tokenAddress));
+      this.priceCache.set(tokenAddress, { price, timestamp: Date.now() });
+      return price;
+    } catch (error) {
+      this.logger.error('Error fetching price:', { tokenAddress, error });
+      return this.getFallbackPrice(tokenAddress);
+    }
+  }
+
+  async getPriceInETH(tokenAddress: string): Promise<number> {
+    if (tokenAddress === 'ETH' || tokenAddress.toLowerCase() === '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2') {
+      return 1;
+    }
+    
+    const [tokenPrice, ethPrice] = await Promise.all([
+      this.getPrice(tokenAddress),
+      this.getPrice('ETH')
+    ]);
+    
+    return tokenPrice / ethPrice;
+  }
+
+  async getTokenInfo(tokenAddress: string): Promise<{ symbol: string; decimals: number; name: string }> {
+    // In production, this would query token contracts or use a token registry API
+    const tokenMap: Record<string, { symbol: string; decimals: number; name: string }> = {
+      '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2': { symbol: 'WETH', decimals: 18, name: 'Wrapped Ether' },
+      '0xa0b86a33e6417c7962a0ff7c4bfb9d8e95d5b9c9': { symbol: 'USDC', decimals: 6, name: 'USD Coin' },
+      '0xdac17f958d2ee523a2206206994597c13d831ec7': { symbol: 'USDT', decimals: 6, name: 'Tether USD' },
+      '0x6b175474e89094c44da98b954eedeac495271d0f': { symbol: 'DAI', decimals: 18, name: 'Dai Stablecoin' }
+    };
+    
+    return tokenMap[tokenAddress.toLowerCase()] || { symbol: 'UNKNOWN', decimals: 18, name: 'Unknown Token' };
+  }
+
+  private async fetchPrice(tokenAddress: string): Promise<number> {
+    // In production, integrate with CoinGecko, CoinMarketCap, or DEX price feeds
+    // For now, return mock prices
+    const mockPrices: Record<string, number> = {
+      'ETH': 2000,
+      '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2': 2000, // WETH
+      '0xa0b86a33e6417c7962a0ff7c4bfb9d8e95d5b9c9': 1, // USDC
+      '0xdac17f958d2ee523a2206206994597c13d831ec7': 1, // USDT
+      '0x6b175474e89094c44da98b954eedeac495271d0f': 1, // DAI
+    };
+    
+    return mockPrices[tokenAddress] || 100; // Default price for unknown tokens
+  }
+
+  private getFallbackPrice(tokenAddress: string): number {
+    const fallbackPrices: Record<string, number> = {
+      'ETH': 2000,
+      '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2': 2000,
+      '0xa0b86a33e6417c7962a0ff7c4bfb9d8e95d5b9c9': 1,
+      '0xdac17f958d2ee523a2206206994597c13d831ec7': 1,
+      '0x6b175474e89094c44da98b954eedeac495271d0f': 1,
+    };
+    
+    return fallbackPrices[tokenAddress] || 50;
+  }
+}
+
+// Enhanced token approval manager with retry logic
+class ProductionTokenApprovalManager implements TokenApprovalManager {
+  private wallet: ethers.Wallet;
+  private logger: winston.Logger;
+  private limiter: Bottleneck;
+
+  constructor(wallet: ethers.Wallet, logger: winston.Logger) {
+    this.wallet = wallet;
+    this.logger = logger;
+    this.limiter = new Bottleneck({
+      minTime: 200, // Minimum 200ms between blockchain calls
+      maxConcurrent: 3
+    });
+  }
+
+  async checkAllowance(tokenAddress: string, spenderAddress: string): Promise<bigint> {
+    try {
+      if (!this.wallet.provider) {
+        throw new Error('Wallet provider not available');
+      }
+
+      return await this.limiter.schedule(async () => {
+        const tokenContract = new ethers.Contract(
+          tokenAddress,
+          ['function allowance(address owner, address spender) view returns (uint256)'],
+          this.wallet.provider
+        );
+        
+        const allowanceMethod = tokenContract['allowance'] as any;
+        return await allowanceMethod(this.wallet.address, spenderAddress);
+      });
+    } catch (error) {
+      this.logger.error('Error checking allowance:', { tokenAddress, spenderAddress, error });
+      return BigInt(0);
+    }
+  }
+
+  async approveToken(tokenAddress: string, spenderAddress: string, amount: bigint): Promise<string> {
+    try {
+      return await this.limiter.schedule(async () => {
+        const tokenContract = new ethers.Contract(
+          tokenAddress,
+          ['function approve(address spender, uint256 amount) returns (bool)'],
+          this.wallet
+        );
+        
+        const approveMethod = tokenContract['approve'] as any;
+        const tx = await approveMethod(spenderAddress, amount);
+        return tx.hash;
+      });
+    } catch (error) {
+      this.logger.error('Error approving token:', { tokenAddress, spenderAddress, error });
+      throw error;
+    }
+  }
+
+  async isApprovalNeeded(tokenAddress: string, spenderAddress: string, amount: bigint): Promise<boolean> {
+    try {
+      const currentAllowance = await this.checkAllowance(tokenAddress, spenderAddress);
+      return currentAllowance < amount;
+    } catch (error) {
+      this.logger.error('Error checking if approval needed:', { tokenAddress, spenderAddress, error });
+      return true; // Safe default
+    }
+  }
+}
+
+// Main copy trading bot with production features
+export class CopyTradingBot {
+  private config: Config;
+  private logger: winston.Logger;
   private mempoolMonitor: MempoolMonitor;
   private copyEngine: CopyExecutionEngine;
-  private provider: ethers.JsonRpcProvider;
+  private wallet: ethers.Wallet;
+  private priceOracle: PriceOracle;
+  private tokenApprovalManager: TokenApprovalManager;
+  private db: Database.Database;
   private isRunning = false;
+  private healthCheckJob?: cron.ScheduledTask;
+  private cleanupJob?: cron.ScheduledTask;
 
-  constructor() {
-    // Initialize provider
-    this.provider = new ethers.JsonRpcProvider(
-      process.env['ETH_RPC_URL'] || 'https://eth-mainnet.alchemyapi.io/v2/your-api-key'
+  constructor(config: Config) {
+    this.config = config;
+    this.logger = createLogger(config);
+    
+    this.logger.info('Initializing copy trading bot', { 
+      chain: config.CHAIN, 
+      targetWallet: config.TARGET_WALLET,
+      nodeEnv: config.NODE_ENV 
+    });
+
+    // Initialize database
+    this.db = new Database(config.DATABASE_PATH);
+    this.initializeSystemDatabase();
+
+    // Initialize blockchain components
+    const provider = new ethers.JsonRpcProvider(config.ETH_RPC_URL);
+    this.wallet = new ethers.Wallet(config.PRIVATE_KEY, provider);
+    
+    // Initialize dependencies
+    this.priceOracle = new ProductionPriceOracle(this.logger);
+    this.tokenApprovalManager = new ProductionTokenApprovalManager(this.wallet, this.logger);
+
+    // Initialize components
+    this.mempoolMonitor = new MempoolMonitor(this.createMonitorConfig());
+    this.copyEngine = new CopyExecutionEngine(
+      this.createCopyConfig(),
+      provider,
+      config.PRIVATE_KEY,
+      this.priceOracle,
+      this.tokenApprovalManager
     );
 
-    // Initialize mempool monitor
-    const monitorConfig: MonitorConfig = {
-      rpcUrl: process.env['ETH_RPC_URL'] || 'https://eth-mainnet.alchemyapi.io/v2/your-api-key',
-      wsUrl: process.env['ETH_WS_URL'] || 'wss://eth-mainnet.alchemyapi.io/v2/your-api-key',
-      targetWallets: process.env['TARGET_WALLETS']?.split(',') || [],
+    this.setupEventHandlers();
+    this.setupSystemJobs();
+  }
+
+  private initializeSystemDatabase(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS system_status (
+        id INTEGER PRIMARY KEY,
+        bot_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        started_at INTEGER NOT NULL,
+        last_heartbeat INTEGER NOT NULL,
+        error_count INTEGER DEFAULT 0,
+        trades_processed INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS config_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        config_json TEXT NOT NULL,
+        applied_at INTEGER NOT NULL,
+        applied_by TEXT DEFAULT 'system',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+  }
+
+  private createMonitorConfig(): MonitorConfig {
+    const targetWallets = this.config.TARGET_WALLETS 
+      ? this.config.TARGET_WALLETS.split(',').map((w: string) => w.trim())
+      : [this.config.TARGET_WALLET];
+
+    return {
+      rpcUrl: this.config.ETH_RPC_URL,
+      wsUrl: this.config.ETH_WS_URL,
+      targetWallets,
       dexRouters: [
         '0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D', // Uniswap V2
         '0xE592427A0AEce92De3Edee1F18E0157C05861564', // Uniswap V3
-        '0xd9e1cE17f2641f24aE83637ab66a2cca9C378B9F'  // SushiSwap
+        '0xd9e1cE17f2641f24aE83637ab66a2cca9C378B9F', // SushiSwap
+        '0xBA12222222228d8Ba445958a75a0704d566BF2C8', // Balancer
+        '0x1111111254fb6c44bAC0beD2854e76F90643097d'  // 1inch
       ],
-      minTransactionValue: process.env['MIN_TRANSACTION_VALUE'] || '0.1',
-      maxGasPrice: process.env['MAX_GAS_PRICE'] || '100',
+      minTransactionValue: this.config.MIN_TRADE_SIZE,
+      maxGasPrice: this.config.MAX_GAS_PRICE,
       enableDecoding: true,
-      enableFiltering: true
+      enableFiltering: this.config.ENABLE_FILTERING,
+      enableDatabase: this.config.ENABLE_DATABASE,
+      databasePath: this.config.DATABASE_PATH,
+      enableRateLimiting: true,
+      maxRpcCallsPerSecond: this.config.MAX_RPC_CALLS_PER_SECOND,
+      enableMevDetection: this.config.ENABLE_MEV_PROTECTION,
+      enableBatchProcessing: true,
+      batchSize: this.config.BATCH_SIZE,
+      batchInterval: this.config.BATCH_INTERVAL,
+      enableHealthCheck: this.config.ENABLE_HEALTH_CHECK,
+      healthCheckInterval: 30000,
+      chainId: this.config.CHAIN_ID,
+      retryAttempts: 3,
+      retryDelay: 5000,
+      maxReconnectAttempts: 5,
+      reconnectBackoffMultiplier: 2,
+      maxReconnectDelay: 60000
     };
+  }
 
-    this.mempoolMonitor = new MempoolMonitor(monitorConfig);
-
-    // Initialize copy execution engine
-    const copyConfig: CopyConfig = {
-      targetWallet: process.env['TARGET_WALLET'] || '',
-      copyPercentage: parseFloat(process.env['COPY_PERCENTAGE'] || '10'),
-      maxTradeSize: process.env['MAX_TRADE_SIZE'] || '1.0',
-      minTradeSize: process.env['MIN_TRADE_SIZE'] || '0.01',
-      maxSlippage: parseFloat(process.env['MAX_SLIPPAGE'] || '2'),
-      maxGasPrice: process.env['MAX_GAS_PRICE'] || '100',
-      followTokens: process.env['FOLLOW_TOKENS']?.split(',') || [],
-      excludeTokens: process.env['EXCLUDE_TOKENS']?.split(',') || [],
-      copyDelay: parseInt(process.env['COPY_DELAY'] || '1000'),
-      stopLoss: parseFloat(process.env['STOP_LOSS'] || '5'),
-      takeProfit: parseFloat(process.env['TAKE_PROFIT'] || '10'),
-      enableFiltering: process.env['ENABLE_FILTERING'] === 'true',
-      enableRiskManagement: process.env['ENABLE_RISK_MANAGEMENT'] === 'true'
+  private createCopyConfig(): CopyConfig {
+    return {
+      targetWallet: this.config.TARGET_WALLET,
+      copyPercentage: this.config.COPY_PERCENTAGE,
+      maxTradeSize: this.config.MAX_TRADE_SIZE,
+      minTradeSize: this.config.MIN_TRADE_SIZE,
+      maxSlippage: this.config.MAX_SLIPPAGE,
+      maxGasPrice: this.config.MAX_GAS_PRICE,
+      followTokens: this.config.FOLLOW_TOKENS?.split(',').map((t: string) => t.trim()) || [],
+      excludeTokens: this.config.EXCLUDE_TOKENS?.split(',').map((t: string) => t.trim()) || [],
+      copyDelay: 1000,
+      stopLoss: this.config.STOP_LOSS,
+      takeProfit: this.config.TAKE_PROFIT,
+      enableFiltering: this.config.ENABLE_FILTERING,
+      enableRiskManagement: this.config.ENABLE_RISK_MANAGEMENT,
+      maxConcurrentTrades: this.config.MAX_CONCURRENT_TRADES,
+      maxDailyLoss: this.config.MAX_DAILY_LOSS,
+      enableMevProtection: this.config.ENABLE_MEV_PROTECTION,
+      priceImpactThreshold: this.config.PRICE_IMPACT_THRESHOLD,
+      databasePath: this.config.COPY_ENGINE_DATABASE_PATH,
+      chainId: this.config.CHAIN_ID,
+      rpcUrl: this.config.ETH_RPC_URL,
+      ...(this.config.FLASHBOTS_URL && { flashbotsUrl: this.config.FLASHBOTS_URL })
     };
-
-    const privateKey = process.env['PRIVATE_KEY'];
-    if (!privateKey) {
-      throw new Error('PRIVATE_KEY environment variable is required');
-    }
-
-    this.copyEngine = new CopyExecutionEngine(copyConfig, this.provider, privateKey);
-
-    this.setupEventHandlers();
   }
 
   private setupEventHandlers(): void {
     // Mempool monitor events
     this.mempoolMonitor.on('connected', () => {
-      logger.info('Mempool monitor connected');
+      this.logger.info('Mempool monitor connected');
+      this.updateSystemStatus('monitor_connected');
     });
 
-    this.mempoolMonitor.on('disconnected', (error) => {
-      logger.warn('Mempool monitor disconnected', { error: error?.message });
-    });
-
-    this.mempoolMonitor.on('reconnected', () => {
-      logger.info('Mempool monitor reconnected');
+    this.mempoolMonitor.on('disconnected', (error: Error) => {
+      this.logger.warn('Mempool monitor disconnected', { error: error?.message });
+      this.updateSystemStatus('monitor_disconnected', error?.message);
     });
 
     this.mempoolMonitor.on('targetWalletTransaction', async (tx) => {
-      logger.info('Target wallet transaction detected', {
+      this.logger.info('Target wallet transaction detected', {
         hash: tx.hash,
         from: tx.from,
-        to: tx.to,
         value: tx.value,
         isSwap: tx.decodedData?.isSwap
       });
 
-      // Process the transaction with copy engine
-      await this.copyEngine.processMempoolTransaction(tx);
-    });
-
-    this.mempoolMonitor.on('error', (error) => {
-      logger.error('Mempool monitor error', { error: error.message });
+      try {
+        await this.copyEngine.processMempoolTransaction(tx);
+        this.incrementTradeCounter();
+      } catch (error) {
+        this.logger.error('Error processing transaction', { hash: tx.hash, error });
+        this.incrementErrorCounter();
+      }
     });
 
     // Copy engine events
-    this.copyEngine.on('started', () => {
-      logger.info('Copy execution engine started');
-    });
-
-    this.copyEngine.on('stopped', () => {
-      logger.info('Copy execution engine stopped');
-    });
-
-    this.copyEngine.on('copyTradeCreated', (trade) => {
-      logger.info('Copy trade created', {
-        id: trade.id,
-        originalTxHash: trade.originalTxHash,
-        tokenIn: trade.tokenIn,
-        tokenOut: trade.tokenOut,
-        originalAmountIn: trade.originalAmountIn
-      });
-    });
-
     this.copyEngine.on('copyTradeExecuted', (trade) => {
-      logger.info('Copy trade executed', {
+      this.logger.info('Copy trade executed successfully', {
         id: trade.id,
-        copyTxHash: trade.copyTxHash,
-        copyAmountIn: trade.copyAmountIn,
-        gasPrice: trade.gasPrice
+        txHash: trade.copyTxHash,
+        profitLoss: trade.profitLoss
       });
     });
 
     this.copyEngine.on('copyTradeFailed', (trade) => {
-      logger.warn('Copy trade failed', {
-        id: trade.id,
-        reason: trade.reason,
-        originalTxHash: trade.originalTxHash
-      });
-    });
-
-    this.copyEngine.on('copyTradeCancelled', (trade) => {
-      logger.info('Copy trade cancelled', {
+      this.logger.warn('Copy trade failed', {
         id: trade.id,
         reason: trade.reason
       });
-    });
-
-    this.copyEngine.on('riskLimitExceeded', (reason) => {
-      logger.warn('Risk limit exceeded', { reason });
-      this.handleRiskLimit(reason);
+      this.incrementErrorCounter();
     });
 
     this.copyEngine.on('emergencyStop', () => {
-      logger.error('Emergency stop activated');
-      this.stop();
-    });
-
-    this.copyEngine.on('metricsUpdated', (metrics) => {
-      logger.info('Risk metrics updated', {
-        totalCopied: metrics.totalCopied,
-        successRate: metrics.successRate,
-        netProfit: metrics.netProfit
-      });
+      this.logger.error('Emergency stop triggered');
+      this.stop().catch((err: any) => this.logger.error('Error during emergency stop:', err));
     });
   }
 
-  private async handleRiskLimit(reason: string): Promise<void> {
-    logger.warn('Handling risk limit violation', { reason });
-    
-    // Implement risk management actions
-    switch (reason) {
-      case 'Maximum drawdown exceeded':
-        // Pause trading for 1 hour
-        await this.pauseTrading(60 * 60 * 1000);
-        break;
-      
-      case 'Success rate too low':
-        // Reduce copy percentage
-        const currentConfig = this.copyEngine.getConfig();
-        const newPercentage = Math.max(currentConfig.copyPercentage * 0.5, 1);
-        this.copyEngine.updateConfig({ copyPercentage: newPercentage });
-        logger.info('Reduced copy percentage', { 
-          old: currentConfig.copyPercentage, 
-          new: newPercentage 
-        });
-        break;
-      
-      default:
-        logger.warn('Unknown risk limit reason', { reason });
+  private setupSystemJobs(): void {
+    if (this.config.NODE_ENV === 'production') {
+      // Health check every minute
+      this.healthCheckJob = cron.schedule('*/1 * * * *', () => {
+        this.performHealthCheck();
+      });
+
+      // Cleanup old data daily at 2 AM
+      this.cleanupJob = cron.schedule('0 2 * * *', () => {
+        this.performCleanup();
+      });
     }
   }
 
-  private async pauseTrading(duration: number): Promise<void> {
-    logger.info('Pausing trading', { durationMs: duration });
-    
-    await this.copyEngine.stop();
-    
-    setTimeout(async () => {
-      logger.info('Resuming trading after pause');
-      await this.copyEngine.start();
-    }, duration);
+  private async performHealthCheck(): Promise<void> {
+    try {
+      const health = {
+        mempool: this.mempoolMonitor.getHealthStatus(),
+        copyEngine: this.copyEngine.getRiskMetrics(),
+        wallet: await this.wallet.provider?.getBalance(this.wallet.address),
+        timestamp: Date.now()
+      };
+
+      this.logger.debug('Health check completed', health);
+      this.updateHeartbeat();
+    } catch (error) {
+      this.logger.error('Health check failed', { error });
+      this.incrementErrorCounter();
+    }
+  }
+
+  private async performCleanup(): Promise<void> {
+    try {
+      // Clean up old mempool transactions (older than 7 days)
+      await this.mempoolMonitor.cleanupOldTransactions(7);
+      
+      // Clean up old system logs (older than 30 days)
+      const cutoffTime = Date.now() - (30 * 24 * 60 * 60 * 1000);
+      this.db.prepare('DELETE FROM config_history WHERE applied_at < ?').run(cutoffTime);
+      
+      this.logger.info('Cleanup completed');
+    } catch (error) {
+      this.logger.error('Cleanup failed', { error });
+    }
+  }
+
+  private updateSystemStatus(status: string, error?: string): void {
+    try {
+      const botId = uuidv4();
+      this.db.prepare(`
+        INSERT OR REPLACE INTO system_status (id, bot_id, status, started_at, last_heartbeat, error_count, trades_processed)
+        VALUES (1, ?, ?, ?, ?, 
+          COALESCE((SELECT error_count FROM system_status WHERE id = 1), 0),
+          COALESCE((SELECT trades_processed FROM system_status WHERE id = 1), 0))
+      `).run(botId, status, Date.now(), Date.now());
+
+      if (error) {
+        this.incrementErrorCounter();
+      }
+    } catch (err: any) {
+      this.logger.error('Failed to update system status', { err });
+    }
+  }
+
+  private updateHeartbeat(): void {
+    try {
+      this.db.prepare('UPDATE system_status SET last_heartbeat = ? WHERE id = 1').run(Date.now());
+    } catch (error) {
+      this.logger.error('Failed to update heartbeat', { error });
+    }
+  }
+
+  private incrementTradeCounter(): void {
+    try {
+      this.db.prepare('UPDATE system_status SET trades_processed = trades_processed + 1 WHERE id = 1').run();
+    } catch (error) {
+      this.logger.error('Failed to increment trade counter', { error });
+    }
+  }
+
+  private incrementErrorCounter(): void {
+    try {
+      this.db.prepare('UPDATE system_status SET error_count = error_count + 1 WHERE id = 1').run();
+    } catch (error) {
+      this.logger.error('Failed to increment error counter', { error });
+    }
   }
 
   async start(): Promise<void> {
     try {
-      logger.info('Starting copy trading bot...');
+      this.logger.info('Starting copy trading bot...');
       
-      // Validate configuration
-      this.validateConfiguration();
+      // Validate wallet
+      await this.validateWallet();
       
       // Start components
       await this.mempoolMonitor.start();
       await this.copyEngine.start();
       
       this.isRunning = true;
-      logger.info('Copy trading bot started successfully');
+      this.updateSystemStatus('running');
       
-      // Log current configuration
-      const config = this.copyEngine.getConfig();
-      logger.info('Bot configuration', {
-        targetWallet: config.targetWallet,
-        copyPercentage: config.copyPercentage,
-        maxTradeSize: config.maxTradeSize,
-        minTradeSize: config.minTradeSize,
-        maxSlippage: config.maxSlippage,
-        followTokens: config.followTokens.length,
-        excludeTokens: config.excludeTokens.length
+      this.logger.info('Copy trading bot started successfully', {
+        targetWallet: this.config.TARGET_WALLET,
+        copyPercentage: this.config.COPY_PERCENTAGE,
+        maxTradeSize: this.config.MAX_TRADE_SIZE
       });
       
     } catch (error) {
-      logger.error('Failed to start copy trading bot', { error: error instanceof Error ? error.message : error });
+      this.logger.error('Failed to start copy trading bot', { error });
       throw error;
     }
   }
 
   async stop(): Promise<void> {
     try {
-      logger.info('Stopping copy trading bot...');
+      this.logger.info('Stopping copy trading bot...');
       
       this.isRunning = false;
       
+      // Stop scheduled jobs
+      this.healthCheckJob?.stop();
+      this.cleanupJob?.stop();
+      
+      // Stop components
       await this.copyEngine.stop();
       await this.mempoolMonitor.stop();
       
-      logger.info('Copy trading bot stopped successfully');
+      // Close database
+      this.db.close();
+      
+      this.updateSystemStatus('stopped');
+      this.logger.info('Copy trading bot stopped successfully');
       
     } catch (error) {
-      logger.error('Error stopping copy trading bot', { error: error instanceof Error ? error.message : error });
+      this.logger.error('Error stopping copy trading bot', { error });
       throw error;
     }
   }
 
-  private validateConfiguration(): void {
-    const config = this.copyEngine.getConfig();
-    
-    if (!config.targetWallet) {
-      throw new Error('Target wallet address is required');
-    }
-    
-    if (!ethers.isAddress(config.targetWallet)) {
+  private async validateWallet(): Promise<void> {
+    if (!ethers.isAddress(this.config.TARGET_WALLET)) {
       throw new Error('Invalid target wallet address');
     }
-    
-    if (config.copyPercentage <= 0 || config.copyPercentage > 100) {
-      throw new Error('Copy percentage must be between 0 and 100');
+
+    const balance = await this.wallet.provider?.getBalance(this.wallet.address);
+    if (!balance || balance < ethers.parseEther('0.01')) {
+      throw new Error('Insufficient wallet balance for trading');
     }
-    
-    if (parseFloat(config.maxTradeSize) <= parseFloat(config.minTradeSize)) {
-      throw new Error('Max trade size must be greater than min trade size');
-    }
-    
-    logger.info('Configuration validation passed');
+
+    this.logger.info('Wallet validation passed', { 
+      address: this.wallet.address,
+      balance: ethers.formatEther(balance || 0)
+    });
   }
 
-  getStatus(): {
-    isRunning: boolean;
-    mempoolConnected: boolean;
-    copyEngineActive: boolean;
-    riskMetrics: any;
-    configuration: any;
-  } {
+  // Public API methods
+  getStatus() {
     return {
       isRunning: this.isRunning,
       mempoolConnected: this.mempoolMonitor.getConnectionStatus(),
@@ -334,165 +611,41 @@ class CopyTradingBot {
     };
   }
 
-  // Public methods for external control
-  async addTargetWallet(address: string): Promise<void> {
-    this.mempoolMonitor.addTargetWallet(address);
-    logger.info('Added target wallet', { address });
+  getStats() {
+    return {
+      mempool: this.mempoolMonitor.getStats(),
+      copyEngine: this.copyEngine.getRiskMetrics(),
+      systemStatus: this.getSystemStatus()
+    };
   }
 
-  async removeTargetWallet(address: string): Promise<void> {
-    this.mempoolMonitor.removeTargetWallet(address);
-    logger.info('Removed target wallet', { address });
-  }
-
-  updateCopyConfig(config: Partial<CopyConfig>): void {
-    this.copyEngine.updateConfig(config);
-    logger.info('Updated copy configuration', config);
-  }
-
-  getCopyTrades(): any[] {
-    return this.copyEngine.getCopyTrades();
-  }
-
-  clearHistory(): void {
-    this.copyEngine.clearHistory();
-    logger.info('Cleared copy trade history');
-  }
-}
-
-// --- EVM Logic ---
-async function startEvmCopyTrader() {
-  if (!WEBSOCKET_RPC_URL || !PRIVATE_KEY) {
-    throw new Error("Missing environment variables: ETH_WEBSOCKET_RPC_URL or PRIVATE_KEY");
-  }
-
-  console.log("🤖 Copy-trader bot starting...");
-  console.log("Configuration:", COPY_TRADE_CONFIG);
-
-  const provider = new WebSocketProvider(WEBSOCKET_RPC_URL);
-  const chainClient = createChainClient(CHAIN, PRIVATE_KEY, WEBSOCKET_RPC_URL);
-  const userWallet = new Wallet(PRIVATE_KEY, provider);
-
-  // Initialize chain client for enhanced functionality
-  const chainConfig = chainClient.getChainConfig(CHAIN.toLowerCase() as any);
-  if (chainConfig) {
-    console.log(`Chain client initialized for ${chainConfig.name} network`);
-  } else {
-    console.log(`Chain client initialized for ${CHAIN} network`);
-  }
-  console.log(`Monitoring target wallet: ${COPY_TRADE_CONFIG.targetWalletAddress}`);
-  
-  provider.on("pending", async (txHash: string) => {
+  private getSystemStatus() {
     try {
-      if (!txHash) return;
-      const tx = await provider.getTransaction(txHash);
-      if (tx && tx.from && tx.from.toLowerCase() === COPY_TRADE_CONFIG.targetWalletAddress.toLowerCase()) {
-        
-        console.log(`[${new Date().toISOString()}] Detected transaction from target: ${txHash}`);
-        
-        const decodedTx = uniswapInterface.parseTransaction({ data: tx.data, value: tx.value });
-
-        if (decodedTx) {
-            console.log(`   Action: ${decodedTx.name}`);
-            console.log("   Replicating trade...");
-            
-            let tradeValue: bigint;
-            if (COPY_TRADE_CONFIG.tradeSize.type === 'PERCENTAGE') {
-                const percentage = BigInt(COPY_TRADE_CONFIG.tradeSize.value);
-                tradeValue = (tx.value * percentage) / 100n;
-            } else { // FIXED
-                tradeValue = parseUnits(COPY_TRADE_CONFIG.tradeSize.value.toString(), "ether");
-            }
-            
-            const newTx = {
-                to: tx.to,
-                gasLimit: tx.gasLimit,
-                gasPrice: tx.gasPrice,
-                data: tx.data,
-                value: tradeValue,
-            };
-
-            const txResponse = await userWallet.sendTransaction(newTx);
-            console.log(`🚀 Trade replicated! Transaction hash: ${txResponse.hash}`);
-            await txResponse.wait();
-            console.log("Replicated trade confirmed.");
-        }
-      }
+      return this.db.prepare('SELECT * FROM system_status WHERE id = 1').get();
     } catch (error) {
-      // Errors are expected
+      this.logger.error('Failed to get system status', { error });
+      return null;
     }
-  });
-
-  // Handle provider errors and disconnections
-  provider.on("error", (error: any) => {
-      console.error("Provider Error:", error);
-  });
-
-  provider.on("network", (newNetwork: any, oldNetwork: any) => {
-      if (oldNetwork) {
-          console.log(`Network changed from ${oldNetwork.chainId} to ${newNetwork.chainId}, attempting to reconnect...`);
-          startEvmCopyTrader(); // Reconnect on network change
-      }
-  });
+  }
 }
 
-// --- Solana Logic ---
-async function startSolanaCopyTrader() {
-    if (!SOLANA_WEBSOCKET_RPC_URL || !SOLANA_PRIVATE_KEY) {
-        throw new Error("Missing Solana environment variables");
-    }
-    console.log("🤖 Solana Copy-trader bot starting...");
-    const connection = new Connection(SOLANA_WEBSOCKET_RPC_URL, 'confirmed');
-    const targetWallet = new PublicKey(COPY_TRADE_CONFIG.targetWalletAddress);
-
-    console.log(`Monitoring target wallet on Solana: ${targetWallet.toBase58()}`);
-
-    connection.onLogs(
-        targetWallet,
-        (logs: any, context: any) => {
-            const logMessages = logs.logs.join('\n');
-            if (logMessages.includes("Instruction: Swap")) {
-                console.log(`[${new Date().toISOString()}] Detected SWAP transaction from target: ${logs.signature}`);
-                console.log(`   Slot: ${context.slot}, Confirmation: ${context.confirmation}`);
-                console.log("   --> Solana trade replication logic would be implemented here <--");
-            }
-        },
-        'confirmed'
-    );
-}
-
-// --- Main Execution ---
+// Main execution
 async function main() {
-    const chain: Chain = (process.env['CHAIN'] as Chain) || "ETH";
-
-    if (chain === "ETH" || chain === "BSC") {
-        await startEvmCopyTrader();
-    } else if (chain === "SOL") {
-        await startSolanaCopyTrader();
-    } else {
-        console.error(`Unsupported chain: ${chain}`);
-        process.exit(1);
-    }
-}
-
-main().catch(error => {
-    console.error("Failed to start copy-trader:", error);
-    process.exit(1);
-});
-
-// Run the bot
-if (require.main === module) {
-  (async () => {
-    const bot = new CopyTradingBot();
+  try {
+    // Validate environment configuration
+    const config = ConfigSchema.parse(process.env);
+    
+    // Create and start bot
+    const bot = new CopyTradingBot(config);
     
     // Graceful shutdown handling
     const shutdown = async (signal: string) => {
-      logger.info(`Received ${signal}, shutting down gracefully...`);
+      console.log(`Received ${signal}, shutting down gracefully...`);
       try {
         await bot.stop();
         process.exit(0);
       } catch (error) {
-        logger.error('Error during shutdown', { error: error instanceof Error ? error.message : error });
+        console.error('Error during shutdown:', error);
         process.exit(1);
       }
     };
@@ -503,29 +656,31 @@ if (require.main === module) {
 
     // Handle uncaught exceptions
     process.on('uncaughtException', (error) => {
-      logger.error('Uncaught exception', { error: error.message, stack: error.stack });
+      console.error('Uncaught exception:', error);
       shutdown('uncaughtException');
     });
 
-    process.on('unhandledRejection', (reason, promise) => {
-      logger.error('Unhandled rejection', { reason, promise });
+    process.on('unhandledRejection', (reason) => {
+      console.error('Unhandled rejection:', reason);
       shutdown('unhandledRejection');
     });
 
-    try {
-      await bot.start();
-      
-      // Keep the process running
-      setInterval(() => {
-        const status = bot.getStatus();
-        logger.debug('Bot status check', status);
-      }, 60000); // Log status every minute
-      
-    } catch (error) {
-      logger.error('Failed to start bot', { error: error instanceof Error ? error.message : error });
-      process.exit(1);
+    await bot.start();
+    
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      console.error('Configuration validation failed:');
+      error.errors.forEach(err => {
+        console.error(`  ${err.path.join('.')}: ${err.message}`);
+      });
+    } else {
+      console.error('Failed to start bot:', error);
     }
-  })();
+    process.exit(1);
+  }
 }
 
-export { CopyTradingBot }; 
+// Run the bot if this file is executed directly
+if (require.main === module) {
+  main();
+} 

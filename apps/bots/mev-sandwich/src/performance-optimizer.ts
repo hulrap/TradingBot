@@ -881,6 +881,27 @@ export class PerformanceOptimizer extends EventEmitter {
   }
 
   /**
+   * Get performance optimizer statistics and status
+   */
+  getStats(): {
+    isActive: boolean;
+    warmupComplete: boolean;
+    metricsCount: number;
+    performanceReports: number;
+    cacheStats: any;
+    config: PerformanceConfig;
+  } {
+    return {
+      isActive: this.warmupComplete,
+      warmupComplete: this.warmupComplete,
+      metricsCount: this.metrics.length,
+      performanceReports: this.performanceReports.length,
+      cacheStats: this.getCacheStats(),
+      config: this.config
+    };
+  }
+
+  /**
    * Cleanup resources
    */
   cleanup(): void {

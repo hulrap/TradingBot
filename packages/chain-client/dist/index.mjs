@@ -1,8 +1,10 @@
 import { EventEmitter } from 'events';
 import { ethers } from 'ethers';
-import axios2 from 'axios';
+import axios3 from 'axios';
 import WebSocket from 'ws';
 import winston from 'winston';
+import { Connection, PublicKey } from '@solana/web3.js';
+import NodeCache from 'node-cache';
 
 // Multi-chain RPC Infrastructure
 // Built with tsup
@@ -632,7 +634,7 @@ var RPCManager = class extends EventEmitter {
         cost: 0,
         successRate: 0
       });
-      const httpClient = axios2.create({
+      const httpClient = axios3.create({
         baseURL: provider.url,
         timeout: this.config.requestTimeout,
         headers: provider.apiKey ? {
@@ -872,7 +874,7 @@ var RPCManager = class extends EventEmitter {
       cost: 0,
       successRate: 0
     });
-    const httpClient = axios2.create({
+    const httpClient = axios3.create({
       baseURL: provider.url,
       timeout: this.config.requestTimeout,
       headers: provider.apiKey ? {
@@ -2002,7 +2004,7 @@ var DEXAggregator = class extends EventEmitter {
     };
     for (const [chain, url] of Object.entries(tokenListUrls)) {
       try {
-        const response = await axios2.get(url, { timeout: 1e4 });
+        const response = await axios3.get(url, { timeout: 1e4 });
         const tokenList = response.data.tokens || response.data;
         const formattedTokens = tokenList.filter((token) => token.chainId === this.getChainId(chain)).map((token) => ({
           address: token.address,
@@ -2151,7 +2153,7 @@ var DEXAggregator = class extends EventEmitter {
     if (request.userAddress) {
       params.append("fromAddress", request.userAddress);
     }
-    const response = await axios2.get(`${dex.apiUrl}/quote?${params}`, {
+    const response = await axios3.get(`${dex.apiUrl}/quote?${params}`, {
       headers: {
         "Authorization": `Bearer ${dex.apiKey}`,
         "Content-Type": "application/json"
@@ -2193,7 +2195,7 @@ var DEXAggregator = class extends EventEmitter {
       amount: request.amount,
       slippageBps: (request.slippage * 100).toString()
     });
-    const response = await axios2.get(`${dex.apiUrl}/quote?${params}`, {
+    const response = await axios3.get(`${dex.apiUrl}/quote?${params}`, {
       timeout: 1e4
     });
     const quote = response.data;
@@ -2441,6 +2443,902 @@ var DEXAggregator = class extends EventEmitter {
     this.logger.info("DEX Aggregator closed");
   }
 };
+var MempoolMonitor = class extends EventEmitter {
+  config;
+  providers = /* @__PURE__ */ new Map();
+  solanaConnection;
+  websockets = /* @__PURE__ */ new Map();
+  isMonitoring = false;
+  stats;
+  processingQueue = /* @__PURE__ */ new Map();
+  batchTimers = /* @__PURE__ */ new Map();
+  reconnectAttempts = /* @__PURE__ */ new Map();
+  constructor(config) {
+    super();
+    this.config = config;
+    this.stats = {
+      totalTransactions: 0,
+      filteredTransactions: 0,
+      processedTransactions: 0,
+      averageLatency: 0,
+      connectionStatus: {},
+      lastActivity: {}
+    };
+  }
+  /**
+   * Initialize providers for mempool monitoring
+   */
+  async initialize(providers) {
+    try {
+      for (const [chain, provider] of Object.entries(providers)) {
+        if (provider instanceof Connection) {
+          this.solanaConnection = provider;
+          this.stats.connectionStatus["solana"] = false;
+          this.stats.lastActivity["solana"] = 0;
+        } else {
+          this.providers.set(chain, provider);
+          this.stats.connectionStatus[chain] = false;
+          this.stats.lastActivity[chain] = 0;
+        }
+      }
+      console.log("Mempool monitor initialized for chains:", Object.keys(providers));
+      this.emit("initialized");
+    } catch (error) {
+      console.error("Failed to initialize mempool monitor:", error);
+      throw error;
+    }
+  }
+  /**
+   * Start monitoring mempool for all configured chains
+   */
+  async startMonitoring() {
+    if (!this.config.enableRealtimeSubscription) {
+      console.log("Real-time mempool monitoring is disabled");
+      return;
+    }
+    try {
+      this.isMonitoring = true;
+      const monitoringPromises = [];
+      for (const [chain, provider] of this.providers) {
+        monitoringPromises.push(this.startChainMonitoring(chain, provider));
+      }
+      if (this.solanaConnection) {
+        monitoringPromises.push(this.startSolanaMonitoring());
+      }
+      await Promise.all(monitoringPromises);
+      this.initializeBatchProcessing();
+      this.startHeartbeatMonitoring();
+      console.log("Mempool monitoring started for all chains");
+      this.emit("monitoringStarted");
+    } catch (error) {
+      console.error("Failed to start mempool monitoring:", error);
+      this.emit("error", error);
+      throw error;
+    }
+  }
+  /**
+   * Start monitoring for a specific EVM chain (Ethereum/BSC)
+   */
+  async startChainMonitoring(chain, provider) {
+    try {
+      provider.on("pending", (txHash) => {
+        this.handlePendingTransaction(txHash, chain);
+      });
+      await this.setupWebSocket(chain);
+      this.stats.connectionStatus[chain] = true;
+      console.log(`${chain} mempool monitoring started`);
+    } catch (error) {
+      console.error(`Failed to start ${chain} monitoring:`, error);
+      this.scheduleReconnect(chain);
+      throw error;
+    }
+  }
+  /**
+   * Start Solana mempool monitoring
+   */
+  async startSolanaMonitoring() {
+    if (!this.solanaConnection)
+      return;
+    try {
+      const dexPrograms = [
+        "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
+        // Raydium
+        "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+        // Orca Whirlpool
+        "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
+        // Jupiter
+      ];
+      for (const programId of dexPrograms) {
+        this.solanaConnection.onProgramAccountChange(
+          new PublicKey(programId),
+          (accountInfo, context) => {
+            this.handleSolanaProgramChange(accountInfo, context, programId);
+          },
+          "processed"
+        );
+      }
+      this.stats.connectionStatus["solana"] = true;
+      console.log("Solana mempool monitoring started");
+    } catch (error) {
+      console.error("Failed to start Solana monitoring:", error);
+      this.scheduleReconnect("solana");
+      throw error;
+    }
+  }
+  /**
+   * Set up WebSocket connection for a chain
+   */
+  async setupWebSocket(chain) {
+    const wsUrlEnvVar = `${chain.toUpperCase()}_WS_URL`;
+    const wsUrl = process.env[wsUrlEnvVar];
+    if (!wsUrl) {
+      console.warn(`No WebSocket URL configured for ${chain} (${wsUrlEnvVar})`);
+      return;
+    }
+    const ws = new WebSocket(wsUrl);
+    this.websockets.set(chain, ws);
+    ws.on("open", () => {
+      console.log(`${chain} WebSocket connected`);
+      const subscription = {
+        jsonrpc: "2.0",
+        method: "eth_subscribe",
+        params: ["newPendingTransactions", true],
+        id: 1
+      };
+      ws.send(JSON.stringify(subscription));
+    });
+    ws.on("message", (data) => {
+      try {
+        const message = JSON.parse(data.toString());
+        if (message.params && message.params.result) {
+          this.processPendingTransaction(message.params.result, chain);
+        }
+      } catch (error) {
+        console.warn(`Failed to parse ${chain} WebSocket message:`, error);
+      }
+    });
+    ws.on("close", () => {
+      console.log(`${chain} WebSocket disconnected`);
+      this.stats.connectionStatus[chain] = false;
+      this.scheduleReconnect(chain);
+    });
+    ws.on("error", (error) => {
+      console.error(`${chain} WebSocket error:`, error);
+      this.stats.connectionStatus[chain] = false;
+    });
+  }
+  /**
+   * Handle pending transaction from provider
+   */
+  async handlePendingTransaction(txHash, chain) {
+    try {
+      const provider = this.providers.get(chain);
+      if (!provider)
+        return;
+      const tx = await provider.getTransaction(txHash);
+      if (!tx)
+        return;
+      await this.processPendingTransaction(tx, chain);
+    } catch (error) {
+      console.warn(`Failed to process pending transaction ${txHash}:`, error);
+    }
+  }
+  /**
+   * Process pending transaction and apply filters
+   */
+  async processPendingTransaction(tx, chain) {
+    try {
+      this.stats.totalTransactions++;
+      this.stats.lastActivity[chain] = Date.now();
+      const pendingTx = {
+        hash: tx.hash,
+        from: tx.from,
+        to: tx.to,
+        value: tx.value?.toString() || "0",
+        gasPrice: tx.gasPrice?.toString() || "0",
+        gasLimit: tx.gasLimit?.toString() || "0",
+        data: tx.data || "0x",
+        nonce: tx.nonce || 0,
+        chain,
+        timestamp: Date.now(),
+        estimatedValue: await this.estimateTransactionValue(tx, chain),
+        blockNumber: tx.blockNumber
+      };
+      if (!this.shouldProcessTransaction(pendingTx)) {
+        return;
+      }
+      this.stats.filteredTransactions++;
+      this.addToProcessingQueue(pendingTx);
+    } catch (error) {
+      console.warn("Failed to process pending transaction:", error);
+    }
+  }
+  /**
+   * Handle Solana program account changes
+   */
+  handleSolanaProgramChange(accountInfo, context, programId) {
+    try {
+      this.stats.totalTransactions++;
+      this.stats.lastActivity["solana"] = Date.now();
+      this.emit("solanaProgramChange", {
+        accountInfo,
+        context,
+        programId,
+        timestamp: Date.now()
+      });
+    } catch (error) {
+      console.warn("Failed to handle Solana program change:", error);
+    }
+  }
+  /**
+   * Check if transaction should be processed based on filters
+   */
+  shouldProcessTransaction(tx) {
+    const filters = this.config.subscriptionFilters;
+    const minValue = parseFloat(filters.minTradeValue);
+    if (tx.estimatedValue < minValue) {
+      return false;
+    }
+    const gasPrice = parseFloat(tx.gasPrice) / 1e9;
+    const maxGasPrice = parseFloat(filters.maxGasPrice);
+    if (gasPrice > maxGasPrice) {
+      return false;
+    }
+    if (filters.blacklistedTokens.includes(tx.to?.toLowerCase() || "")) {
+      return false;
+    }
+    if (filters.whitelistedDexes.length > 0) {
+      if (!this.isDexTransaction(tx, filters.whitelistedDexes)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  /**
+   * Check if transaction is a DEX transaction
+   */
+  isDexTransaction(tx, whitelistedDexes) {
+    if (!tx.to)
+      return false;
+    const dexRouters = {
+      "uniswap-v2": "0x7a250d5630b4cf539739df2c5dacb4c659f2488d",
+      "uniswap-v3": "0xe592427a0aece92de3edee1f18e0157c05861564",
+      "pancakeswap": "0x10ed43c718714eb63d5aa57b78b54704e256024e",
+      "sushiswap": "0x1b02da8cb0d097eb8d57a175b88c7d8b47997506"
+    };
+    const txToLower = tx.to.toLowerCase();
+    for (const dexName of whitelistedDexes) {
+      const routerAddress = dexRouters[dexName];
+      if (routerAddress && routerAddress.toLowerCase() === txToLower) {
+        return true;
+      }
+    }
+    return false;
+  }
+  /**
+   * Estimate transaction value in USD
+   */
+  async estimateTransactionValue(tx, chain) {
+    try {
+      const value = parseFloat(tx.value || "0");
+      const conversionRates = {
+        ethereum: 1800,
+        // ETH price
+        bsc: 300,
+        // BNB price
+        solana: 20
+        // SOL price
+      };
+      const rate = conversionRates[chain] || 0;
+      return value / 1e18 * rate;
+    } catch (error) {
+      return 0;
+    }
+  }
+  /**
+   * Add transaction to processing queue
+   */
+  addToProcessingQueue(tx) {
+    const chain = tx.chain;
+    if (!this.processingQueue.has(chain)) {
+      this.processingQueue.set(chain, []);
+    }
+    this.processingQueue.get(chain).push(tx);
+    const queue = this.processingQueue.get(chain);
+    if (queue.length >= this.config.batchSize) {
+      this.processBatch(chain);
+    }
+  }
+  /**
+   * Initialize batch processing timers
+   */
+  initializeBatchProcessing() {
+    for (const chain of [...this.providers.keys(), "solana"]) {
+      const timer = setInterval(() => {
+        this.processBatch(chain);
+      }, this.config.processingDelayMs);
+      this.batchTimers.set(chain, timer);
+    }
+  }
+  /**
+   * Process a batch of transactions
+   */
+  processBatch(chain) {
+    const queue = this.processingQueue.get(chain);
+    if (!queue || queue.length === 0)
+      return;
+    const batch = queue.splice(0, this.config.batchSize);
+    this.stats.processedTransactions += batch.length;
+    const latencies = batch.map((tx) => Date.now() - tx.timestamp);
+    const avgLatency = latencies.reduce((sum, lat) => sum + lat, 0) / latencies.length;
+    this.stats.averageLatency = this.stats.averageLatency * 0.9 + avgLatency * 0.1;
+    this.emit("transactionBatch", {
+      chain,
+      transactions: batch,
+      averageLatency: avgLatency
+    });
+  }
+  /**
+   * Schedule reconnection for a chain
+   */
+  scheduleReconnect(chain) {
+    const attempts = this.reconnectAttempts.get(chain) || 0;
+    if (attempts >= this.config.maxReconnectAttempts) {
+      console.error(`Max reconnection attempts reached for ${chain}`);
+      this.emit("maxReconnectAttemptsReached", chain);
+      return;
+    }
+    this.reconnectAttempts.set(chain, attempts + 1);
+    setTimeout(() => {
+      console.log(`Attempting to reconnect ${chain} (attempt ${attempts + 1})`);
+      this.reconnectChain(chain);
+    }, this.config.reconnectDelayMs * Math.pow(2, attempts));
+  }
+  /**
+   * Reconnect to a specific chain
+   */
+  async reconnectChain(chain) {
+    try {
+      if (chain === "solana") {
+        await this.startSolanaMonitoring();
+      } else {
+        const provider = this.providers.get(chain);
+        if (provider) {
+          await this.startChainMonitoring(chain, provider);
+        }
+      }
+      this.reconnectAttempts.set(chain, 0);
+    } catch (error) {
+      console.error(`Failed to reconnect ${chain}:`, error);
+      this.scheduleReconnect(chain);
+    }
+  }
+  /**
+   * Start heartbeat monitoring
+   */
+  startHeartbeatMonitoring() {
+    setInterval(() => {
+      const now = Date.now();
+      const heartbeatThreshold = this.config.heartbeatIntervalMs;
+      for (const chain of Object.keys(this.stats.connectionStatus)) {
+        const lastActivity = this.stats.lastActivity[chain] || 0;
+        if (now - lastActivity > heartbeatThreshold) {
+          console.warn(`No activity detected for ${chain} in the last ${heartbeatThreshold}ms`);
+          this.emit("heartbeatMissed", chain);
+          this.scheduleReconnect(chain);
+        }
+      }
+    }, this.config.heartbeatIntervalMs);
+  }
+  /**
+   * Stop mempool monitoring
+   */
+  async stopMonitoring() {
+    try {
+      this.isMonitoring = false;
+      for (const [chain, ws] of this.websockets) {
+        ws.close();
+        console.log(`${chain} WebSocket closed`);
+      }
+      this.websockets.clear();
+      for (const [chain, provider] of this.providers) {
+        provider.removeAllListeners("pending");
+        console.log(`${chain} provider listeners removed`);
+      }
+      for (const [chain, timer] of this.batchTimers) {
+        clearInterval(timer);
+      }
+      this.batchTimers.clear();
+      for (const chain of this.processingQueue.keys()) {
+        this.processBatch(chain);
+      }
+      this.emit("monitoringStopped");
+      console.log("Mempool monitoring stopped");
+    } catch (error) {
+      console.error("Error stopping mempool monitoring:", error);
+      throw error;
+    }
+  }
+  /**
+   * Get monitoring statistics
+   */
+  getStats() {
+    return { ...this.stats };
+  }
+  /**
+   * Check if monitoring is active
+   */
+  isActive() {
+    return this.isMonitoring;
+  }
+  /**
+   * Update configuration
+   */
+  updateConfig(newConfig) {
+    this.config = { ...this.config, ...newConfig };
+    this.emit("configUpdated", this.config);
+  }
+};
+var PriceOracle = class extends EventEmitter {
+  logger;
+  config;
+  priceCache;
+  sources = /* @__PURE__ */ new Map();
+  rateLimits = /* @__PURE__ */ new Map();
+  stats = {
+    totalRequests: 0,
+    successfulRequests: 0,
+    failedRequests: 0,
+    cacheHits: 0,
+    averageResponseTime: 0
+  };
+  constructor(config, logger) {
+    super();
+    this.config = config;
+    this.logger = logger;
+    this.priceCache = new NodeCache({
+      stdTTL: config.cacheTimeout,
+      checkperiod: config.cacheTimeout * 0.2
+    });
+    this.setupPriceSources();
+    this.startHealthChecks();
+  }
+  setupPriceSources() {
+    this.addPriceSource({
+      id: "coingecko",
+      name: "CoinGecko",
+      priority: 1,
+      isActive: true,
+      rateLimit: 50,
+      // 50 requests per minute for free tier
+      timeout: 1e4,
+      supportedChains: ["ethereum", "bsc", "polygon", "arbitrum", "optimism", "solana"],
+      apiKey: process.env.COINGECKO_API_KEY,
+      baseUrl: "https://api.coingecko.com/api/v3"
+    });
+    this.addPriceSource({
+      id: "coinmarketcap",
+      name: "CoinMarketCap",
+      priority: 2,
+      isActive: !!process.env.COINMARKETCAP_API_KEY,
+      rateLimit: 200,
+      // 200 requests per month for free tier
+      timeout: 1e4,
+      supportedChains: ["ethereum", "bsc", "polygon", "arbitrum", "optimism"],
+      apiKey: process.env.COINMARKETCAP_API_KEY,
+      baseUrl: "https://pro-api.coinmarketcap.com/v1"
+    });
+    this.addPriceSource({
+      id: "dexscreener",
+      name: "DexScreener",
+      priority: 3,
+      isActive: true,
+      rateLimit: 300,
+      // 300 requests per minute
+      timeout: 8e3,
+      supportedChains: ["ethereum", "bsc", "polygon", "arbitrum", "optimism", "solana"],
+      baseUrl: "https://api.dexscreener.com/latest"
+    });
+    this.addPriceSource({
+      id: "jupiter",
+      name: "Jupiter",
+      priority: 4,
+      isActive: true,
+      rateLimit: 600,
+      // 600 requests per minute
+      timeout: 5e3,
+      supportedChains: ["solana"],
+      baseUrl: "https://price.jup.ag/v4"
+    });
+    this.addPriceSource({
+      id: "moralis",
+      name: "Moralis",
+      priority: 5,
+      isActive: !!process.env.MORALIS_API_KEY,
+      rateLimit: 500,
+      // Depends on plan
+      timeout: 1e4,
+      supportedChains: ["ethereum", "bsc", "polygon", "arbitrum", "optimism"],
+      apiKey: process.env.MORALIS_API_KEY,
+      baseUrl: "https://deep-index.moralis.io/api/v2"
+    });
+    this.logger.info("Price sources initialized", {
+      totalSources: this.sources.size,
+      activeSources: Array.from(this.sources.values()).filter((s) => s.isActive).length
+    });
+  }
+  addPriceSource(source) {
+    this.sources.set(source.id, source);
+    this.rateLimits.set(source.id, { count: 0, resetTime: Date.now() + 6e4 });
+  }
+  async getTokenPrice(address, chain) {
+    const cacheKey = `${chain}-${address.toLowerCase()}`;
+    const cached = this.priceCache.get(cacheKey);
+    if (cached) {
+      this.stats.cacheHits++;
+      return cached;
+    }
+    this.stats.totalRequests++;
+    const startTime = Date.now();
+    try {
+      const availableSources = this.getAvailableSources(chain);
+      if (availableSources.length === 0) {
+        throw new Error(`No price sources available for chain: ${chain}`);
+      }
+      for (const source of availableSources) {
+        if (!this.checkRateLimit(source.id)) {
+          continue;
+        }
+        try {
+          const price = await this.fetchPriceFromSource(source, address, chain);
+          if (price) {
+            this.priceCache.set(cacheKey, price);
+            this.stats.successfulRequests++;
+            this.updateResponseTime(Date.now() - startTime);
+            this.emit("priceUpdated", { address, chain, price });
+            return price;
+          }
+        } catch (error) {
+          this.logger.warn("Price fetch failed from source", {
+            source: source.id,
+            address,
+            chain,
+            error: error.message
+          });
+        }
+      }
+      throw new Error("All price sources failed");
+    } catch (error) {
+      this.stats.failedRequests++;
+      this.logger.error("Failed to get token price", {
+        address,
+        chain,
+        error: error.message
+      });
+      return null;
+    }
+  }
+  async getMultipleTokenPrices(addresses, chain) {
+    const results = /* @__PURE__ */ new Map();
+    const batchSize = 10;
+    for (let i = 0; i < addresses.length; i += batchSize) {
+      const batch = addresses.slice(i, i + batchSize);
+      const promises = batch.map(
+        (address) => this.getTokenPrice(address, chain).then((price) => ({ address, price }))
+      );
+      const batchResults = await Promise.allSettled(promises);
+      batchResults.forEach((result) => {
+        if (result.status === "fulfilled" && result.value.price) {
+          results.set(result.value.address, result.value.price);
+        }
+      });
+      if (i + batchSize < addresses.length) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+    return results;
+  }
+  async comparePricesAcrossSources(address, chain) {
+    const availableSources = this.getAvailableSources(chain);
+    const prices = [];
+    const promises = availableSources.map(
+      (source) => this.fetchPriceFromSource(source, address, chain).catch(() => null)
+    );
+    const results = await Promise.allSettled(promises);
+    results.forEach((result) => {
+      if (result.status === "fulfilled" && result.value) {
+        prices.push(result.value);
+      }
+    });
+    if (prices.length === 0) {
+      throw new Error("No prices available from any source");
+    }
+    const priceValues = prices.map((p) => p.priceUsd);
+    const averagePrice = priceValues.reduce((sum, price) => sum + price, 0) / priceValues.length;
+    const deviations = priceValues.map((price) => Math.abs(price - averagePrice) / averagePrice * 100);
+    const maxDeviation = Math.max(...deviations);
+    const confidence = Math.max(0, 100 - maxDeviation);
+    const sortedPrices = [...priceValues].sort((a, b) => a - b);
+    const recommendedPrice = sortedPrices[Math.floor(sortedPrices.length / 2)];
+    return {
+      prices,
+      averagePrice,
+      deviation: maxDeviation,
+      confidence,
+      recommendedPrice
+    };
+  }
+  async fetchPriceFromSource(source, address, chain) {
+    try {
+      switch (source.id) {
+        case "coingecko":
+          return await this.fetchCoinGeckoPrice(source, address, chain);
+        case "coinmarketcap":
+          return await this.fetchCoinMarketCapPrice(source, address, chain);
+        case "dexscreener":
+          return await this.fetchDexScreenerPrice(source, address, chain);
+        case "jupiter":
+          return await this.fetchJupiterPrice(source, address);
+        case "moralis":
+          return await this.fetchMoralisPrice(source, address, chain);
+        default:
+          throw new Error(`Unsupported price source: ${source.id}`);
+      }
+    } catch (error) {
+      this.logger.debug("Price fetch failed", {
+        source: source.id,
+        address,
+        chain,
+        error: error.message
+      });
+      return null;
+    }
+  }
+  async fetchCoinGeckoPrice(source, address, chain) {
+    const platformMap = {
+      ethereum: "ethereum",
+      bsc: "binance-smart-chain",
+      polygon: "polygon-pos",
+      arbitrum: "arbitrum-one",
+      optimism: "optimistic-ethereum",
+      solana: "solana"
+    };
+    const platform = platformMap[chain];
+    if (!platform) {
+      throw new Error(`Unsupported chain for CoinGecko: ${chain}`);
+    }
+    const url = `${source.baseUrl}/simple/token_price/${platform}`;
+    const params = {
+      contract_addresses: address,
+      vs_currencies: "usd",
+      include_market_cap: "true",
+      include_24hr_vol: "true",
+      include_24hr_change: "true"
+    };
+    if (source.apiKey) {
+      params.x_cg_pro_api_key = source.apiKey;
+    }
+    const response = await axios3.get(url, {
+      params,
+      timeout: source.timeout,
+      headers: {
+        "Accept": "application/json"
+      }
+    });
+    const data = response.data[address.toLowerCase()];
+    if (!data) {
+      return null;
+    }
+    return {
+      address,
+      symbol: "UNKNOWN",
+      // CoinGecko doesn't always return symbol in this endpoint
+      priceUsd: data.usd || 0,
+      priceChange24h: data.usd_24h_change || 0,
+      volume24h: data.usd_24h_vol || 0,
+      marketCap: data.usd_market_cap || 0,
+      lastUpdated: Date.now(),
+      source: source.id,
+      confidence: 95
+    };
+  }
+  async fetchDexScreenerPrice(source, address, chain) {
+    const url = `${source.baseUrl}/dex/tokens/${address}`;
+    const response = await axios3.get(url, {
+      timeout: source.timeout,
+      headers: {
+        "Accept": "application/json"
+      }
+    });
+    const pairs = response.data.pairs || [];
+    if (pairs.length === 0) {
+      return null;
+    }
+    const chainPairs = pairs.filter((pair) => pair.chainId === chain);
+    if (chainPairs.length === 0) {
+      return null;
+    }
+    const bestPair = chainPairs.reduce((best, current) => {
+      return parseFloat(current.liquidity?.usd || "0") > parseFloat(best.liquidity?.usd || "0") ? current : best;
+    });
+    return {
+      address,
+      symbol: bestPair.baseToken?.symbol || "UNKNOWN",
+      priceUsd: parseFloat(bestPair.priceUsd || "0"),
+      priceChange24h: parseFloat(bestPair.priceChange?.h24 || "0"),
+      volume24h: parseFloat(bestPair.volume?.h24 || "0"),
+      marketCap: parseFloat(bestPair.marketCap || "0"),
+      lastUpdated: Date.now(),
+      source: source.id,
+      confidence: 85
+    };
+  }
+  async fetchJupiterPrice(source, address) {
+    const url = `${source.baseUrl}/price`;
+    const params = {
+      ids: address,
+      vsToken: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+      // USDC on Solana
+    };
+    const response = await axios3.get(url, {
+      params,
+      timeout: source.timeout,
+      headers: {
+        "Accept": "application/json"
+      }
+    });
+    const data = response.data.data[address];
+    if (!data) {
+      return null;
+    }
+    return {
+      address,
+      symbol: data.symbol || "UNKNOWN",
+      priceUsd: parseFloat(data.price || "0"),
+      priceChange24h: 0,
+      // Jupiter doesn't provide 24h change
+      volume24h: 0,
+      marketCap: 0,
+      lastUpdated: Date.now(),
+      source: source.id,
+      confidence: 80
+    };
+  }
+  async fetchCoinMarketCapPrice(source, address, chain) {
+    const url = `${source.baseUrl}/cryptocurrency/quotes/latest`;
+    const params = {
+      address,
+      convert: "USD"
+    };
+    await axios3.get(url, {
+      params,
+      timeout: source.timeout,
+      headers: {
+        "Accept": "application/json",
+        "X-CMC_PRO_API_KEY": source.apiKey || ""
+      }
+    });
+    return null;
+  }
+  async fetchMoralisPrice(source, address, chain) {
+    const url = `${source.baseUrl}/erc20/${address}/price`;
+    const params = {
+      chain
+    };
+    const response = await axios3.get(url, {
+      params,
+      timeout: source.timeout,
+      headers: {
+        "Accept": "application/json",
+        "X-API-Key": source.apiKey || ""
+      }
+    });
+    const data = response.data;
+    if (!data) {
+      return null;
+    }
+    return {
+      address,
+      symbol: data.symbol || "UNKNOWN",
+      priceUsd: parseFloat(data.usdPrice || "0"),
+      priceChange24h: parseFloat(data.priceChange24h || "0"),
+      volume24h: 0,
+      marketCap: 0,
+      lastUpdated: Date.now(),
+      source: source.id,
+      confidence: 90
+    };
+  }
+  getAvailableSources(chain) {
+    return Array.from(this.sources.values()).filter(
+      (source) => source.isActive && source.supportedChains.includes(chain)
+    ).sort((a, b) => a.priority - b.priority);
+  }
+  checkRateLimit(sourceId) {
+    const source = this.sources.get(sourceId);
+    if (!source)
+      return false;
+    const rateLimit = this.rateLimits.get(sourceId);
+    if (!rateLimit)
+      return false;
+    const now = Date.now();
+    if (now >= rateLimit.resetTime) {
+      rateLimit.count = 0;
+      rateLimit.resetTime = now + 6e4;
+    }
+    if (rateLimit.count >= source.rateLimit) {
+      return false;
+    }
+    rateLimit.count++;
+    return true;
+  }
+  updateResponseTime(responseTime) {
+    this.stats.averageResponseTime = (this.stats.averageResponseTime * (this.stats.successfulRequests - 1) + responseTime) / this.stats.successfulRequests;
+  }
+  startHealthChecks() {
+    setInterval(async () => {
+      const healthChecks = Array.from(this.sources.values()).map(
+        (source) => this.checkSourceHealth(source)
+      );
+      await Promise.allSettled(healthChecks);
+    }, 3e5);
+  }
+  async checkSourceHealth(source) {
+    try {
+      const testAddress = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+      const testChain = "ethereum";
+      if (source.supportedChains.includes(testChain)) {
+        const startTime = Date.now();
+        await this.fetchPriceFromSource(source, testAddress, testChain);
+        const responseTime = Date.now() - startTime;
+        if (responseTime > source.timeout) {
+          this.logger.warn("Price source slow response", {
+            source: source.id,
+            responseTime,
+            timeout: source.timeout
+          });
+        }
+      }
+    } catch (error) {
+      this.logger.warn("Price source health check failed", {
+        source: source.id,
+        error: error.message
+      });
+    }
+  }
+  getStats() {
+    return {
+      ...this.stats,
+      activeSources: Array.from(this.sources.values()).filter((s) => s.isActive).length,
+      totalSources: this.sources.size,
+      cacheSize: this.priceCache.keys().length,
+      cacheHitRate: this.stats.totalRequests > 0 ? this.stats.cacheHits / this.stats.totalRequests * 100 : 0
+    };
+  }
+  async enableSource(sourceId) {
+    const source = this.sources.get(sourceId);
+    if (source) {
+      source.isActive = true;
+      this.logger.info("Price source enabled", { sourceId });
+    }
+  }
+  async disableSource(sourceId) {
+    const source = this.sources.get(sourceId);
+    if (source) {
+      source.isActive = false;
+      this.logger.info("Price source disabled", { sourceId });
+    }
+  }
+  clearCache() {
+    this.priceCache.flushAll();
+    this.logger.info("Price cache cleared");
+  }
+  async close() {
+    this.priceCache.close();
+    this.removeAllListeners();
+    this.logger.info("Price oracle closed");
+  }
+};
 
 // src/index.ts
 function createChainClient(chain, privateKey, rpcUrl) {
@@ -2498,6 +3396,6 @@ function createChainClient(chain, privateKey, rpcUrl) {
   return new ChainAbstraction(rpcManager, connectionPool, logger, config);
 }
 
-export { ChainAbstraction, ConnectionPool, DEXAggregator, RPCManager, createChainClient };
+export { ChainAbstraction, ConnectionPool, DEXAggregator, MempoolMonitor, PriceOracle, RPCManager, createChainClient };
 //# sourceMappingURL=out.js.map
 //# sourceMappingURL=index.mjs.map

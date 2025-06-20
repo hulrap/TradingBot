@@ -5,7 +5,12 @@
   "main": "./index.ts",
   "types": "./index.ts",
   "devDependencies": {
+    "@types/bcryptjs": "^3.0.0",
     "@types/node": "^20",
     "typescript": "latest"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "jose": "^6.0.11"
   }
-} 
+}

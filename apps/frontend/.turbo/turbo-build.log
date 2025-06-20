@@ -17,13 +17,10 @@ Database initialized successfully
 API error: ex [Error]: Dynamic server usage: Page couldn't be rendered statically because it used `headers`. See more info here: https://nextjs.org/docs/messages/dynamic-server-error
     at eP (C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@14.1.0_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\compiled\next-server\app-route.runtime.prod.js:6:29358)
     at Module.eE (C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@14.1.0_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\compiled\next-server\app-route.runtime.prod.js:6:29694)
-Database initialized successfully
     at i (C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@14.1.0_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\compiled\next-server\app-route.runtime.prod.js:6:34572)
     at Object.get (C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@14.1.0_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\compiled\next-server\app-route.runtime.prod.js:6:34788)
-   Generating static pages (4/16) 
-   Generating static pages (8/16) 
-    at a.getIdentifier (C:\Users\User1\Downloads\TradingBot\apps\frontend\.next\server\app\api\performance\route.js:38:3112)
-    at a.check (C:\Users\User1\Downloads\TradingBot\apps\frontend\.next\server\app\api\performance\route.js:38:2737)
+    at i.getIdentifier (C:\Users\User1\Downloads\TradingBot\apps\frontend\.next\server\app\api\risk\route.js:15:10259)
+    at i.check (C:\Users\User1\Downloads\TradingBot\apps\frontend\.next\server\app\api\risk\route.js:15:9884)
     at f (C:\Users\User1\Downloads\TradingBot\apps\frontend\.next\server\app\api\performance\route.js:1:2511)
     at C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@14.1.0_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\compiled\next-server\app-route.runtime.prod.js:6:42490
     at C:\Users\User1\Downloads\TradingBot\node_modules\.pnpm\next@14.1.0_react-dom@18.2.0_react@18.2.0\node_modules\next\dist\server\lib\trace\tracer.js:133:36
@@ -31,6 +28,10 @@ Database initialized successfully
   description: "Page couldn't be rendered statically because it used `headers`. See more info here: https://nextjs.org/docs/messages/dynamic-server-error",
   digest: 'DYNAMIC_SERVER_USAGE'
 }
+   Generating static pages (4/16) 
+   Generating static pages (8/16) 
+Database initialized successfully
+Database initialized successfully
    Generating static pages (12/16) 
  ✓ Generating static pages (16/16) 
    Finalizing page optimization ...

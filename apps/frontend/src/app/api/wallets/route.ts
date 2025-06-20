@@ -1,13 +1,26 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { encrypt, decrypt } from '@trading-bot/crypto';
-import { walletDb } from '../../../lib/database';
-import { Wallet, ApiResponse, Chain } from '@trading-bot/types';
+import { createClient } from '@supabase/supabase-js';
+import { z } from 'zod';
+import { encrypt, decrypt, generateSecureRandom } from '@trading-bot/crypto';
+import { verifyJWT } from '@/lib/auth';
+import { rateLimiter } from '@/lib/rate-limiter';
 import { ethers } from 'ethers';
+
+// Lazy initialization to avoid build-time errors
+function getSupabaseClient() {
+  const supabaseUrl = process.env['SUPABASE_URL'];
+  const supabaseServiceKey = process.env['SUPABASE_SERVICE_ROLE_KEY'];
+  
+  if (!supabaseUrl || !supabaseServiceKey) {
+    throw new Error('Supabase configuration is missing. Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables.');
+  }
+  
+  return createClient(supabaseUrl, supabaseServiceKey);
+}
 
 // Dynamic import for Solana to avoid browser compatibility issues
 async function getSolanaKeypair() {
   try {
-    // Only import on server-side and when actually needed
     if (typeof window !== 'undefined') {
       throw new Error('Solana not available on client side');
     }
@@ -19,14 +32,25 @@ async function getSolanaKeypair() {
   }
 }
 
+// Validation schemas
+const WalletCreateSchema = z.object({
+  privateKey: z.string().min(1, 'Private key is required'),
+  walletName: z.string().optional(),
+  chain: z.enum(['ETH', 'BSC', 'SOL'], { invalid_type_error: 'Invalid chain. Must be ETH, BSC, or SOL' })
+});
+
+const WalletOperationSchema = z.object({
+  walletId: z.string().uuid('Invalid wallet ID'),
+  operation: z.enum(['validate_key'], { invalid_type_error: 'Invalid operation. Only validate_key is allowed' })
+});
+
 // Helper function to derive wallet address from private key
-async function getWalletAddress(privateKey: string, chain: Chain): Promise<string> {
+async function getWalletAddress(privateKey: string, chain: string): Promise<string> {
   try {
     if (chain === 'ETH' || chain === 'BSC') {
       const wallet = new ethers.Wallet(privateKey);
       return wallet.address;
     } else if (chain === 'SOL') {
-      // For Solana, we expect the private key to be a JSON string of the secret key array
       const solana = await getSolanaKeypair();
       if (!solana) {
         throw new Error('Solana web3.js not available');
@@ -41,215 +65,362 @@ async function getWalletAddress(privateKey: string, chain: Chain): Promise<strin
   }
 }
 
-export async function GET(request: NextRequest): Promise<NextResponse<ApiResponse<any[]>>> {
+export async function GET(request: NextRequest) {
   try {
-    const { searchParams } = new URL(request.url);
-    const userId = searchParams.get('userId');
-    
-    if (!userId) {
-      return NextResponse.json({ 
-        success: false, 
-        error: 'User ID is required' 
-      }, { status: 400 });
+    // Rate limiting
+    const rateLimitResult = await rateLimiter.check(request);
+    if (!rateLimitResult.success) {
+      return NextResponse.json(
+        { 
+          error: 'Rate limit exceeded',
+          retryAfter: Math.ceil((rateLimitResult.resetTime - Date.now()) / 1000)
+        },
+        { status: 429 }
+      );
     }
-    
-    const wallets = walletDb.findByUserId(userId);
-    
-    // Remove encrypted private keys from response for security
-    const safeWallets = wallets.map(wallet => {
-      const { encryptedPrivateKey, ...safeWallet } = wallet;
-      return safeWallet;
+
+    // Authentication
+    const authResult = await verifyJWT(request);
+    if (!authResult.success) {
+      return NextResponse.json(
+        { error: 'Unauthorized', details: authResult.error },
+        { status: 401 }
+      );
+    }
+
+    const userId = authResult.payload?.sub;
+    if (!userId) {
+      return NextResponse.json(
+        { error: 'Invalid token payload' },
+        { status: 401 }
+      );
+    }
+
+    // Get wallets from Supabase
+    const supabase = getSupabaseClient();
+    const { data: wallets, error } = await supabase
+      .from('wallets')
+      .select('id, user_id, address, chain, name, created_at, updated_at')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Error fetching wallets:', error);
+      return NextResponse.json(
+        { error: 'Failed to fetch wallets' },
+        { status: 500 }
+      );
+    }
+
+    return NextResponse.json({
+      success: true,
+      data: wallets || []
     });
-    
-    return NextResponse.json({ 
-      success: true, 
-      data: safeWallets 
-    });
+
   } catch (error) {
-    console.error('Error fetching wallets:', error);
-    return NextResponse.json({ 
-      success: false, 
-      error: 'Failed to fetch wallets' 
-    }, { status: 500 });
+    console.error('Error in GET wallets:', error);
+    return NextResponse.json(
+      { error: 'Failed to fetch wallets' },
+      { status: 500 }
+    );
   }
 }
 
-export async function POST(request: NextRequest): Promise<NextResponse<ApiResponse<{ id: string }>>> {
+export async function POST(request: NextRequest) {
   try {
-    const { privateKey, walletName, chain, userId } = await request.json();
-    
-    if (!privateKey || !chain || !userId) {
-      return NextResponse.json({ 
-        success: false, 
-        error: 'Private key, chain, and user ID are required' 
-      }, { status: 400 });
+    // Rate limiting (stricter for wallet creation)
+    const rateLimitResult = await rateLimiter.check(request, 5, 60 * 60 * 1000); // 5 per hour
+    if (!rateLimitResult.success) {
+      return NextResponse.json(
+        { 
+          error: 'Rate limit exceeded',
+          retryAfter: Math.ceil((rateLimitResult.resetTime - Date.now()) / 1000)
+        },
+        { status: 429 }
+      );
     }
-    
-    // Validate chain
-    if (!['ETH', 'BSC', 'SOL'].includes(chain)) {
-      return NextResponse.json({ 
-        success: false, 
-        error: 'Invalid chain. Must be ETH, BSC, or SOL' 
-      }, { status: 400 });
+
+    // Authentication
+    const authResult = await verifyJWT(request);
+    if (!authResult.success) {
+      return NextResponse.json(
+        { error: 'Unauthorized', details: authResult.error },
+        { status: 401 }
+      );
     }
+
+    const userId = authResult.payload?.sub;
+    if (!userId) {
+      return NextResponse.json(
+        { error: 'Invalid token payload' },
+        { status: 401 }
+      );
+    }
+
+    // Parse and validate request body
+    const body = await request.json();
+    const validationResult = WalletCreateSchema.safeParse(body);
     
+    if (!validationResult.success) {
+      return NextResponse.json(
+        { 
+          error: 'Invalid input data',
+          details: validationResult.error.errors
+        },
+        { status: 400 }
+      );
+    }
+
+    const { privateKey, walletName, chain } = validationResult.data;
+
     // Derive wallet address from private key
     let address: string;
     try {
       address = await getWalletAddress(privateKey, chain);
     } catch (error: any) {
-      return NextResponse.json({ 
-        success: false, 
-        error: error.message 
-      }, { status: 400 });
+      return NextResponse.json(
+        { error: error.message },
+        { status: 400 }
+      );
     }
-    
+
     // Check if wallet already exists for this user
-    const existingWallets = walletDb.findByUserId(userId);
-    if (existingWallets.some(w => w.address === address && w.chain === chain)) {
-      return NextResponse.json({ 
-        success: false, 
-        error: 'Wallet already exists for this chain' 
-      }, { status: 400 });
+    const supabase = getSupabaseClient();
+    const { data: existingWallet } = await supabase
+      .from('wallets')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('address', address)
+      .eq('chain', chain)
+      .single();
+
+    if (existingWallet) {
+      return NextResponse.json(
+        { error: 'Wallet already exists for this chain' },
+        { status: 409 }
+      );
     }
-    
+
     // Encrypt the private key before storing
     const encryptedPrivateKey = encrypt(privateKey);
-    
-    // Generate wallet ID
-    const walletId = `wallet_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    
-    const newWallet: Omit<Wallet, 'createdAt'> = {
-      id: walletId,
-      userId,
-      address,
-      encryptedPrivateKey,
-      chain,
-      name: walletName || `${chain} Wallet`,
-    };
-    
-    walletDb.create(newWallet);
-    
-    return NextResponse.json({ 
-      success: true, 
-      data: { id: walletId },
+
+    // Generate secure wallet ID
+    const walletId = `wallet_${Date.now()}_${generateSecureRandom(8)}`;
+
+    // Create wallet in database
+    const { data: newWallet, error: createError } = await supabase
+      .from('wallets')
+      .insert({
+        id: walletId,
+        user_id: userId,
+        address,
+        encrypted_private_key: encryptedPrivateKey,
+        chain,
+        name: walletName || `${chain} Wallet`,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
+      .select('id, user_id, address, chain, name, created_at, updated_at')
+      .single();
+
+    if (createError) {
+      console.error('Error creating wallet:', createError);
+      return NextResponse.json(
+        { error: 'Failed to create wallet' },
+        { status: 500 }
+      );
+    }
+
+    console.log(`Wallet created for user ${userId}: ${chain} - ${address}`);
+
+    return NextResponse.json({
+      success: true,
+      data: newWallet
     });
+
   } catch (error) {
-    console.error('Error adding wallet:', error);
-    return NextResponse.json({ 
-      success: false, 
-      error: 'Failed to add wallet' 
-    }, { status: 500 });
+    console.error('Error creating wallet:', error);
+    return NextResponse.json(
+      { error: 'Failed to create wallet' },
+      { status: 500 }
+    );
   }
 }
 
-export async function DELETE(request: NextRequest): Promise<NextResponse<ApiResponse<boolean>>> {
+export async function DELETE(request: NextRequest) {
   try {
+    // Rate limiting
+    const rateLimitResult = await rateLimiter.check(request);
+    if (!rateLimitResult.success) {
+      return NextResponse.json(
+        { 
+          error: 'Rate limit exceeded',
+          retryAfter: Math.ceil((rateLimitResult.resetTime - Date.now()) / 1000)
+        },
+        { status: 429 }
+      );
+    }
+
+    // Authentication
+    const authResult = await verifyJWT(request);
+    if (!authResult.success) {
+      return NextResponse.json(
+        { error: 'Unauthorized', details: authResult.error },
+        { status: 401 }
+      );
+    }
+
+    const userId = authResult.payload?.sub;
+    if (!userId) {
+      return NextResponse.json(
+        { error: 'Invalid token payload' },
+        { status: 401 }
+      );
+    }
+
     const { searchParams } = new URL(request.url);
     const walletId = searchParams.get('walletId');
-    
+
     if (!walletId) {
-      return NextResponse.json({ 
-        success: false, 
-        error: 'Wallet ID is required' 
-      }, { status: 400 });
+      return NextResponse.json(
+        { error: 'Wallet ID is required' },
+        { status: 400 }
+      );
     }
-    
-    walletDb.delete(walletId);
-    
-    return NextResponse.json({ 
-      success: true, 
-      data: true 
+
+    // Delete wallet (only if it belongs to the authenticated user)
+    const supabase = getSupabaseClient();
+    const { error: deleteError } = await supabase
+      .from('wallets')
+      .delete()
+      .eq('id', walletId)
+      .eq('user_id', userId);
+
+    if (deleteError) {
+      console.error('Error deleting wallet:', deleteError);
+      return NextResponse.json(
+        { error: 'Failed to delete wallet' },
+        { status: 500 }
+      );
+    }
+
+    console.log(`Wallet deleted by user ${userId}: ${walletId}`);
+
+    return NextResponse.json({
+      success: true,
+      message: 'Wallet deleted successfully'
     });
+
   } catch (error) {
     console.error('Error deleting wallet:', error);
-    return NextResponse.json({ 
-      success: false, 
-      error: 'Failed to delete wallet' 
-    }, { status: 500 });
+    return NextResponse.json(
+      { error: 'Failed to delete wallet' },
+      { status: 500 }
+    );
   }
 }
 
-export async function PUT(request: NextRequest): Promise<NextResponse<ApiResponse<{ privateKey?: string; address: string }>>> {
+export async function PUT(request: NextRequest) {
   try {
-    const { walletId, userId, operation } = await request.json();
-    
-    if (!walletId || !userId) {
-      return NextResponse.json({ 
-        success: false, 
-        error: 'Wallet ID and User ID are required' 
-      }, { status: 400 });
+    // Stricter rate limiting for sensitive operations
+    const rateLimitResult = await rateLimiter.check(request, 3, 60 * 60 * 1000); // 3 per hour
+    if (!rateLimitResult.success) {
+      return NextResponse.json(
+        { 
+          error: 'Rate limit exceeded',
+          retryAfter: Math.ceil((rateLimitResult.resetTime - Date.now()) / 1000)
+        },
+        { status: 429 }
+      );
     }
-    
-    // Find the wallet
-    const wallets = walletDb.findByUserId(userId);
-    const wallet = wallets.find(w => w.id === walletId);
-    
-    if (!wallet) {
-      return NextResponse.json({ 
-        success: false, 
-        error: 'Wallet not found' 
-      }, { status: 404 });
+
+    // Authentication
+    const authResult = await verifyJWT(request);
+    if (!authResult.success) {
+      return NextResponse.json(
+        { error: 'Unauthorized', details: authResult.error },
+        { status: 401 }
+      );
     }
+
+    const userId = authResult.payload?.sub;
+    if (!userId) {
+      return NextResponse.json(
+        { error: 'Invalid token payload' },
+        { status: 401 }
+      );
+    }
+
+    // Parse and validate request body
+    const body = await request.json();
+    const validationResult = WalletOperationSchema.safeParse(body);
     
-    // Handle different operations
-    if (operation === 'getPrivateKey') {
-      // This is a sensitive operation - in production, add additional security checks
-      // such as 2FA, rate limiting, audit logging, etc.
-      console.log(`Decrypting private key for wallet ${walletId} by user ${userId}`);
-      
-      try {
-        const decryptedPrivateKey = decrypt(wallet.encryptedPrivateKey);
-        
-        // Return the decrypted private key (use with extreme caution)
-        return NextResponse.json({ 
-          success: true, 
-          data: { 
-            privateKey: decryptedPrivateKey,
-            address: wallet.address
-          }
-        });
-      } catch (error) {
-        console.error('Failed to decrypt private key:', error);
-        return NextResponse.json({ 
-          success: false, 
-          error: 'Failed to decrypt private key' 
-        }, { status: 500 });
-      }
-    } else if (operation === 'validateKey') {
+    if (!validationResult.success) {
+      return NextResponse.json(
+        { 
+          error: 'Invalid request data',
+          details: validationResult.error.errors
+        },
+        { status: 400 }
+      );
+    }
+
+    const { walletId, operation } = validationResult.data;
+
+    // Get wallet (only if it belongs to the authenticated user)
+    const supabase = getSupabaseClient();
+    const { data: wallet, error: walletError } = await supabase
+      .from('wallets')
+      .select('id, address, encrypted_private_key, chain')
+      .eq('id', walletId)
+      .eq('user_id', userId)
+      .single();
+
+    if (walletError || !wallet) {
+      return NextResponse.json(
+        { error: 'Wallet not found or access denied' },
+        { status: 404 }
+      );
+    }
+
+    // Handle operations
+    if (operation === 'validate_key') {
       // Validate that the stored encrypted key can be decrypted and matches expected address
       try {
-        const decryptedPrivateKey = decrypt(wallet.encryptedPrivateKey);
+        const decryptedPrivateKey = decrypt(wallet.encrypted_private_key);
         const derivedAddress = await getWalletAddress(decryptedPrivateKey, wallet.chain);
         
         const isValid = derivedAddress.toLowerCase() === wallet.address.toLowerCase();
         
-        return NextResponse.json({ 
-          success: true, 
-          data: { 
+        // Log validation attempt for security monitoring
+        console.log(`Wallet validation by user ${userId}: ${walletId} - ${isValid ? 'Valid' : 'Invalid'}`);
+
+        return NextResponse.json({
+          success: true,
+          data: {
             address: wallet.address,
             isValid
           }
         });
       } catch (error) {
         console.error('Failed to validate wallet key:', error);
-        return NextResponse.json({ 
-          success: false, 
-          error: 'Failed to validate wallet key' 
-        }, { status: 500 });
+        return NextResponse.json(
+          { error: 'Failed to validate wallet key' },
+          { status: 500 }
+        );
       }
-    } else {
-      return NextResponse.json({ 
-        success: false, 
-        error: 'Invalid operation. Supported operations: getPrivateKey, validateKey' 
-      }, { status: 400 });
     }
-    
+
+    return NextResponse.json(
+      { error: 'Invalid operation' },
+      { status: 400 }
+    );
+
   } catch (error) {
     console.error('Error in wallet operation:', error);
-    return NextResponse.json({ 
-      success: false, 
-      error: 'Failed to perform wallet operation' 
-    }, { status: 500 });
+    return NextResponse.json(
+      { error: 'Failed to perform wallet operation' },
+      { status: 500 }
+    );
   }
 } 

@@ -40,6 +40,7 @@ export interface BotConfiguration {
   totalTrades?: number;
   dailyPnL?: number;
   winRate?: number;
+  version?: number;
 }
 
 export interface ArbitrageConfiguration {
@@ -200,29 +201,112 @@ export default function BotConfigurationDashboard() {
       if (isDirty && selectedConfig && isCreating) {
         // Auto-save draft configurations every 30 seconds
         const draftKey = `bot-draft-${selectedBotType}`;
-        localStorage.setItem(draftKey, JSON.stringify(selectedConfig));
+        try {
+          localStorage.setItem(draftKey, JSON.stringify(selectedConfig));
+          console.debug('Draft configuration saved:', draftKey);
+        } catch (error) {
+          console.warn('Failed to save draft configuration:', error);
+        }
       }
     }, 30000);
 
     return () => clearInterval(autoSaveInterval);
   }, [isDirty, selectedConfig, isCreating, selectedBotType]);
 
-  // Load draft configuration if available
+  // Load draft configuration if available with error handling
   useEffect(() => {
     if (isCreating && selectedBotType) {
       const draftKey = `bot-draft-${selectedBotType}`;
-      const savedDraft = localStorage.getItem(draftKey);
-      if (savedDraft) {
-        try {
+      try {
+        const savedDraft = localStorage.getItem(draftKey);
+        if (savedDraft) {
           const draftConfig = JSON.parse(savedDraft);
-          setSelectedConfig(draftConfig);
-          setIsDirty(true);
-        } catch (error) {
-          console.error('Failed to load draft configuration:', error);
+          
+          // Validate draft configuration structure
+          if (draftConfig && typeof draftConfig === 'object' && draftConfig.type === selectedBotType) {
+            setSelectedConfig(draftConfig);
+            setIsDirty(true);
+            console.debug('Draft configuration loaded:', draftKey);
+          } else {
+            console.warn('Invalid draft configuration structure, clearing draft');
+            localStorage.removeItem(draftKey);
+          }
+        }
+      } catch (error) {
+        console.error('Failed to load draft configuration:', error);
+        // Clear corrupted draft
+        try {
+          localStorage.removeItem(draftKey);
+        } catch (clearError) {
+          console.error('Failed to clear corrupted draft:', clearError);
         }
       }
     }
   }, [isCreating, selectedBotType]);
+
+  // Enhanced configuration validation
+  const validateConfiguration = (config: BotConfiguration): { isValid: boolean; errors: string[] } => {
+    const errors: string[] = [];
+
+    // Basic validation
+    if (!config.name || config.name.trim().length === 0) {
+      errors.push('Bot name is required');
+    }
+
+    if (!config.wallet || !/^0x[a-fA-F0-9]{40}$/.test(config.wallet)) {
+      errors.push('Valid wallet address is required');
+    }
+
+    // Type-specific validation
+    switch (config.type) {
+      case 'arbitrage':
+        const arbConfig = config.configuration as ArbitrageConfiguration;
+        if (!arbConfig.tokenPairs || arbConfig.tokenPairs.length === 0) {
+          errors.push('At least one token pair is required');
+        }
+        if (!arbConfig.dexes || arbConfig.dexes.length < 2) {
+          errors.push('At least two DEXes are required for arbitrage');
+        }
+        if (arbConfig.profitThreshold <= 0 || arbConfig.profitThreshold > 100) {
+          errors.push('Profit threshold must be between 0 and 100%');
+        }
+        break;
+
+      case 'copy-trading':
+        const copyConfig = config.configuration as CopyTradingConfiguration;
+        if (!copyConfig.targetWallet || !/^0x[a-fA-F0-9]{40}$/.test(copyConfig.targetWallet)) {
+          errors.push('Valid target wallet address is required');
+        }
+        if (copyConfig.maxCopyAmount <= copyConfig.minCopyAmount) {
+          errors.push('Max copy amount must be greater than min copy amount');
+        }
+        break;
+
+      case 'sandwich':
+        const sandwichConfig = config.configuration as SandwichConfiguration;
+        if (!sandwichConfig.targetDexes || sandwichConfig.targetDexes.length === 0) {
+          errors.push('At least one target DEX is required');
+        }
+        if (sandwichConfig.profitThreshold <= 0) {
+          errors.push('Profit threshold must be greater than 0');
+        }
+        break;
+    }
+
+    // Risk parameters validation
+    if (config.riskParameters.maxDailyLoss <= 0) {
+      errors.push('Max daily loss must be greater than 0');
+    }
+
+    if (config.riskParameters.maxPositionSize <= 0 || config.riskParameters.maxPositionSize > 100) {
+      errors.push('Max position size must be between 0 and 100%');
+    }
+
+    return {
+      isValid: errors.length === 0,
+      errors
+    };
+  };
 
   const handleCreateNew = (type: 'arbitrage' | 'copy-trading' | 'sandwich') => {
     setSelectedBotType(type);
@@ -310,38 +394,63 @@ export default function BotConfigurationDashboard() {
   const handleSave = async () => {
     if (!selectedConfig) return;
 
+    // Validate configuration before saving
+    const validation = validateConfiguration(selectedConfig);
+    if (!validation.isValid) {
+      console.warn('Configuration validation failed:', validation.errors);
+      setSaveStatus('error');
+      // Display validation errors to user
+      alert(`Configuration validation failed:\n${validation.errors.join('\n')}`);
+      setTimeout(() => setSaveStatus('idle'), 3000);
+      return;
+    }
+
     setSaveStatus('saving');
 
     try {
-      // Simulate API delay
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      // Simulate API delay with realistic backend processing
+      await new Promise(resolve => setTimeout(resolve, 800 + Math.random() * 400));
 
       if (isCreating) {
-        // Create new configuration
-        const newId = String(configurations.length + 1);
+        // Create new configuration with enhanced metadata
+        const newId = `${selectedConfig.type}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
         const configWithId = {
           ...selectedConfig,
           id: newId,
           createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString()
+          updatedAt: new Date().toISOString(),
+          version: 1,
+          status: selectedConfig.isPaperTrading ? 'draft' as const : 'stopped' as const
         };
+        
         setConfigurations(prev => [...prev, configWithId]);
         setSelectedConfig(configWithId);
         setIsCreating(false);
         
         // Clear draft from localStorage
         const draftKey = `bot-draft-${selectedBotType}`;
-        localStorage.removeItem(draftKey);
+        try {
+          localStorage.removeItem(draftKey);
+          console.debug('Draft cleared after successful save:', draftKey);
+        } catch (error) {
+          console.warn('Failed to clear draft after save:', error);
+        }
+        
+        console.info('Bot configuration created successfully:', newId);
       } else {
-        // Update existing configuration
+        // Update existing configuration with version tracking
         const updatedConfig = {
           ...selectedConfig,
-          updatedAt: new Date().toISOString()
+          updatedAt: new Date().toISOString(),
+          version: (selectedConfig.version || 1) + 1
         };
+        
         setConfigurations(prev => 
           prev.map(config => config.id === selectedConfig.id ? updatedConfig : config)
         );
         setSelectedConfig(updatedConfig);
+        
+        console.info('Bot configuration updated successfully:', selectedConfig.id);
       }
       
       setIsDirty(false);

@@ -13,7 +13,8 @@ export function initializeDatabase() {
       email TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      last_login_at DATETIME
     )
   `);
 
@@ -86,44 +87,60 @@ export function initializeDatabase() {
   console.log('Database initialized successfully');
 }
 
-// User operations
+// User operations with correct field mapping and security
 export const userDb = {
-  create: (user: Omit<User, 'createdAt' | 'updatedAt'>) => {
+  create: (user: { id: string; email: string; passwordHash: string }) => {
     const stmt = db.prepare(`
       INSERT INTO users (id, email, password_hash)
       VALUES (?, ?, ?)
     `);
-    return stmt.run(user.id, user.email, user.encryptedPrivateKey);
+    return stmt.run(user.id, user.email, user.passwordHash);
   },
 
-  findByEmail: (email: string): User | null => {
+  findByEmail: (email: string): (User & { passwordHash: string }) | null => {
     const stmt = db.prepare('SELECT * FROM users WHERE email = ?');
     const user = stmt.get(email) as any;
     if (!user) return null;
+    
     return {
       id: user.id,
       email: user.email,
-      encryptedPrivateKey: user.password_hash,
+      // Map the correct field - this should NOT be encryptedPrivateKey
+      passwordHash: user.password_hash,
+      encryptedPrivateKey: '', // Not stored in users table
       createdAt: user.created_at,
       updatedAt: user.updated_at,
     };
   },
 
-  findById: (id: string): User | null => {
+  findById: (id: string): (User & { passwordHash: string }) | null => {
     const stmt = db.prepare('SELECT * FROM users WHERE id = ?');
     const user = stmt.get(id) as any;
     if (!user) return null;
+    
     return {
       id: user.id,
       email: user.email,
-      encryptedPrivateKey: user.password_hash,
+      // Map the correct field - this should NOT be encryptedPrivateKey  
+      passwordHash: user.password_hash,
+      encryptedPrivateKey: '', // Not stored in users table
       createdAt: user.created_at,
       updatedAt: user.updated_at,
     };
   },
+
+  updateLastLogin: (id: string) => {
+    const stmt = db.prepare('UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?');
+    return stmt.run(id);
+  },
+
+  updatePassword: (id: string, passwordHash: string) => {
+    const stmt = db.prepare('UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?');
+    return stmt.run(passwordHash, id);
+  },
 };
 
-// Wallet operations
+// Wallet operations with enhanced security
 export const walletDb = {
   create: (wallet: Omit<Wallet, 'createdAt'>) => {
     const stmt = db.prepare(`
@@ -136,7 +153,7 @@ export const walletDb = {
       wallet.address,
       wallet.encryptedPrivateKey,
       wallet.chain,
-      wallet.name
+      wallet.name || null
     );
   },
 
@@ -169,54 +186,114 @@ export const walletDb = {
     };
   },
 
-  delete: (id: string) => {
-    const stmt = db.prepare('DELETE FROM wallets WHERE id = ?');
-    return stmt.run(id);
+  findByUserIdAndId: (userId: string, walletId: string): Wallet | null => {
+    const stmt = db.prepare('SELECT * FROM wallets WHERE id = ? AND user_id = ?');
+    const wallet = stmt.get(walletId, userId) as any;
+    if (!wallet) return null;
+    return {
+      id: wallet.id,
+      userId: wallet.user_id,
+      address: wallet.address,
+      encryptedPrivateKey: wallet.encrypted_private_key,
+      chain: wallet.chain,
+      name: wallet.name,
+      createdAt: wallet.created_at,
+    };
+  },
+
+  updateName: (id: string, userId: string, name: string) => {
+    const stmt = db.prepare('UPDATE wallets SET name = ? WHERE id = ? AND user_id = ?');
+    return stmt.run(name, id, userId);
+  },
+
+  delete: (id: string, userId: string) => {
+    const stmt = db.prepare('DELETE FROM wallets WHERE id = ? AND user_id = ?');
+    return stmt.run(id, userId);
   },
 };
 
-// Bot config operations
+// Bot config operations with enhanced validation
 export const botConfigDb = {
   create: (config: Omit<BotConfig, 'createdAt' | 'updatedAt'>) => {
     const stmt = db.prepare(`
       INSERT INTO bot_configs (id, user_id, wallet_id, bot_type, config_data, is_active)
       VALUES (?, ?, ?, ?, ?, ?)
     `);
+    
+    // Determine bot type from config
+    let botType = 'UNKNOWN';
+    if ('tokenPair' in config && 'minProfitThreshold' in config) {
+      botType = 'ARBITRAGE';
+    } else if ('targetWalletAddress' in config) {
+      botType = 'COPY_TRADER';
+    } else if ('targetDex' in config && 'minVictimTradeSize' in config) {
+      botType = 'MEV_SANDWICH';
+    }
+    
     return stmt.run(
       config.id,
       config.userId,
       config.walletId,
-      'ARBITRAGE', // We'll determine this from the config type
+      botType,
       JSON.stringify(config),
-      config.isActive
+      config.isActive || false
     );
   },
 
   findByUserId: (userId: string): BotConfig[] => {
-    const stmt = db.prepare('SELECT * FROM bot_configs WHERE user_id = ?');
+    const stmt = db.prepare('SELECT * FROM bot_configs WHERE user_id = ? ORDER BY created_at DESC');
     const configs = stmt.all(userId) as any[];
-    return configs.map(c => JSON.parse(c.config_data));
+    return configs.map(c => {
+      try {
+        return JSON.parse(c.config_data);
+      } catch (error) {
+        console.error('Failed to parse bot config:', error);
+        return null;
+      }
+    }).filter(Boolean);
   },
 
   findById: (id: string): BotConfig | null => {
     const stmt = db.prepare('SELECT * FROM bot_configs WHERE id = ?');
     const config = stmt.get(id) as any;
     if (!config) return null;
-    return JSON.parse(config.config_data);
+    try {
+      return JSON.parse(config.config_data);
+    } catch (error) {
+      console.error('Failed to parse bot config:', error);
+      return null;
+    }
   },
 
-  updateStatus: (id: string, isActive: boolean) => {
-    const stmt = db.prepare('UPDATE bot_configs SET is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?');
-    return stmt.run(isActive, id);
+  findByUserIdAndId: (userId: string, configId: string): BotConfig | null => {
+    const stmt = db.prepare('SELECT * FROM bot_configs WHERE id = ? AND user_id = ?');
+    const config = stmt.get(configId, userId) as any;
+    if (!config) return null;
+    try {
+      return JSON.parse(config.config_data);
+    } catch (error) {
+      console.error('Failed to parse bot config:', error);
+      return null;
+    }
   },
 
-  delete: (id: string) => {
-    const stmt = db.prepare('DELETE FROM bot_configs WHERE id = ?');
-    return stmt.run(id);
+  updateStatus: (id: string, userId: string, isActive: boolean) => {
+    const stmt = db.prepare('UPDATE bot_configs SET is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?');
+    return stmt.run(isActive, id, userId);
+  },
+
+  updateConfig: (id: string, userId: string, config: BotConfig) => {
+    const stmt = db.prepare('UPDATE bot_configs SET config_data = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?');
+    return stmt.run(JSON.stringify(config), id, userId);
+  },
+
+  delete: (id: string, userId: string) => {
+    const stmt = db.prepare('DELETE FROM bot_configs WHERE id = ? AND user_id = ?');
+    return stmt.run(id, userId);
   },
 };
 
-// Trade operations
+// Trade operations with enhanced filtering
 export const tradeDb = {
   create: (trade: Omit<Trade, 'createdAt' | 'completedAt'>) => {
     const stmt = db.prepare(`
@@ -235,14 +312,14 @@ export const tradeDb = {
       trade.amountOut,
       trade.gasUsed,
       trade.gasPrice,
-      trade.profit,
+      trade.profit || null,
       trade.status
     );
   },
 
-  findByBotConfigId: (botConfigId: string): Trade[] => {
-    const stmt = db.prepare('SELECT * FROM trades WHERE bot_config_id = ? ORDER BY created_at DESC');
-    const trades = stmt.all(botConfigId) as any[];
+  findByBotConfigId: (botConfigId: string, limit: number = 100): Trade[] => {
+    const stmt = db.prepare('SELECT * FROM trades WHERE bot_config_id = ? ORDER BY created_at DESC LIMIT ?');
+    const trades = stmt.all(botConfigId, limit) as any[];
     return trades.map(t => ({
       id: t.id,
       botConfigId: t.bot_config_id,
@@ -262,14 +339,15 @@ export const tradeDb = {
     }));
   },
 
-  findByUserId: (userId: string): Trade[] => {
+  findByUserId: (userId: string, limit: number = 100): Trade[] => {
     const stmt = db.prepare(`
       SELECT t.* FROM trades t
       JOIN bot_configs bc ON t.bot_config_id = bc.id
       WHERE bc.user_id = ?
       ORDER BY t.created_at DESC
+      LIMIT ?
     `);
-    const trades = stmt.all(userId) as any[];
+    const trades = stmt.all(userId, limit) as any[];
     return trades.map(t => ({
       id: t.id,
       botConfigId: t.bot_config_id,
@@ -290,8 +368,37 @@ export const tradeDb = {
   },
 
   updateStatus: (id: string, status: Trade['status'], completedAt?: string) => {
-    const stmt = db.prepare('UPDATE trades SET status = ?, completed_at = ? WHERE id = ?');
-    return stmt.run(status, completedAt, id);
+    const stmt = db.prepare('UPDATE trades SET status = ?, completed_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?');
+    return stmt.run(status, completedAt || null, id);
+  },
+
+  getTradeStats: (userId: string): { totalTrades: number; totalProfit: string; successRate: number } => {
+    const totalStmt = db.prepare(`
+      SELECT COUNT(*) as count FROM trades t
+      JOIN bot_configs bc ON t.bot_config_id = bc.id
+      WHERE bc.user_id = ?
+    `);
+    const total = totalStmt.get(userId) as any;
+
+    const successStmt = db.prepare(`
+      SELECT COUNT(*) as count FROM trades t
+      JOIN bot_configs bc ON t.bot_config_id = bc.id
+      WHERE bc.user_id = ? AND t.status = 'completed'
+    `);
+    const success = successStmt.get(userId) as any;
+
+    const profitStmt = db.prepare(`
+      SELECT SUM(CAST(profit as REAL)) as total FROM trades t
+      JOIN bot_configs bc ON t.bot_config_id = bc.id
+      WHERE bc.user_id = ? AND t.profit IS NOT NULL
+    `);
+    const profit = profitStmt.get(userId) as any;
+
+    return {
+      totalTrades: total?.count || 0,
+      totalProfit: (profit?.total || 0).toString(),
+      successRate: total?.count > 0 ? (success?.count || 0) / total.count : 0
+    };
   },
 };
 

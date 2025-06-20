@@ -751,27 +751,396 @@ export class SandwichDetector extends EventEmitter {
   }
 
   private processSolanaTransaction(signatureResult: any, context: any): void {
-    // Process Solana transactions for MEV opportunities
-    // This would decode Solana DEX transactions (Raydium, Orca, Jupiter)
     try {
-      const { signature, err } = signatureResult;
-      const { slot } = context;
+      // Process Solana transaction for MEV opportunities
+      if (!signatureResult || !signatureResult.signature) {
+        return;
+      }
+
+      const signature = signatureResult.signature;
+      const transaction = signatureResult.transaction;
+
+      // Validate transaction structure
+      if (!transaction || !transaction.message) {
+        return;
+      }
+
+      // Extract program interactions
+      const instructions = transaction.message.instructions || [];
       
-      // Skip failed transactions
-      if (err) return;
-      
-      console.log(`Processing Solana transaction: ${signature} at slot ${slot}`);
-      
-      // In production, this would:
-      // 1. Fetch transaction details from Solana RPC
-      // 2. Decode instruction data for DEX interactions
-      // 3. Analyze for sandwich opportunities
-      // 4. Emit opportunities if found
-      
-      // For now, just log the processing
-      this.emit('solanaTransactionProcessed', { signature, slot });
+      for (const instruction of instructions) {
+        if (!instruction.programId) continue;
+
+        // Check if this is a DEX interaction
+        const dexType = this.identifySolanaDexProgram(instruction.programId);
+        if (!dexType) continue;
+
+        // Parse the instruction data for swap details
+        const swapData = this.parseSolanaSwapInstruction(instruction, dexType);
+        if (!swapData) continue;
+
+        // Create opportunity from parsed data
+        this.createSolanaOpportunity(signature, transaction, swapData, dexType, context)
+          .then(opportunity => {
+            if (opportunity) {
+              this.emit('opportunityFound', opportunity);
+            }
+          })
+          .catch(error => {
+            console.warn('Failed to create Solana opportunity:', error);
+          });
+      }
     } catch (error) {
-      console.error('Error processing Solana transaction:', error);
+      console.warn('Error processing Solana transaction:', error);
+    }
+  }
+
+  private identifySolanaDexProgram(programId: string): string | null {
+    const solanaRouters = this.DEX_ROUTERS.solana;
+    if (!solanaRouters) return null;
+
+    for (const [dexType, address] of Object.entries(solanaRouters)) {
+      if (address === programId) {
+        return dexType;
+      }
+    }
+    return null;
+  }
+
+  private parseSolanaSwapInstruction(instruction: any, dexType: string): any | null {
+    try {
+      // Parse instruction data based on DEX type
+      switch (dexType) {
+        case 'raydium':
+          return this.parseRaydiumInstruction(instruction);
+        case 'orca':
+          return this.parseOrcaInstruction(instruction);
+        case 'jupiter':
+          return this.parseJupiterInstruction(instruction);
+        default:
+          return null;
+      }
+    } catch (error) {
+      console.warn(`Failed to parse ${dexType} instruction:`, error);
+      return null;
+    }
+  }
+
+  private parseRaydiumInstruction(instruction: any): any | null {
+    try {
+      // Parse Raydium swap instruction
+      // This is a simplified implementation - real parsing would use Raydium SDK
+      const data = instruction.data;
+      if (!data || data.length < 16) return null;
+
+      // Basic instruction parsing (placeholder)
+      const instructionType = data[0];
+      if (instructionType !== 9) return null; // Not a swap instruction
+
+      return {
+        type: 'swap',
+        amountIn: this.readUint64(data, 1),
+        amountOutMin: this.readUint64(data, 9),
+        accounts: instruction.accounts || []
+      };
+    } catch (error) {
+      return null;
+    }
+  }
+
+  private parseOrcaInstruction(instruction: any): any | null {
+    try {
+      // Parse Orca/Whirlpool swap instruction
+      const data = instruction.data;
+      if (!data || data.length < 24) return null;
+
+      // Check for Whirlpool swap discriminator
+      const discriminator = data.slice(0, 8);
+      const swapDiscriminator = Buffer.from([0xf8, 0xc6, 0x9e, 0x91, 0xe1, 0x75, 0x87, 0xc8]);
+      
+      if (!discriminator.equals(swapDiscriminator)) return null;
+
+      return {
+        type: 'swap',
+        amount: this.readUint64(data, 8),
+        otherAmountThreshold: this.readUint64(data, 16),
+        sqrtPriceLimit: this.readUint128(data, 24),
+        amountSpecifiedIsInput: data[40] === 1,
+        accounts: instruction.accounts || []
+      };
+    } catch (error) {
+      return null;
+    }
+  }
+
+  private parseJupiterInstruction(instruction: any): any | null {
+    try {
+      // Parse Jupiter aggregator instruction
+      const data = instruction.data;
+      if (!data || data.length < 8) return null;
+
+      // Jupiter uses different instruction formats
+      // This is a simplified parsing approach
+      return {
+        type: 'route',
+        data: data,
+        accounts: instruction.accounts || []
+      };
+    } catch (error) {
+      return null;
+    }
+  }
+
+  private readUint64(buffer: Buffer, offset: number): number {
+    try {
+      return Number(buffer.readBigUInt64LE(offset));
+    } catch (error) {
+      return 0;
+    }
+  }
+
+  private readUint128(buffer: Buffer, offset: number): bigint {
+    try {
+      // Read 128-bit number as two 64-bit numbers
+      const low = buffer.readBigUInt64LE(offset);
+      const high = buffer.readBigUInt64LE(offset + 8);
+      return (high << BigInt(64)) | low;
+    } catch (error) {
+      return BigInt(0);
+    }
+  }
+
+  private async createSolanaOpportunity(
+    signature: string,
+    transaction: any,
+    swapData: any,
+    dexType: string,
+    context: any
+  ): Promise<SandwichOpportunity | null> {
+    try {
+      // Extract token mints from accounts
+      const accounts = swapData.accounts;
+      if (!accounts || accounts.length < 2) return null;
+
+      // For Solana, we need to resolve the actual token mints from account addresses
+      const tokenMints = await this.resolveSolanaTokenMints(accounts);
+      if (!tokenMints) return null;
+
+      // Get token information
+      const tokenInInfo = await this.getSolanaTokenInfo(tokenMints.tokenIn);
+      const tokenOutInfo = await this.getSolanaTokenInfo(tokenMints.tokenOut);
+      
+      if (!tokenInInfo || !tokenOutInfo) return null;
+
+      // Calculate amounts (simplified)
+      const amountIn = swapData.amountIn?.toString() || swapData.amount?.toString() || '0';
+      const expectedAmountOut = swapData.amountOutMin?.toString() || swapData.otherAmountThreshold?.toString() || '0';
+
+      // Get pool information
+      const poolInfo = await this.getSolanaPoolInfo(tokenMints.tokenIn, tokenMints.tokenOut, dexType);
+      if (!poolInfo) return null;
+
+      // Calculate trade impact and profitability
+      const tradeAnalysis = await this.calculateSolanaTradeImpact(
+        amountIn,
+        expectedAmountOut,
+        poolInfo,
+        tokenInInfo,
+        tokenOutInfo
+      );
+
+      if (!tradeAnalysis.isProfitable) return null;
+
+      // Calculate MEV score
+      const mevScore = this.calculateMevScore(tradeAnalysis, tokenInInfo, tokenOutInfo, poolInfo);
+
+      const opportunity: SandwichOpportunity = {
+        victimTxHash: signature,
+        victimTransaction: transaction,
+        chain: 'solana',
+        dexType: dexType as any,
+        tokenIn: tokenMints.tokenIn,
+        tokenOut: tokenMints.tokenOut,
+        amountIn: amountIn,
+        expectedAmountOut: expectedAmountOut,
+        poolAddress: poolInfo.address,
+        poolLiquidity: poolInfo.totalSupply,
+        gasPrice: '0', // Solana doesn't use gas price like EVM
+        priorityFee: context.slot?.toString() || '0',
+        estimatedProfit: tradeAnalysis.estimatedProfit,
+        profitability: tradeAnalysis.profitability,
+        confidence: tradeAnalysis.confidence,
+        timeToExpiry: 30000, // 30 seconds for Solana
+        slippage: tradeAnalysis.slippage,
+        mevScore
+      };
+
+      return opportunity;
+    } catch (error) {
+      console.warn('Failed to create Solana opportunity:', error);
+      return null;
+    }
+  }
+
+  private async resolveSolanaTokenMints(accounts: string[]): Promise<{ tokenIn: string; tokenOut: string } | null> {
+    try {
+      // This is DEX-specific logic to resolve token mints from account addresses
+      // In a real implementation, this would query the Solana RPC for account data
+      
+      if (accounts.length < 2) return null;
+
+      // Simplified approach - in reality would need to:
+      // 1. Fetch account data for each account
+      // 2. Determine which accounts are token accounts
+      // 3. Extract the mint addresses from token account data
+      // 4. Identify source and destination based on instruction structure
+
+      return {
+        tokenIn: accounts[0] || '', // Simplified - would be actual mint address
+        tokenOut: accounts[1] || ''  // Simplified - would be actual mint address
+      };
+    } catch (error) {
+      console.warn('Failed to resolve Solana token mints:', error);
+      return null;
+    }
+  }
+
+  private async getSolanaTokenInfo(mintAddress: string): Promise<TokenInfo | null> {
+    try {
+      // Check cache first
+      const cacheKey = `solana_token_${mintAddress}`;
+      const cached = this.tokenCache.get(cacheKey);
+      if (cached) return cached;
+
+      // In production, would fetch from:
+      // 1. Solana token list
+      // 2. Jupiter token API
+      // 3. On-chain metadata program
+      
+      // For now, return placeholder data
+      const tokenInfo: TokenInfo = {
+        address: mintAddress,
+        symbol: 'UNKNOWN',
+        decimals: 9, // Default Solana decimals
+        price: 1.0,  // Would fetch real price
+        liquidity: '1000000',
+        volume24h: '100000',
+        isHoneypot: false,
+        taxBuy: 0,
+        taxSell: 0,
+        verified: false
+      };
+
+      // Cache for 10 minutes
+      this.tokenCache.set(cacheKey, tokenInfo);
+      return tokenInfo;
+    } catch (error) {
+      console.warn('Failed to fetch Solana token info:', error);
+      return null;
+    }
+  }
+
+  private async getSolanaPoolInfo(tokenA: string, tokenB: string, dexType: string): Promise<PoolInfo | null> {
+    try {
+      const cacheKey = `solana_pool_${dexType}_${tokenA}_${tokenB}`;
+      const cached = this.poolCache.get(cacheKey);
+      if (cached) return cached;
+
+      // In production, would fetch pool data from DEX APIs:
+      // - Raydium: API endpoints or on-chain pool state
+      // - Orca: Whirlpool program state
+      // - Jupiter: Aggregated pool data
+
+      const poolInfo: PoolInfo = {
+        address: `${tokenA}_${tokenB}_pool`, // Would be actual pool address
+        token0: tokenA,
+        token1: tokenB,
+        reserve0: '1000000000', // Would fetch real reserves
+        reserve1: '1000000000',
+        totalSupply: '2000000000',
+        fee: 300, // 0.3% - would get real fee from pool
+        dexType: dexType,
+        lastUpdate: Date.now()
+      };
+
+      this.poolCache.set(cacheKey, poolInfo);
+      return poolInfo;
+    } catch (error) {
+      console.warn('Failed to fetch Solana pool info:', error);
+      return null;
+    }
+  }
+
+  private async calculateSolanaTradeImpact(
+    amountIn: string,
+    expectedAmountOut: string,
+    poolInfo: PoolInfo,
+    tokenInInfo: TokenInfo,
+    _tokenOutInfo: TokenInfo
+  ): Promise<{
+    isProfitable: boolean;
+    estimatedProfit: string;
+    profitability: number;
+    confidence: number;
+    slippage: number;
+  }> {
+    try {
+      const amountInValue = parseFloat(amountIn);
+      const expectedOutValue = parseFloat(expectedAmountOut);
+      const reserve0 = parseFloat(poolInfo.reserve0);
+      const reserve1 = parseFloat(poolInfo.reserve1);
+
+      // Use constant product formula for Solana AMMs
+      // x * y = k (constant product invariant)
+      
+      // Calculate actual output using AMM formula
+      const fee = poolInfo.fee / 10000; // Convert basis points to decimal
+      const amountInWithFee = amountInValue * (1 - fee);
+      const actualAmountOut = (reserve1 * amountInWithFee) / (reserve0 + amountInWithFee);
+
+      // Calculate slippage
+      const slippage = expectedOutValue > 0 
+        ? Math.abs(expectedOutValue - actualAmountOut) / expectedOutValue * 100
+        : 0;
+
+      // Estimate MEV profit (simplified)
+      const frontRunAmount = amountInValue * 0.3; // 30% front-run
+      const frontRunOutput = (reserve1 * frontRunAmount * (1 - fee)) / (reserve0 + frontRunAmount);
+      
+      // Update reserves after front-run
+      const newReserve0 = reserve0 + frontRunAmount;
+      const newReserve1 = reserve1 - frontRunOutput;
+      
+      // Calculate back-run profit
+      const backRunProfit = (newReserve0 * frontRunOutput * (1 - fee)) / (newReserve1 + frontRunOutput) - frontRunAmount;
+      
+      const estimatedProfitLamports = Math.max(0, backRunProfit);
+      const estimatedProfitUsd = estimatedProfitLamports * tokenInInfo.price;
+      
+      // Calculate profitability percentage
+      const profitability = frontRunAmount > 0 ? (estimatedProfitUsd / frontRunAmount) * 100 : 0;
+      
+      // Calculate confidence based on various factors
+      const liquidityFactor = Math.min(1, (reserve0 + reserve1) / 10000000); // Normalize liquidity
+      const slippageFactor = Math.max(0, 1 - slippage / 10); // Penalize high slippage
+      const confidence = (liquidityFactor * slippageFactor * 0.8) + 0.2; // Base confidence
+
+      return {
+        isProfitable: estimatedProfitUsd > 1, // Minimum $1 profit
+        estimatedProfit: estimatedProfitUsd.toString(),
+        profitability,
+        confidence: Math.min(1, confidence),
+        slippage
+      };
+    } catch (error) {
+      console.warn('Failed to calculate Solana trade impact:', error);
+      return {
+        isProfitable: false,
+        estimatedProfit: '0',
+        profitability: 0,
+        confidence: 0,
+        slippage: 100
+      };
     }
   }
 

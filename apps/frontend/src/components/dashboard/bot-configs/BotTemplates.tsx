@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useState, useMemo } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -12,7 +12,10 @@ import {
   Shield, 
   AlertTriangle,
   CheckCircle,
-  Star
+  Star,
+  Filter,
+  Search,
+  BarChart3
 } from 'lucide-react';
 import { 
   ArbitrageConfiguration, 
@@ -302,7 +305,12 @@ const SANDWICH_TEMPLATES: Template[] = [
 ];
 
 export function BotTemplates({ botType, onApplyTemplate }: BotTemplatesProps) {
-  const getTemplates = () => {
+  const [searchTerm, setSearchTerm] = useState('');
+  const [selectedRiskLevel, setSelectedRiskLevel] = useState<string>('all');
+  const [selectedComplexity, setSelectedComplexity] = useState<string>('all');
+  const [showOnlyPopular, setShowOnlyPopular] = useState(false);
+
+  const getAllTemplates = () => {
     switch (botType) {
       case 'arbitrage':
         return ARBITRAGE_TEMPLATES;
@@ -314,6 +322,47 @@ export function BotTemplates({ botType, onApplyTemplate }: BotTemplatesProps) {
         return [];
     }
   };
+
+  // Enhanced filtering and search functionality
+  const filteredTemplates = useMemo(() => {
+    let templates = getAllTemplates();
+
+    // Search filter
+    if (searchTerm) {
+      templates = templates.filter(template =>
+        template.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        template.description.toLowerCase().includes(searchTerm.toLowerCase())
+      );
+    }
+
+    // Risk level filter
+    if (selectedRiskLevel !== 'all') {
+      templates = templates.filter(template => template.riskLevel === selectedRiskLevel);
+    }
+
+    // Complexity filter
+    if (selectedComplexity !== 'all') {
+      templates = templates.filter(template => template.complexity === selectedComplexity);
+    }
+
+    // Popular filter
+    if (showOnlyPopular) {
+      templates = templates.filter(template => template.popular);
+    }
+
+    return templates;
+  }, [searchTerm, selectedRiskLevel, selectedComplexity, showOnlyPopular, botType]);
+
+  // Template statistics
+  const templateStats = useMemo(() => {
+    const allTemplates = getAllTemplates();
+    return {
+      total: allTemplates.length,
+      popular: allTemplates.filter(t => t.popular).length,
+      lowRisk: allTemplates.filter(t => t.riskLevel === 'low').length,
+      beginner: allTemplates.filter(t => t.complexity === 'beginner').length
+    };
+  }, [botType]);
 
   const getBotIcon = (type: string) => {
     switch (type) {
@@ -367,16 +416,117 @@ export function BotTemplates({ botType, onApplyTemplate }: BotTemplatesProps) {
     }
   };
 
-  const templates = getTemplates();
+  const templates = filteredTemplates;
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center gap-2 mb-4">
-        {getBotIcon(botType)}
-        <h3 className="text-lg font-medium">
-          {botType.charAt(0).toUpperCase() + botType.slice(1).replace('-', ' ')} Templates
-        </h3>
+    <div className="space-y-6">
+      {/* Header with Statistics */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          {getBotIcon(botType)}
+          <div>
+            <h3 className="text-lg font-medium">
+              {botType.charAt(0).toUpperCase() + botType.slice(1).replace('-', ' ')} Templates
+            </h3>
+            <p className="text-sm text-muted-foreground">
+              {templateStats.total} templates • {templateStats.popular} popular • {templateStats.lowRisk} low-risk
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <Badge variant="outline" className="bg-blue-50 text-blue-700">
+            <BarChart3 className="h-3 w-3 mr-1" />
+            {templates.length} showing
+          </Badge>
+        </div>
       </div>
+
+      {/* Search and Filters */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Filter className="h-5 w-5" />
+            Filter & Search Templates
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* Search Bar */}
+          <div className="relative">
+            <Search className="h-4 w-4 absolute left-3 top-3 text-muted-foreground" />
+            <input
+              type="text"
+              placeholder="Search templates by name or description..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full pl-10 pr-4 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-primary/20"
+            />
+          </div>
+
+          {/* Filter Options */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div>
+              <label className="text-sm font-medium mb-2 block">Risk Level</label>
+              <select
+                value={selectedRiskLevel}
+                onChange={(e) => setSelectedRiskLevel(e.target.value)}
+                className="w-full p-2 border rounded-md text-sm"
+              >
+                <option value="all">All Risk Levels</option>
+                <option value="low">Low Risk</option>
+                <option value="medium">Medium Risk</option>
+                <option value="high">High Risk</option>
+              </select>
+            </div>
+            
+            <div>
+              <label className="text-sm font-medium mb-2 block">Complexity</label>
+              <select
+                value={selectedComplexity}
+                onChange={(e) => setSelectedComplexity(e.target.value)}
+                className="w-full p-2 border rounded-md text-sm"
+              >
+                <option value="all">All Levels</option>
+                <option value="beginner">Beginner</option>
+                <option value="intermediate">Intermediate</option>
+                <option value="advanced">Advanced</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="text-sm font-medium mb-2 block">Show Only</label>
+              <div className="flex items-center gap-2 p-2 border rounded-md">
+                <input
+                  type="checkbox"
+                  checked={showOnlyPopular}
+                  onChange={(e) => setShowOnlyPopular(e.target.checked)}
+                  className="rounded"
+                />
+                <span className="text-sm flex items-center gap-1">
+                  <Star className="h-3 w-3" />
+                  Popular Templates
+                </span>
+              </div>
+            </div>
+
+            <div>
+              <label className="text-sm font-medium mb-2 block">Quick Actions</label>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setSearchTerm('');
+                  setSelectedRiskLevel('all');
+                  setSelectedComplexity('all');
+                  setShowOnlyPopular(false);
+                }}
+                className="w-full text-sm"
+              >
+                Clear All Filters
+              </Button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
       <div className="space-y-4">
         {templates.map((template) => (
@@ -514,11 +664,42 @@ export function BotTemplates({ botType, onApplyTemplate }: BotTemplatesProps) {
       </div>
 
       {templates.length === 0 && (
-        <div className="text-center py-8 text-muted-foreground">
-          <Bot className="h-12 w-12 mx-auto mb-4 opacity-50" />
-          <p>No templates available for this bot type</p>
-          <p className="text-sm">Templates will be added in future updates</p>
-        </div>
+        <Card>
+          <CardContent className="text-center py-12">
+            {getAllTemplates().length === 0 ? (
+              <div className="text-muted-foreground">
+                <Bot className="h-16 w-16 mx-auto mb-6 opacity-50" />
+                <h3 className="text-lg font-medium mb-2">No Templates Available</h3>
+                <p className="text-sm mb-4">
+                  No templates are currently available for {botType.replace('-', ' ')} bots.
+                </p>
+                <p className="text-xs">
+                  Templates will be added in future updates to help you get started quickly.
+                </p>
+              </div>
+            ) : (
+              <div className="text-muted-foreground">
+                <Search className="h-16 w-16 mx-auto mb-6 opacity-50" />
+                <h3 className="text-lg font-medium mb-2">No Matching Templates</h3>
+                <p className="text-sm mb-4">
+                  No templates match your current filter criteria.
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setSearchTerm('');
+                    setSelectedRiskLevel('all');
+                    setSelectedComplexity('all');
+                    setShowOnlyPopular(false);
+                  }}
+                >
+                  Clear All Filters
+                </Button>
+              </div>
+            )}
+          </CardContent>
+        </Card>
       )}
 
       <Card className="border-blue-200 bg-blue-50">

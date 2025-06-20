@@ -48,6 +48,22 @@ export {
   type AggregatorStats
 } from './dex-aggregator';
 
+export {
+  MempoolMonitor,
+  type MempoolConfig,
+  type PendingTransaction,
+  type SolanaTransaction,
+  type MempoolStats
+} from './mempool-monitor';
+
+export {
+  PriceOracle,
+  type PriceSource,
+  type TokenPrice,
+  type PriceOracleConfig,
+  type PriceComparisonResult
+} from './price-oracle';
+
 // Factory function for creating chain clients
 export function createChainClient(chain: string, privateKey: string, rpcUrl: string) {
   // Create logger

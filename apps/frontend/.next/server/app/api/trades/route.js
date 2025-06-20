@@ -1,77 +1,28 @@
-"use strict";(()=>{var e={};e.id=258,e.ids=[258],e.modules={517:e=>{e.exports=require("next/dist/compiled/next-server/app-route.runtime.prod.js")},3292:(e,t,a)=>{a.r(t),a.d(t,{headerHooks:()=>R,originalPathname:()=>I,patchFetch:()=>L,requestAsyncStorage:()=>_,routeModule:()=>u,serverHooks:()=>N,staticGenerationAsyncStorage:()=>p,staticGenerationBailout:()=>l});var r={};a.r(r),a.d(r,{GET:()=>n,POST:()=>T,PUT:()=>c});var s=a(5649),i=a(8584),d=a(5144),o=a(7180),E=a(4936);async function n(e){try{let t;let{searchParams:a}=new URL(e.url),r=a.get("userId"),s=a.get("botConfigId");if(!r&&!s)return o.Z.json({success:!1,error:"User ID or Bot Config ID is required"},{status:400});return t=s?E.cC.findByBotConfigId(s):r?E.cC.findByUserId(r):[],o.Z.json({success:!0,data:t})}catch(e){return console.error("Error fetching trades:",e),o.Z.json({success:!1,error:"Failed to fetch trades"},{status:500})}}async function T(e){try{let t=await e.json(),a=`trade_${Date.now()}_${Math.random().toString(36).substr(2,9)}`,r={id:a,...t};return E.cC.create(r),o.Z.json({success:!0,data:{id:a}})}catch(e){return console.error("Error creating trade:",e),o.Z.json({success:!1,error:"Failed to record trade"},{status:500})}}async function c(e){try{let{id:t,status:a,completedAt:r}=await e.json();if(!t||!a)return o.Z.json({success:!1,error:"Trade ID and status are required"},{status:400});return E.cC.updateStatus(t,a,r),o.Z.json({success:!0,data:!0})}catch(e){return console.error("Error updating trade:",e),o.Z.json({success:!1,error:"Failed to update trade"},{status:500})}}let u=new s.AppRouteRouteModule({definition:{kind:i.x.APP_ROUTE,page:"/api/trades/route",pathname:"/api/trades",filename:"route",bundlePath:"app/api/trades/route"},resolvedPagePath:"C:\\Users\\User1\\Downloads\\TradingBot\\apps\\frontend\\src\\app\\api\\trades\\route.ts",nextConfigOutput:"",userland:r}),{requestAsyncStorage:_,staticGenerationAsyncStorage:p,serverHooks:N,headerHooks:R,staticGenerationBailout:l}=u,I="/api/trades/route";function L(){return(0,d.patchFetch)({serverHooks:N,staticGenerationAsyncStorage:p})}},4936:(e,t,a)=>{a.d(t,{mS:()=>d,cC:()=>o,Gk:()=>i});let r=require("better-sqlite3"),s=new(a.n(r)())(process.env.DATABASE_PATH||"trading_bot.db"),i={create:e=>s.prepare(`
-      INSERT INTO wallets (id, user_id, address, encrypted_private_key, chain, name)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(e.id,e.userId,e.address,e.encryptedPrivateKey,e.chain,e.name),findByUserId:e=>s.prepare("SELECT * FROM wallets WHERE user_id = ?").all(e).map(e=>({id:e.id,userId:e.user_id,address:e.address,encryptedPrivateKey:e.encrypted_private_key,chain:e.chain,name:e.name,createdAt:e.created_at})),findById:e=>{let t=s.prepare("SELECT * FROM wallets WHERE id = ?").get(e);return t?{id:t.id,userId:t.user_id,address:t.address,encryptedPrivateKey:t.encrypted_private_key,chain:t.chain,name:t.name,createdAt:t.created_at}:null},delete:e=>s.prepare("DELETE FROM wallets WHERE id = ?").run(e)},d={create:e=>s.prepare(`
-      INSERT INTO bot_configs (id, user_id, wallet_id, bot_type, config_data, is_active)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(e.id,e.userId,e.walletId,"ARBITRAGE",JSON.stringify(e),e.isActive),findByUserId:e=>s.prepare("SELECT * FROM bot_configs WHERE user_id = ?").all(e).map(e=>JSON.parse(e.config_data)),findById:e=>{let t=s.prepare("SELECT * FROM bot_configs WHERE id = ?").get(e);return t?JSON.parse(t.config_data):null},updateStatus:(e,t)=>s.prepare("UPDATE bot_configs SET is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(t,e),delete:e=>s.prepare("DELETE FROM bot_configs WHERE id = ?").run(e)},o={create:e=>s.prepare(`
-      INSERT INTO trades (id, bot_config_id, bot_type, tx_hash, chain, token_in, token_out, amount_in, amount_out, gas_used, gas_price, profit, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(e.id,e.botConfigId,e.botType,e.txHash,e.chain,e.tokenIn,e.tokenOut,e.amountIn,e.amountOut,e.gasUsed,e.gasPrice,e.profit,e.status),findByBotConfigId:e=>s.prepare("SELECT * FROM trades WHERE bot_config_id = ? ORDER BY created_at DESC").all(e).map(e=>({id:e.id,botConfigId:e.bot_config_id,botType:e.bot_type,txHash:e.tx_hash,chain:e.chain,tokenIn:e.token_in,tokenOut:e.token_out,amountIn:e.amount_in,amountOut:e.amount_out,gasUsed:e.gas_used,gasPrice:e.gas_price,profit:e.profit,status:e.status,createdAt:e.created_at,completedAt:e.completed_at})),findByUserId:e=>s.prepare(`
-      SELECT t.* FROM trades t
-      JOIN bot_configs bc ON t.bot_config_id = bc.id
-      WHERE bc.user_id = ?
-      ORDER BY t.created_at DESC
-    `).all(e).map(e=>({id:e.id,botConfigId:e.bot_config_id,botType:e.bot_type,txHash:e.tx_hash,chain:e.chain,tokenIn:e.token_in,tokenOut:e.token_out,amountIn:e.amount_in,amountOut:e.amount_out,gasUsed:e.gas_used,gasPrice:e.gas_price,profit:e.profit,status:e.status,createdAt:e.created_at,completedAt:e.completed_at})),updateStatus:(e,t,a)=>s.prepare("UPDATE trades SET status = ?, completed_at = ? WHERE id = ?").run(t,a,e)};s.exec(`
-    CREATE TABLE IF NOT EXISTS users (
-      id TEXT PRIMARY KEY,
-      email TEXT UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `),s.exec(`
-    CREATE TABLE IF NOT EXISTS wallets (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      address TEXT NOT NULL,
-      encrypted_private_key TEXT NOT NULL,
-      chain TEXT NOT NULL,
-      name TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (user_id) REFERENCES users (id)
-    )
-  `),s.exec(`
-    CREATE TABLE IF NOT EXISTS bot_configs (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      wallet_id TEXT NOT NULL,
-      bot_type TEXT NOT NULL,
-      config_data TEXT NOT NULL,
-      is_active BOOLEAN DEFAULT FALSE,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (user_id) REFERENCES users (id),
-      FOREIGN KEY (wallet_id) REFERENCES wallets (id)
-    )
-  `),s.exec(`
-    CREATE TABLE IF NOT EXISTS trades (
-      id TEXT PRIMARY KEY,
-      bot_config_id TEXT NOT NULL,
-      bot_type TEXT NOT NULL,
-      tx_hash TEXT NOT NULL,
-      chain TEXT NOT NULL,
-      token_in TEXT NOT NULL,
-      token_out TEXT NOT NULL,
-      amount_in TEXT NOT NULL,
-      amount_out TEXT NOT NULL,
-      gas_used TEXT NOT NULL,
-      gas_price TEXT NOT NULL,
-      profit TEXT,
-      status TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      completed_at DATETIME,
-      FOREIGN KEY (bot_config_id) REFERENCES bot_configs (id)
-    )
-  `),s.exec(`
-    CREATE TABLE IF NOT EXISTS bot_status (
-      bot_config_id TEXT PRIMARY KEY,
-      is_running BOOLEAN DEFAULT FALSE,
-      last_activity DATETIME,
-      total_trades INTEGER DEFAULT 0,
-      total_profit TEXT DEFAULT '0',
-      errors TEXT,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (bot_config_id) REFERENCES bot_configs (id)
-    )
-  `),console.log("Database initialized successfully")}};var t=require("../../../webpack-runtime.js");t.C(e);var a=e=>t(t.s=e),r=t.X(0,[807,309],()=>a(3292));module.exports=r})();
+"use strict";(()=>{var e={};e.id=258,e.ids=[258],e.modules={5890:e=>{e.exports=require("better-sqlite3")},517:e=>{e.exports=require("next/dist/compiled/next-server/app-route.runtime.prod.js")},4300:e=>{e.exports=require("buffer")},6113:e=>{e.exports=require("crypto")},2361:e=>{e.exports=require("events")},7147:e=>{e.exports=require("fs")},3685:e=>{e.exports=require("http")},5687:e=>{e.exports=require("https")},1808:e=>{e.exports=require("net")},9563:e=>{e.exports=require("os")},1017:e=>{e.exports=require("path")},5477:e=>{e.exports=require("punycode")},2781:e=>{e.exports=require("stream")},4404:e=>{e.exports=require("tls")},7310:e=>{e.exports=require("url")},9796:e=>{e.exports=require("zlib")},3292:(e,t,r)=>{r.r(t),r.d(t,{headerHooks:()=>k,originalPathname:()=>T,patchFetch:()=>Z,requestAsyncStorage:()=>j,routeModule:()=>w,serverHooks:()=>I,staticGenerationAsyncStorage:()=>z,staticGenerationBailout:()=>q});var s={};r.r(s),r.d(s,{DELETE:()=>b,GET:()=>h,POST:()=>y,PUT:()=>x});var a=r(5649),o=r(8584),i=r(5144),n=r(7180),d=r(1304),u=r(1376),l=r(5113),c=r(2812),p=r(4538);function m(){let e=process.env.SUPABASE_URL,t=process.env.SUPABASE_SERVICE_ROLE_KEY;if(!e||!t)throw Error("Supabase configuration is missing. Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables.");return(0,d.eI)(e,t)}let g=u.z.object({botId:u.z.string().uuid().optional(),status:u.z.enum(["pending","executing","completed","failed","cancelled"]).optional(),limit:u.z.string().transform(e=>parseInt(e,10)).pipe(u.z.number().min(1).max(100)).optional().default("50"),offset:u.z.string().transform(e=>parseInt(e,10)).pipe(u.z.number().min(0)).optional().default("0"),startDate:u.z.string().datetime().optional(),endDate:u.z.string().datetime().optional()}),f=u.z.object({botId:u.z.string().uuid("Invalid bot ID"),tradeType:u.z.enum(["arbitrage","copy","sandwich"],{invalid_type_error:"Invalid trade type"}),chain:u.z.enum(["ethereum","bsc","polygon","arbitrum","solana"],{invalid_type_error:"Invalid chain"}),tokenInSymbol:u.z.string().min(1,"Token in symbol is required"),tokenOutSymbol:u.z.string().min(1,"Token out symbol is required"),tokenInAddress:u.z.string().optional(),tokenOutAddress:u.z.string().optional(),amountIn:u.z.string().min(1,"Amount in is required"),expectedAmountOut:u.z.string().optional(),maxSlippage:u.z.number().min(.1).max(10,"Max slippage must be between 0.1% and 10%").optional(),gasLimit:u.z.string().optional(),gasPrice:u.z.string().optional(),deadline:u.z.string().datetime().optional()}),_=u.z.object({tradeId:u.z.string().uuid("Invalid trade ID"),status:u.z.enum(["pending","executing","completed","failed","cancelled"]),txHash:u.z.string().optional(),amountOut:u.z.string().optional(),gasUsed:u.z.string().optional(),gasPrice:u.z.string().optional(),profitLossUsd:u.z.string().optional(),gasFeeUsd:u.z.string().optional(),errorMessage:u.z.string().optional(),executedAt:u.z.string().datetime().optional()});async function h(e){try{let t=await c.qQ.check(e);if(!t.success)return n.Z.json({error:"Rate limit exceeded",retryAfter:Math.ceil((t.resetTime-Date.now())/1e3)},{status:429});let r=await (0,l.PZ)(e);if(!r.success)return n.Z.json({error:"Unauthorized",details:r.error},{status:401});let s=r.payload?.sub;if(!s)return n.Z.json({error:"Invalid token payload"},{status:401});let a=new URL(e.url),o=Object.fromEntries(a.searchParams.entries()),i=g.safeParse(o);if(!i.success)return n.Z.json({error:"Invalid query parameters",details:i.error.errors},{status:400});let{botId:d,status:u,limit:p,offset:f,startDate:_,endDate:h}=i.data,y=m().from("trade_history").select(`
+        id,
+        bot_id,
+        trade_type,
+        status,
+        chain,
+        token_in_symbol,
+        token_out_symbol,
+        token_in_address,
+        token_out_address,
+        amount_in,
+        amount_out,
+        expected_amount_out,
+        max_slippage,
+        tx_hash,
+        gas_limit,
+        gas_used,
+        gas_price,
+        profit_loss_usd,
+        gas_fee_usd,
+        error_message,
+        created_at,
+        executed_at,
+        bot_configurations!inner(user_id, name, type)
+      `).eq("bot_configurations.user_id",s).order("created_at",{ascending:!1}).range(f,f+p-1);d&&(y=y.eq("bot_id",d)),u&&(y=y.eq("status",u)),_&&(y=y.gte("created_at",_)),h&&(y=y.lte("created_at",h));let{data:x,error:b,count:w}=await y;if(b)return console.error("Error fetching trades:",b),n.Z.json({error:"Failed to fetch trades"},{status:500});let j=x?.length||0,z=x?.filter(e=>"completed"===e.status)||[],I=x?.filter(e=>"failed"===e.status)||[],k=z.reduce((e,t)=>e+parseFloat(t.profit_loss_usd||"0"),0),q=x?.reduce((e,t)=>e+parseFloat(t.gas_fee_usd||"0"),0)||0;return n.Z.json({success:!0,data:{trades:x||[],pagination:{limit:p,offset:f,total:w||j,hasMore:j===p},summary:{totalTrades:j,completedTrades:z.length,failedTrades:I.length,successRate:j>0?z.length/j*100:0,totalProfitLoss:Math.round(100*k)/100,totalGasFees:Math.round(100*q)/100,netProfit:Math.round((k-q)*100)/100}}})}catch(e){return console.error("Error in GET trades:",e),n.Z.json({error:"Failed to fetch trades"},{status:500})}}async function y(e){try{let t=await c.qQ.check(e,20,6e4);if(!t.success)return n.Z.json({error:"Rate limit exceeded",retryAfter:Math.ceil((t.resetTime-Date.now())/1e3)},{status:429});let r=await (0,l.PZ)(e);if(!r.success)return n.Z.json({error:"Unauthorized",details:r.error},{status:401});let s=r.payload?.sub;if(!s)return n.Z.json({error:"Invalid token payload"},{status:401});let a=await e.json(),o=f.safeParse(a);if(!o.success)return n.Z.json({error:"Invalid trade data",details:o.error.errors},{status:400});let i=o.data,d=m(),{data:u,error:g}=await d.from("bot_configurations").select("id, user_id, name, type, is_active, is_paper_trading").eq("id",i.botId).eq("user_id",s).single();if(g||!u)return n.Z.json({error:"Bot configuration not found or access denied"},{status:404});if(!u.is_active)return n.Z.json({error:"Bot is not active"},{status:400});let _=`trade_${Date.now()}_${(0,p.R1)(8)}`,{data:h,error:y}=await d.from("trade_history").insert({id:_,bot_id:i.botId,trade_type:i.tradeType,status:"pending",chain:i.chain,token_in_symbol:i.tokenInSymbol,token_out_symbol:i.tokenOutSymbol,token_in_address:i.tokenInAddress,token_out_address:i.tokenOutAddress,amount_in:i.amountIn,expected_amount_out:i.expectedAmountOut,max_slippage:i.maxSlippage,gas_limit:i.gasLimit,gas_price:i.gasPrice,created_at:new Date().toISOString()}).select().single();if(y)return console.error("Error creating trade:",y),n.Z.json({error:"Failed to create trade record"},{status:500});return console.log(`Trade created by user ${s}: ${i.tradeType} - ${i.tokenInSymbol}/${i.tokenOutSymbol}`),n.Z.json({success:!0,data:h})}catch(e){return console.error("Error creating trade:",e),n.Z.json({error:"Failed to create trade"},{status:500})}}async function x(e){try{let t=await c.qQ.check(e,50,6e4);if(!t.success)return n.Z.json({error:"Rate limit exceeded",retryAfter:Math.ceil((t.resetTime-Date.now())/1e3)},{status:429});let r=await (0,l.PZ)(e);if(!r.success)return n.Z.json({error:"Unauthorized",details:r.error},{status:401});let s=r.payload?.sub;if(!s)return n.Z.json({error:"Invalid token payload"},{status:401});let a=await e.json(),o=_.safeParse(a);if(!o.success)return n.Z.json({error:"Invalid update data",details:o.error.errors},{status:400});let{tradeId:i,status:d,...u}=o.data,p={status:d,updated_at:new Date().toISOString()};u.txHash&&(p.tx_hash=u.txHash),u.amountOut&&(p.amount_out=u.amountOut),u.gasUsed&&(p.gas_used=u.gasUsed),u.gasPrice&&(p.gas_price=u.gasPrice),u.profitLossUsd&&(p.profit_loss_usd=u.profitLossUsd),u.gasFeeUsd&&(p.gas_fee_usd=u.gasFeeUsd),u.errorMessage&&(p.error_message=u.errorMessage),u.executedAt&&(p.executed_at=u.executedAt),"completed"!==d&&"failed"!==d||u.executedAt||(p.executed_at=new Date().toISOString());let g=m(),{data:f,error:h}=await g.from("trade_history").update(p).eq("id",i).eq("bot_configurations.user_id",s).select(`
+        *,
+        bot_configurations!inner(user_id)
+      `).single();if(h){if(console.error("Error updating trade:",h),"PGRST116"===h.code)return n.Z.json({error:"Trade not found or access denied"},{status:404});return n.Z.json({error:"Failed to update trade"},{status:500})}return console.log(`Trade updated by user ${s}: ${i} - ${d}`),n.Z.json({success:!0,data:f})}catch(e){return console.error("Error updating trade:",e),n.Z.json({error:"Failed to update trade"},{status:500})}}async function b(e){try{let t=await c.qQ.check(e);if(!t.success)return n.Z.json({error:"Rate limit exceeded",retryAfter:Math.ceil((t.resetTime-Date.now())/1e3)},{status:429});let r=await (0,l.PZ)(e);if(!r.success)return n.Z.json({error:"Unauthorized",details:r.error},{status:401});let s=r.payload?.sub;if(!s)return n.Z.json({error:"Invalid token payload"},{status:401});let{searchParams:a}=new URL(e.url),o=a.get("tradeId");if(!o)return n.Z.json({error:"Trade ID is required"},{status:400});let i=m(),{error:d}=await i.from("trade_history").delete().eq("id",o).eq("bot_configurations.user_id",s).in("status",["failed","cancelled"]);if(d)return console.error("Error deleting trade:",d),n.Z.json({error:"Failed to delete trade or trade cannot be deleted"},{status:500});return console.log(`Trade deleted by user ${s}: ${o}`),n.Z.json({success:!0,message:"Trade deleted successfully"})}catch(e){return console.error("Error deleting trade:",e),n.Z.json({error:"Failed to delete trade"},{status:500})}}let w=new a.AppRouteRouteModule({definition:{kind:o.x.APP_ROUTE,page:"/api/trades/route",pathname:"/api/trades",filename:"route",bundlePath:"app/api/trades/route"},resolvedPagePath:"C:\\Users\\User1\\Downloads\\TradingBot\\apps\\frontend\\src\\app\\api\\trades\\route.ts",nextConfigOutput:"",userland:s}),{requestAsyncStorage:j,staticGenerationAsyncStorage:z,serverHooks:I,headerHooks:k,staticGenerationBailout:q}=w,T="/api/trades/route";function Z(){return(0,i.patchFetch)({serverHooks:I,staticGenerationAsyncStorage:z})}},2812:(e,t,r)=>{r.d(t,{qQ:()=>a});class s{constructor(e=100,t=9e5){this.store={},this.defaultLimit=e,this.defaultWindow=t,setInterval(()=>{this.cleanup()},3e5)}async check(e,t=this.defaultLimit,r=this.defaultWindow){let s=this.getIdentifier(e),a=Date.now(),o=`${s}:${Math.floor(a/r)}`;this.store[o]||(this.store[o]={count:0,resetTime:a+r});let i=this.store[o];return i.count>=t?{success:!1,remaining:0,resetTime:i.resetTime,error:`Rate limit exceeded. Try again in ${Math.ceil((i.resetTime-a)/1e3)} seconds.`}:(i.count++,{success:!0,remaining:t-i.count,resetTime:i.resetTime})}getIdentifier(e){let t=e.headers.get("x-user-id");if(t)return`user:${t}`;let r=e.headers.get("x-forwarded-for"),s=e.headers.get("x-real-ip"),a=r?r.split(",")[0]?.trim():s||"unknown";return`ip:${a}`}cleanup(){let e=Date.now();Object.keys(this.store).forEach(t=>{let r=this.store[t];r&&r.resetTime<e&&delete this.store[t]})}async checkLimit(e,t="default"){let r="action"===t?10:this.defaultLimit,s=await this.check(e,r);return s.success?{allowed:!0}:{allowed:!1,retryAfter:Math.ceil((s.resetTime-Date.now())/1e3)}}getStatus(e){let t=this.getIdentifier(e),r=Date.now(),s=`${t}:${Math.floor(r/this.defaultWindow)}`,a=this.store[s];return a?{count:a.count,remaining:Math.max(0,this.defaultLimit-a.count),resetTime:a.resetTime}:{count:0,remaining:this.defaultLimit,resetTime:r+this.defaultWindow}}}let a=new s;function o(e=100,t=9e5){return async r=>{let s=await a.check(r,e,t);return{...s,headers:{"X-RateLimit-Limit":e.toString(),"X-RateLimit-Remaining":s.remaining.toString(),"X-RateLimit-Reset":Math.ceil(s.resetTime/1e3).toString()}}}}o(5,9e5),o(100,9e5),o(50,6e4)}};var t=require("../../../webpack-runtime.js");t.C(e);var r=e=>t(t.s=e),s=t.X(0,[807,457,113],()=>r(3292));module.exports=s})();

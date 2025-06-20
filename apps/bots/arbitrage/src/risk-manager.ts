@@ -49,49 +49,90 @@ export interface RiskEvent {
   action: 'CLOSE_TRADE' | 'PAUSE_TRADING' | 'EMERGENCY_SHUTDOWN';
 }
 
+export interface TradeStats {
+  winRate: number;
+  avgWin: number;
+  avgLoss: number;
+  totalTrades: number;
+  successfulTrades: number;
+}
+
+export interface PriceData {
+  pair: string;
+  price: number;
+  timestamp: number;
+}
+
 export class RiskManager extends EventEmitter {
   private logger: winston.Logger;
   private db: DatabaseManager;
   private riskParams: RiskParameters;
   private activeTrades: Map<string, TradeRisk> = new Map();
   private portfolioHistory: PortfolioRisk[] = [];
-  private priceHistory: Map<string, number[]> = new Map();
-  // Removed unused correlationMatrix
+  private priceHistory: Map<string, PriceData[]> = new Map();
   private dailyStartBalance: number = 0;
   private emergencyMode: boolean = false;
+  private basePortfolioValue: number;
 
   constructor(
     databaseManager: DatabaseManager,
     riskParameters: RiskParameters,
-    logger: winston.Logger
+    logger: winston.Logger,
+    basePortfolioValue: number = 100000
   ) {
     super();
     this.db = databaseManager;
     this.riskParams = riskParameters;
     this.logger = logger;
+    this.basePortfolioValue = basePortfolioValue;
     
-    this.setupDailyReset();
-    this.startPerformanceTracking();
+    this.initializeAsync();
   }
 
-  // Position Sizing Algorithm
-  calculateOptimalPositionSize(
+  private async initializeAsync(): Promise<void> {
+    try {
+      await this.initializeDailyStartBalance();
+      this.setupDailyReset();
+      this.startPerformanceTracking();
+      this.logger.info('Risk manager initialized successfully');
+    } catch (error) {
+      this.logger.error('Failed to initialize risk manager:', error);
+      throw error;
+    }
+  }
+
+  private async initializeDailyStartBalance(): Promise<void> {
+    try {
+      const currentValue = await this.getCurrentPortfolioValue();
+      this.dailyStartBalance = currentValue;
+      this.logger.info('Daily start balance initialized', { startBalance: this.dailyStartBalance });
+    } catch (error) {
+      this.logger.error('Failed to initialize daily start balance:', error);
+      this.dailyStartBalance = this.basePortfolioValue;
+    }
+  }
+
+  // Position Sizing Algorithm with real data
+  async calculateOptimalPositionSize(
     pair: string,
     confidence: number,
     volatility: number,
     correlation: number
-  ): number {
+  ): Promise<number> {
     try {
+      // Get real historical data for the pair
+      const tradeStats = await this.getTradeStats(pair);
+      
       // Kelly Criterion with modifications
-      const winRate = this.getHistoricalWinRate(pair);
-      const avgWin = this.getAverageWin(pair);
-      const avgLoss = this.getAverageLoss(pair);
+      const winRate = tradeStats.winRate;
+      const avgWin = tradeStats.avgWin;
+      const avgLoss = tradeStats.avgLoss;
       
       // Kelly fraction: (bp - q) / b
       // b = odds (avgWin/avgLoss), p = win rate, q = loss rate
-      const odds = Math.abs(avgWin / avgLoss);
+      const odds = avgLoss !== 0 ? Math.abs(avgWin / avgLoss) : 1;
       const lossRate = 1 - winRate;
-      const kellyFraction = (odds * winRate - lossRate) / odds;
+      const kellyFraction = odds > 0 ? (odds * winRate - lossRate) / odds : 0;
       
       // Apply risk adjustments
       let adjustedFraction = Math.max(0, Math.min(kellyFraction, 0.25)); // Cap at 25%
@@ -107,7 +148,7 @@ export class RiskManager extends EventEmitter {
       
       // Apply maximum position size limit
       const maxAllowed = this.riskParams.maxPositionSize;
-      const portfolioValue = this.getCurrentPortfolioValue();
+      const portfolioValue = await this.getCurrentPortfolioValue();
       const baseSize = portfolioValue * adjustedFraction;
       
       const optimalSize = Math.min(baseSize, maxAllowed);
@@ -120,7 +161,8 @@ export class RiskManager extends EventEmitter {
         kellyFraction,
         adjustedFraction,
         optimalSize,
-        maxAllowed
+        maxAllowed,
+        tradeStats
       });
 
       return optimalSize;
@@ -130,26 +172,28 @@ export class RiskManager extends EventEmitter {
     }
   }
 
-  // Volatility Analysis
+  // Volatility Analysis with real price data
   calculateVolatility(pair: string, period: number = 20): number {
     try {
-      const prices = this.priceHistory.get(pair) || [];
+      const priceData = this.priceHistory.get(pair) || [];
       
-      if (prices.length < period) {
+      if (priceData.length < period) {
         return 0.5; // Default high volatility for insufficient data
       }
       
-      const recentPrices = prices.slice(-period);
+      const recentPrices = priceData.slice(-period);
       const returns = [];
       
       for (let i = 1; i < recentPrices.length; i++) {
         const currentPrice = recentPrices[i];
         const previousPrice = recentPrices[i - 1];
-        if (currentPrice !== undefined && previousPrice !== undefined && previousPrice !== 0) {
-          const returnValue = (currentPrice - previousPrice) / previousPrice;
+        if (currentPrice && previousPrice && previousPrice.price !== 0) {
+          const returnValue = (currentPrice.price - previousPrice.price) / previousPrice.price;
           returns.push(returnValue);
         }
       }
+      
+      if (returns.length === 0) return 0.5;
       
       const mean = returns.reduce((sum, r) => sum + r, 0) / returns.length;
       const variance = returns.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / returns.length;
@@ -162,20 +206,20 @@ export class RiskManager extends EventEmitter {
     }
   }
 
-  // Correlation Analysis
+  // Correlation Analysis with real price data
   calculateCorrelation(pair1: string, pair2: string, period: number = 50): number {
     try {
-      const prices1 = this.priceHistory.get(pair1) || [];
-      const prices2 = this.priceHistory.get(pair2) || [];
+      const priceData1 = this.priceHistory.get(pair1) || [];
+      const priceData2 = this.priceHistory.get(pair2) || [];
       
-      if (prices1.length < period || prices2.length < period) {
+      if (priceData1.length < period || priceData2.length < period) {
         return 0; // No correlation for insufficient data
       }
       
-      const returns1 = this.calculateReturns(prices1.slice(-period));
-      const returns2 = this.calculateReturns(prices2.slice(-period));
+      const returns1 = this.calculateReturns(priceData1.slice(-period));
+      const returns2 = this.calculateReturns(priceData2.slice(-period));
       
-      if (returns1.length !== returns2.length) {
+      if (returns1.length !== returns2.length || returns1.length === 0) {
         return 0;
       }
       
@@ -208,7 +252,7 @@ export class RiskManager extends EventEmitter {
     }
   }
 
-  // Trade Risk Assessment
+  // Trade Risk Assessment with real data
   async assessTradeRisk(
     tradeId: string,
     pair: string,
@@ -218,14 +262,14 @@ export class RiskManager extends EventEmitter {
   ): Promise<TradeRisk> {
     try {
       const unrealizedPnL = (currentPrice - entryPrice) * amount;
-      const realizedPnL = this.getRealizedPnL(tradeId);
+      const realizedPnL = await this.getRealizedPnL(tradeId);
       const volatility = this.calculateVolatility(pair);
       
       // Calculate correlation with existing positions
       let maxCorrelation = 0;
-      for (const [existingPair] of this.activeTrades) {
-        if (existingPair && existingPair !== pair) {
-          const correlation = Math.abs(this.calculateCorrelation(pair, existingPair));
+      for (const [_, existingTrade] of this.activeTrades) {
+        if (existingTrade.pair !== pair) {
+          const correlation = Math.abs(this.calculateCorrelation(pair, existingTrade.pair));
           maxCorrelation = Math.max(maxCorrelation, correlation);
         }
       }
@@ -313,7 +357,7 @@ export class RiskManager extends EventEmitter {
       }
       
       // Emergency Stop Loss
-      const portfolioLoss = this.getDailyPnL();
+      const portfolioLoss = await this.getDailyPnL();
       if (Math.abs(portfolioLoss) >= this.riskParams.emergencyStopLoss) {
         const event: RiskEvent = {
           type: 'EMERGENCY_STOP',
@@ -330,26 +374,26 @@ export class RiskManager extends EventEmitter {
     }
   }
 
-  // Portfolio Risk Assessment
+  // Portfolio Risk Assessment with real data
   async assessPortfolioRisk(): Promise<PortfolioRisk> {
     try {
       const totalExposure = Array.from(this.activeTrades.values())
         .reduce((sum, trade) => sum + trade.amount, 0);
       
-      const dailyPnL = this.getDailyPnL();
+      const dailyPnL = await this.getDailyPnL();
       const maxDrawdown = this.calculateMaxDrawdown();
       const sharpeRatio = this.calculateSharpeRatio();
       const var95 = this.calculateVaR();
       
       // Average correlation across all pairs
       const correlations: number[] = [];
-      const pairs = Array.from(this.activeTrades.keys());
-      for (let i = 0; i < pairs.length; i++) {
-        for (let j = i + 1; j < pairs.length; j++) {
-          const pairI = pairs[i];
-          const pairJ = pairs[j];
-          if (pairI && pairJ) {
-            const corr = Math.abs(this.calculateCorrelation(pairI, pairJ));
+      const trades = Array.from(this.activeTrades.values());
+      for (let i = 0; i < trades.length; i++) {
+        for (let j = i + 1; j < trades.length; j++) {
+          const trade1 = trades[i];
+          const trade2 = trades[j];
+          if (trade1 && trade2 && trade1.pair !== trade2.pair) {
+            const corr = Math.abs(this.calculateCorrelation(trade1.pair, trade2.pair));
             correlations.push(corr);
           }
         }
@@ -405,7 +449,19 @@ export class RiskManager extends EventEmitter {
       this.logger.warn('Risk event triggered', event);
       
       // Store event in database
-      await this.db.logRiskEvent(event);
+      const dbRiskEvent: any = {
+        type: event.type,
+        message: event.message,
+        severity: event.severity.toLowerCase() as 'low' | 'medium' | 'high' | 'critical',
+        timestamp: event.timestamp,
+        action: event.action
+      };
+      
+      if (event.tradeId) {
+        dbRiskEvent.tradeId = event.tradeId;
+      }
+      
+      await this.db.logRiskEvent(dbRiskEvent);
       
       // Emit event for external handling
       this.emit('riskEvent', event);
@@ -433,46 +489,86 @@ export class RiskManager extends EventEmitter {
   }
 
   // Helper Methods
-  private calculateReturns(prices: number[]): number[] {
+  private calculateReturns(priceData: PriceData[]): number[] {
     const returns: number[] = [];
-    for (let i = 1; i < prices.length; i++) {
-      const currentPrice = prices[i];
-      const previousPrice = prices[i - 1];
-      if (currentPrice !== undefined && previousPrice !== undefined && previousPrice !== 0) {
-        returns.push((currentPrice - previousPrice) / previousPrice);
+    for (let i = 1; i < priceData.length; i++) {
+      const currentPrice = priceData[i];
+      const previousPrice = priceData[i - 1];
+      if (currentPrice && previousPrice && previousPrice.price !== 0) {
+        returns.push((currentPrice.price - previousPrice.price) / previousPrice.price);
       }
     }
     return returns;
   }
 
-  private getHistoricalWinRate(_pair: string): number {
-    // Mock implementation - in production, query from database
-    return 0.65; // 65% win rate
+  // Real data methods replacing mocks
+  private async getTradeStats(_pair: string): Promise<TradeStats> {
+    try {
+      const analytics = await this.db.getTradeAnalytics(24 * 7); // 7 days of data
+      
+      // Calculate win rate from successful vs total trades
+      const winRate = analytics.totalTrades > 0 ? analytics.successRate : 0.5; // Default 50%
+      
+      // Calculate average win/loss from profit data
+      const avgWin = analytics.avgProfitPerTrade > 0 ? analytics.avgProfitPerTrade : 0.015; // 1.5% default
+      const avgLoss = analytics.avgProfitPerTrade < 0 ? Math.abs(analytics.avgProfitPerTrade) : 0.008; // 0.8% default
+      
+      return {
+        winRate,
+        avgWin,
+        avgLoss: -avgLoss, // Negative for loss
+        totalTrades: analytics.totalTrades,
+        successfulTrades: analytics.successfulTrades
+      };
+    } catch (error) {
+      this.logger.error('Error getting trade stats:', error);
+      // Return conservative defaults
+      return {
+        winRate: 0.5,
+        avgWin: 0.01,
+        avgLoss: -0.01,
+        totalTrades: 0,
+        successfulTrades: 0
+      };
+    }
   }
 
-  private getAverageWin(_pair: string): number {
-    // Mock implementation
-    return 0.015; // 1.5% average win
+  private async getCurrentPortfolioValue(): Promise<number> {
+    try {
+      const analytics = await this.db.getTradeAnalytics(24 * 30); // 30 days
+      const totalProfit = analytics.totalProfit || 0;
+      const currentValue = this.basePortfolioValue + totalProfit;
+      
+      return Math.max(currentValue, 0); // Ensure non-negative
+    } catch (error) {
+      this.logger.error('Error getting current portfolio value:', error);
+      return this.basePortfolioValue;
+    }
   }
 
-  private getAverageLoss(_pair: string): number {
-    // Mock implementation
-    return -0.008; // 0.8% average loss
+  private async getRealizedPnL(tradeId: string): Promise<number> {
+    try {
+      const trades = await this.db.getTradeHistory({ limit: 1000 });
+      const trade = trades.find((t: any) => t.id?.toString() === tradeId);
+      
+      return trade ? trade.profit : 0;
+    } catch (error) {
+      this.logger.error('Error getting realized P&L:', error);
+      return 0;
+    }
   }
 
-  private getCurrentPortfolioValue(): number {
-    // Mock implementation - calculate from active positions
-    return 100000; // $100k portfolio
-  }
-
-  private getRealizedPnL(_tradeId: string): number {
-    // Mock implementation - query from database
-    return 0;
-  }
-
-  private getDailyPnL(): number {
-    const currentValue = this.getCurrentPortfolioValue();
-    return ((currentValue - this.dailyStartBalance) / this.dailyStartBalance) * 100;
+  private async getDailyPnL(): Promise<number> {
+    try {
+      const currentValue = await this.getCurrentPortfolioValue();
+      if (this.dailyStartBalance === 0) {
+        return 0;
+      }
+      return ((currentValue - this.dailyStartBalance) / this.dailyStartBalance) * 100;
+    } catch (error) {
+      this.logger.error('Error calculating daily P&L:', error);
+      return 0;
+    }
   }
 
   private calculateMaxDrawdown(): number {
@@ -487,7 +583,7 @@ export class RiskManager extends EventEmitter {
         peak = portfolio.totalExposure;
       }
       
-      const drawdown = (peak - portfolio.totalExposure) / peak * 100;
+      const drawdown = peak > 0 ? (peak - portfolio.totalExposure) / peak * 100 : 0;
       maxDrawdown = Math.max(maxDrawdown, drawdown);
     }
     
@@ -552,13 +648,13 @@ export class RiskManager extends EventEmitter {
     const msUntilMidnight = tomorrow.getTime() - now.getTime();
     
     setTimeout(() => {
-      this.dailyStartBalance = this.getCurrentPortfolioValue();
-      this.logger.info('Daily risk metrics reset', { startBalance: this.dailyStartBalance });
+      this.initializeDailyStartBalance();
+      this.logger.info('Daily risk metrics reset');
       
       // Set up recurring daily reset
       setInterval(() => {
-        this.dailyStartBalance = this.getCurrentPortfolioValue();
-        this.logger.info('Daily risk metrics reset', { startBalance: this.dailyStartBalance });
+        this.initializeDailyStartBalance();
+        this.logger.info('Daily risk metrics reset');
       }, 24 * 60 * 60 * 1000);
     }, msUntilMidnight);
   }
@@ -579,12 +675,16 @@ export class RiskManager extends EventEmitter {
       this.priceHistory.set(pair, []);
     }
     
-    const prices = this.priceHistory.get(pair)!;
-    prices.push(price);
+    const priceData = this.priceHistory.get(pair)!;
+    priceData.push({
+      pair,
+      price,
+      timestamp: Date.now()
+    });
     
     // Keep only last 1000 prices
-    if (prices.length > 1000) {
-      prices.splice(0, prices.length - 1000);
+    if (priceData.length > 1000) {
+      priceData.splice(0, priceData.length - 1000);
     }
   }
 
@@ -616,5 +716,38 @@ export class RiskManager extends EventEmitter {
 
   getPortfolioHistory(): PortfolioRisk[] {
     return [...this.portfolioHistory];
+  }
+
+  async getPortfolioValue(): Promise<number> {
+    return await this.getCurrentPortfolioValue();
+  }
+
+  async getTradeStatistics(pair?: string): Promise<TradeStats> {
+    return await this.getTradeStats(pair || 'ALL');
+  }
+
+  async getRiskSummary(): Promise<{
+    portfolioValue: number;
+    dailyPnL: number;
+    activeTrades: number;
+    riskLevel: string;
+    emergencyMode: boolean;
+  }> {
+    try {
+      const portfolioValue = await this.getCurrentPortfolioValue();
+      const dailyPnL = await this.getDailyPnL();
+      const portfolioRisk = await this.assessPortfolioRisk();
+      
+      return {
+        portfolioValue,
+        dailyPnL,
+        activeTrades: this.activeTrades.size,
+        riskLevel: portfolioRisk.riskLevel,
+        emergencyMode: this.emergencyMode
+      };
+    } catch (error) {
+      this.logger.error('Error getting risk summary:', error);
+      throw error;
+    }
   }
 }

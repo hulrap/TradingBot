@@ -5,15 +5,20 @@ import { FlashbotsClient, type MevBundle } from './flashbots-client';
 import { JitoClient, type SolanaMevBundle } from './jito-client';
 import { BscMevClient, type BscMevBundle } from './bsc-mev-client';
 import { ProfitCalculator, type ProfitParams } from './profit-calculator';
+import { TokenMetadataService, TokenMetadata, PoolMetadata } from './services/token-metadata';
 
 export interface ExecutionParams {
   opportunity: SandwichOpportunityExtended;
-  frontRunAmount: string;
-  maxGasPrice: string;
-  maxSlippage: number;
-  deadline: number; // Timestamp
-  minProfit: string;
-  simulationOnly: boolean;
+  profitOptimization?: any;
+  riskAssessment?: any;
+  optimizationResult?: any;
+  paperTradingMode?: boolean;
+  frontRunAmount?: string;
+  maxGasPrice?: string;
+  maxSlippage?: number;
+  deadline?: number; // Timestamp
+  minProfit?: string;
+  simulationOnly?: boolean;
 }
 
 export interface SandwichOpportunityExtended {
@@ -79,6 +84,7 @@ export class SandwichExecutionEngine extends EventEmitter {
   private jitoClient?: JitoClient;
   private bscMevClient?: BscMevClient;
   private profitCalculator: ProfitCalculator;
+  private tokenMetadataService?: TokenMetadataService;
   private executionStats: ExecutionStats;
   private activeExecutions = new Map<string, ExecutionResult>();
   private maxConcurrentExecutions: number;
@@ -105,6 +111,7 @@ export class SandwichExecutionEngine extends EventEmitter {
     jito?: JitoClient;
     bscMev?: BscMevClient;
     solanaConnection?: Connection;
+    tokenMetadataService?: TokenMetadataService;
   }): Promise<void> {
     if (clients.flashbots) {
       this.flashbotsClient = clients.flashbots;
@@ -117,6 +124,9 @@ export class SandwichExecutionEngine extends EventEmitter {
     }
     if (clients.solanaConnection) {
       this.solanaConnection = clients.solanaConnection;
+    }
+    if (clients.tokenMetadataService) {
+      this.tokenMetadataService = clients.tokenMetadataService;
     }
 
     // Set up event listeners for each client
@@ -246,14 +256,14 @@ export class SandwichExecutionEngine extends EventEmitter {
 
     // Check minimum profit threshold
     const estimatedProfitValue = parseFloat(opportunity.estimatedProfit);
-    const minProfitValue = parseFloat(params.minProfit);
+    const minProfitValue = params.minProfit ? parseFloat(params.minProfit) : 0;
     if (estimatedProfitValue < minProfitValue) {
       return { valid: false, reason: 'Profit below minimum threshold' };
     }
 
     // Check gas price constraints
     const gasPrice = parseFloat(opportunity.gasPrice);
-    const maxGasPrice = parseFloat(params.maxGasPrice);
+    const maxGasPrice = params.maxGasPrice ? parseFloat(params.maxGasPrice) : Infinity;
     if (gasPrice > maxGasPrice) {
       return { valid: false, reason: 'Gas price too high' };
     }
@@ -284,20 +294,40 @@ export class SandwichExecutionEngine extends EventEmitter {
     const { opportunity } = params;
 
     try {
-      // Create profit calculation parameters
+      // Fetch real token metadata and pool data
+      const [tokenInMetadata, tokenOutMetadata, poolMetadata] = await Promise.all([
+        this.getTokenMetadata(opportunity.tokenIn, opportunity.chain),
+        this.getTokenMetadata(opportunity.tokenOut, opportunity.chain),
+        this.getPoolMetadata(opportunity.poolAddress, opportunity.chain)
+      ]);
+
+      if (!tokenInMetadata || !tokenOutMetadata) {
+        console.warn('Failed to fetch token metadata for simulation');
+        return {
+          estimatedProfit: '0',
+          gasUsed: '0',
+          priceImpact: 0,
+          slippage: 0
+        };
+      }
+
+      // Get real-time gas price
+      const realGasPrice = await this.getDynamicGasPrice(opportunity.chain);
+
+      // Create profit calculation parameters with real data
       const profitParams: ProfitParams = {
         victimAmountIn: opportunity.amountIn,
         victimAmountOutMin: opportunity.expectedAmountOut,
         tokenInAddress: opportunity.tokenIn,
         tokenOutAddress: opportunity.tokenOut,
-        tokenInDecimals: 18, // Would fetch actual decimals
-        tokenOutDecimals: 18, // Would fetch actual decimals
-        tokenInPrice: 1.0, // Would fetch actual prices
-        tokenOutPrice: 1.0, // Would fetch actual prices
-        poolReserve0: opportunity.poolLiquidity,
-        poolReserve1: opportunity.poolLiquidity,
-        poolFee: 300, // 0.3% default, would fetch actual fee
-        gasPrice: opportunity.gasPrice,
+        tokenInDecimals: tokenInMetadata.decimals,
+        tokenOutDecimals: tokenOutMetadata.decimals,
+        tokenInPrice: tokenInMetadata.priceUsd,
+        tokenOutPrice: tokenOutMetadata.priceUsd,
+        poolReserve0: poolMetadata?.reserve0 || opportunity.poolLiquidity,
+        poolReserve1: poolMetadata?.reserve1 || opportunity.poolLiquidity,
+        poolFee: poolMetadata?.fee || 300, // Use actual pool fee or default to 0.3%
+        gasPrice: realGasPrice || opportunity.gasPrice,
         chain: opportunity.chain,
         dexType: opportunity.dexType
       };
@@ -376,7 +406,7 @@ export class SandwichExecutionEngine extends EventEmitter {
       expectedAmountOut: opportunity.expectedAmountOut,
       dexRouter: '0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D', // Uniswap V2 Router
       gasPrice: opportunity.gasPrice,
-      maxSlippage: params.maxSlippage,
+      maxSlippage: params.maxSlippage || 5,
       estimatedProfit: simulation.estimatedProfit,
       profitability: parseFloat(simulation.estimatedProfit)
     };
@@ -411,7 +441,10 @@ export class SandwichExecutionEngine extends EventEmitter {
       expectedAmountOut: opportunity.expectedAmountOut,
       estimatedProfit: simulation.estimatedProfit,
       gasPrice: opportunity.gasPrice,
-      blockNumber: Date.now() // Simplified block number
+      blockNumber: Math.floor(Date.now() / 1000), // Convert to proper block number
+      slippage: simulation.slippage,
+      priceImpact: simulation.priceImpact,
+      poolLiquidity: opportunity.poolLiquidity
     };
 
     const bundle = await this.bscMevClient.createSandwichBundle(bscOpportunity);
@@ -465,18 +498,19 @@ export class SandwichExecutionEngine extends EventEmitter {
       programId: '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8', // Raydium
       tokenMintA: opportunity.tokenIn,
       tokenMintB: opportunity.tokenOut,
-      swapDirection: 'a_to_b' as const,
       amountIn: parseInt(opportunity.amountIn),
-      expectedAmountOut: parseInt(opportunity.expectedAmountOut),
-      estimatedProfit: simulation.estimatedProfit,
-      priorityFee: parseFloat(opportunity.gasPrice)
+      estimatedProfit: parseFloat(simulation.estimatedProfit),
+      confidence: opportunity.confidence,
+      slippage: simulation.slippage,
+      poolAddress: opportunity.poolAddress,
+      dexType: opportunity.dexType as 'raydium' | 'orca' | 'jupiter'
     };
 
     const bundle = await this.jitoClient.createSandwichBundle(solanaOpportunity);
     const result = await this.jitoClient.submitBundle(bundle.id);
 
     // Use the result variable to validate submission success
-    if (!result.success) {
+    if (!result.submitted) {
       throw new Error(`Bundle submission failed: ${result.error || 'Unknown error'}`);
     }
 
@@ -771,6 +805,54 @@ export class SandwichExecutionEngine extends EventEmitter {
   }
 
   /**
+   * Get token metadata using the token metadata service
+   */
+  private async getTokenMetadata(address: string, chain: string): Promise<TokenMetadata | null> {
+    if (!this.tokenMetadataService) {
+      console.warn('Token metadata service not available');
+      return null;
+    }
+    return await this.tokenMetadataService.getTokenMetadata(address, chain);
+  }
+
+  /**
+   * Get pool metadata using the token metadata service
+   */
+  private async getPoolMetadata(address: string, chain: string): Promise<PoolMetadata | null> {
+    if (!this.tokenMetadataService) {
+      console.warn('Token metadata service not available');
+      return null;
+    }
+    return await this.tokenMetadataService.getPoolMetadata(address, chain);
+  }
+
+  /**
+   * Get dynamic gas price based on current network conditions
+   */
+  private async getDynamicGasPrice(chain: string): Promise<string | null> {
+    try {
+      // This would integrate with gas price APIs
+      // For now, return null to use the opportunity's gas price
+      switch (chain) {
+        case 'ethereum':
+          // Could use ETH Gas Station API, Etherscan API, etc.
+          return null;
+        case 'bsc':
+          // Could use BSC gas price APIs
+          return null;
+        case 'solana':
+          // Could use Solana priority fee APIs
+          return null;
+        default:
+          return null;
+      }
+    } catch (error) {
+      console.warn('Failed to get dynamic gas price', { chain, error });
+      return null;
+    }
+  }
+
+  /**
    * Reset execution statistics
    */
   resetStats(): void {
@@ -786,5 +868,20 @@ export class SandwichExecutionEngine extends EventEmitter {
     };
 
     this.emit('statsReset');
+  }
+
+  /**
+   * Stop the execution engine and cleanup resources
+   */
+  async stop(): Promise<void> {
+    // Cancel all active executions
+    const activeIds = Array.from(this.activeExecutions.keys());
+    await Promise.all(activeIds.map(id => this.cancelExecution(id)));
+    
+    // Clear active executions
+    this.activeExecutions.clear();
+    
+    // Emit stop event
+    this.emit('stopped');
   }
 }

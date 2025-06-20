@@ -1,48 +1,65 @@
-import { Connection, PublicKey, Transaction, VersionedTransaction, TransactionInstruction, SystemProgram, LAMPORTS_PER_SOL } from '@solana/web3.js';
+import { Connection, PublicKey, Transaction, VersionedTransaction, TransactionInstruction, SystemProgram, Keypair } from '@solana/web3.js';
 import { EventEmitter } from 'events';
 import axios from 'axios';
+import { Wallet } from '@project-serum/anchor';
 
 export interface JitoConfig {
   blockEngineUrl: string;
   relayerUrl: string;
-  tipAccount: string; // Jito tip account
-  maxTipLamports: number; // Maximum tip willing to pay
-  minProfitLamports: number; // Minimum profit threshold
-  validatorPreferences: string[]; // Preferred validators
+  tipAccount: string;
+  maxTipLamports: number;
+  minProfitLamports: number;
+  validatorPreferences: string[];
+  profitMarginPercent: number;
+  frontRunRatio: number;
+  networkCongestionMultiplier: number;
+  maxBundleAttempts: number;
+  baseTps: number;
 }
 
 export interface SolanaMevBundle {
   id: string;
   transactions: VersionedTransaction[];
   tipAmount: number;
-  estimatedProfit: string;
-  computeUnits: number;
+  estimatedProfit: number;
   status: 'pending' | 'landed' | 'failed' | 'cancelled';
   submissionTime: number;
   landingTime?: number;
+  validatorTarget?: string;
+  blockNumber?: number;
   failureReason?: string;
 }
 
 export interface SolanaSandwichOpportunity {
-  victimTxSignature: string;
   victimTransaction: VersionedTransaction;
-  programId: string; // DEX program ID (Raydium, Orca, etc.)
+  victimTxSignature: string;
+  programId: string;
   tokenMintA: string;
   tokenMintB: string;
-  swapDirection: 'a_to_b' | 'b_to_a';
   amountIn: number;
-  expectedAmountOut: number;
-  estimatedProfit: string;
-  priorityFee: number;
+  estimatedProfit: number;
+  confidence: number;
+  slippage: number;
+  poolAddress: string;
+  dexType: 'raydium' | 'orca' | 'jupiter';
 }
 
 export interface JitoBundleResult {
   bundleId: string;
-  success: boolean;
-  signature?: string;
-  error?: string;
+  submitted: boolean;
   landed: boolean;
   landedSlot?: number;
+  error?: string;
+  transactions: string[];
+}
+
+export interface DexSwapParams {
+  inputMint: PublicKey;
+  outputMint: PublicKey;
+  amount: number;
+  slippageBps: number;
+  userPublicKey: PublicKey;
+  dexType: 'raydium' | 'orca' | 'jupiter';
 }
 
 export class JitoClient extends EventEmitter {
@@ -50,23 +67,62 @@ export class JitoClient extends EventEmitter {
   private config: JitoConfig;
   private bundles: Map<string, SolanaMevBundle> = new Map();
   private isConnected = false;
-  private tipAccount: PublicKey;
+  private wallet: Wallet;
 
-  constructor(connection: Connection, config: JitoConfig) {
+  // DEX Program IDs
+  private readonly DEX_PROGRAMS = {
+    raydium: new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8'),
+    orca: new PublicKey('9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM'),
+    jupiter: new PublicKey('JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4')
+  };
+
+  // Performance metrics
+  private metrics = {
+    totalBundles: 0,
+    landedBundles: 0,
+    failedBundles: 0,
+    totalProfit: 0,
+    totalTips: 0,
+    averageLatency: 0,
+    successRate: 0
+  };
+
+  constructor(connection: Connection, config: JitoConfig, wallet?: Wallet) {
     super();
     this.connection = connection;
-    this.config = config;
-    this.tipAccount = new PublicKey(config.tipAccount);
+    this.config = {
+      ...config,
+      profitMarginPercent: config.profitMarginPercent || 20,
+      frontRunRatio: config.frontRunRatio || 0.4,
+      networkCongestionMultiplier: config.networkCongestionMultiplier || 1.5,
+      maxBundleAttempts: config.maxBundleAttempts || 30,
+      baseTps: config.baseTps || 2000
+    };
+    
+    // Use provided wallet or create a temporary one for the example
+    this.wallet = wallet || new Wallet(Keypair.generate());
   }
 
   async initialize(): Promise<void> {
     try {
-      // Test connection to Jito block engine
-      const response = await axios.get(`${this.config.blockEngineUrl}/api/v1/validators`);
-      console.log('Jito connection established, active validators:', response.data.length);
-      
+      // Test Jito connection
+      const response = await axios.get(`${this.config.blockEngineUrl}/api/v1/bundles`, {
+        timeout: 10000
+      });
+
+      if (response.status !== 200) {
+        throw new Error(`Jito connection failed with status: ${response.status}`);
+      }
+
+      // Verify tip account
+      const tipAccountInfo = await this.connection.getAccountInfo(new PublicKey(this.config.tipAccount));
+      if (!tipAccountInfo) {
+        console.warn('Tip account not found, using default');
+      }
+
       this.isConnected = true;
-      this.emit('connected', { validators: response.data.length });
+      this.emit('connected');
+      console.log('Jito client connected successfully');
     } catch (error) {
       console.error('Failed to initialize Jito client:', error);
       this.emit('error', error);
@@ -76,118 +132,234 @@ export class JitoClient extends EventEmitter {
 
   async createSandwichBundle(opportunity: SolanaSandwichOpportunity): Promise<SolanaMevBundle> {
     const bundleId = `jito_sandwich_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    
-    // Calculate optimal tip amount based on profit
     const tipAmount = await this.calculateOptimalTip(opportunity);
     
-    // Create front-run transaction
-    const frontRunTx = await this.createFrontRunTransaction(opportunity, tipAmount);
-    
-    // Create back-run transaction
-    const backRunTx = await this.createBackRunTransaction(opportunity);
-    
-    // Bundle: [front-run with tip, victim tx, back-run]
-    const bundleTransactions: VersionedTransaction[] = [
-      frontRunTx,
-      opportunity.victimTransaction,
-      backRunTx
-    ];
+    try {
+      // Create front-run transaction
+      const frontRunTx = await this.createFrontRunTransaction(opportunity, tipAmount);
+      
+      // Create back-run transaction
+      const backRunTx = await this.createBackRunTransaction(opportunity);
+      
+      // Bundle transactions: [front-run, victim, back-run]
+      const bundleTransactions: VersionedTransaction[] = [
+        frontRunTx,
+        opportunity.victimTransaction,
+        backRunTx
+      ];
 
-    const bundle: SolanaMevBundle = {
-      id: bundleId,
-      transactions: bundleTransactions,
-      tipAmount,
-      estimatedProfit: opportunity.estimatedProfit,
-      computeUnits: await this.estimateTotalComputeUnits(bundleTransactions),
-      status: 'pending',
-      submissionTime: Date.now()
-    };
+      const bundle: SolanaMevBundle = {
+        id: bundleId,
+        transactions: bundleTransactions,
+        tipAmount,
+        estimatedProfit: opportunity.estimatedProfit,
+        status: 'pending',
+        submissionTime: Date.now(),
+        validatorTarget: this.selectOptimalValidator()
+      };
 
-    this.bundles.set(bundleId, bundle);
-    this.emit('bundleCreated', bundle);
+      this.bundles.set(bundleId, bundle);
+      this.metrics.totalBundles++;
+      this.emit('bundleCreated', bundle);
 
-    return bundle;
+      return bundle;
+    } catch (error) {
+      console.error('Failed to create sandwich bundle:', error);
+      throw new Error(`Bundle creation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
 
   private async createFrontRunTransaction(
-    opportunity: SolanaSandwichOpportunity, 
+    opportunity: SolanaSandwichOpportunity,
     tipAmount: number
   ): Promise<VersionedTransaction> {
-    // Create front-run swap instruction
-    const frontRunInstruction = await this.createSwapInstruction(
-      opportunity,
-      this.calculateFrontRunAmount(opportunity),
-      'front-run'
-    );
+    try {
+      // Calculate front-run amount
+      const frontRunAmount = Math.floor(opportunity.amountIn * this.config.frontRunRatio);
+      
+      // Create swap instruction based on DEX type
+      const swapInstruction = await this.createDexSwapInstruction({
+        inputMint: new PublicKey(opportunity.tokenMintA),
+        outputMint: new PublicKey(opportunity.tokenMintB),
+        amount: frontRunAmount,
+        slippageBps: Math.floor(opportunity.slippage * 100), // Convert to basis points
+        userPublicKey: this.wallet.publicKey,
+        dexType: opportunity.dexType
+      });
 
-    // Create tip instruction
-    const tipInstruction = SystemProgram.transfer({
-      fromPubkey: new PublicKey(''), // Will be set by actual wallet
-      toPubkey: this.tipAccount,
-      lamports: tipAmount
-    });
+      // Create tip instruction
+      const tipInstruction = SystemProgram.transfer({
+        fromPubkey: this.wallet.publicKey,
+        toPubkey: new PublicKey(this.config.tipAccount),
+        lamports: tipAmount
+      });
 
-    // Create transaction with both instructions
-    const transaction = new Transaction().add(tipInstruction, frontRunInstruction);
-    
-    // Convert to VersionedTransaction (simplified)
-    const versionedTx = new VersionedTransaction(transaction.compileMessage());
-    
-    return versionedTx;
+      // Combine instructions
+      const instructions = [swapInstruction, tipInstruction];
+      
+      // Create transaction (simplified - in reality would need proper versioned transaction creation)
+      const transaction = new Transaction().add(...instructions);
+      transaction.recentBlockhash = (await this.connection.getLatestBlockhash()).blockhash;
+      transaction.feePayer = this.wallet.publicKey;
+
+      // Convert to VersionedTransaction (simplified approach)
+      const versionedTx = new VersionedTransaction(transaction.compileMessage());
+      
+      return versionedTx;
+    } catch (error) {
+      console.error('Failed to create front-run transaction:', error);
+      throw new Error(`Front-run transaction creation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
 
   private async createBackRunTransaction(opportunity: SolanaSandwichOpportunity): Promise<VersionedTransaction> {
-    // Create back-run swap instruction (reverse of front-run)
-    const backRunInstruction = await this.createSwapInstruction(
-      opportunity,
-      0, // Will use all tokens from front-run
-      'back-run'
-    );
+    try {
+      // Create swap instruction for back-run (swap back to original token)
+      const swapInstruction = await this.createDexSwapInstruction({
+        inputMint: new PublicKey(opportunity.tokenMintB),
+        outputMint: new PublicKey(opportunity.tokenMintA),
+        amount: 0, // Will use output from front-run
+        slippageBps: Math.floor(opportunity.slippage * 100),
+        userPublicKey: this.wallet.publicKey,
+        dexType: opportunity.dexType
+      });
 
-    const transaction = new Transaction().add(backRunInstruction);
-    const versionedTx = new VersionedTransaction(transaction.compileMessage());
-    
-    return versionedTx;
+      const transaction = new Transaction().add(swapInstruction);
+      transaction.recentBlockhash = (await this.connection.getLatestBlockhash()).blockhash;
+      transaction.feePayer = this.wallet.publicKey;
+
+      // Convert to VersionedTransaction
+      const versionedTx = new VersionedTransaction(transaction.compileMessage());
+      
+      return versionedTx;
+    } catch (error) {
+      console.error('Failed to create back-run transaction:', error);
+      throw new Error(`Back-run transaction creation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
 
-  private async createSwapInstruction(
-    opportunity: SolanaSandwichOpportunity,
-    amount: number,
-    type: 'front-run' | 'back-run'
-  ): Promise<TransactionInstruction> {
-    // This is a simplified swap instruction
-    // In production, you'd use proper DEX SDKs (Raydium, Orca, etc.)
-    
-    // Determine swap direction based on type and opportunity
-    const isReversed = type === 'back-run';
-    const actualSwapDirection = isReversed 
-      ? (opportunity.swapDirection === 'a_to_b' ? 'b_to_a' : 'a_to_b')
-      : opportunity.swapDirection;
-    
-    // Use the amount parameter to set the swap amount
-    const swapAmount = amount > 0 ? amount : opportunity.amountIn;
-    
-    // Create instruction data based on swap parameters
-    const instructionBytes = new Uint8Array([
-      actualSwapDirection === 'a_to_b' ? 0x01 : 0x02, // Swap direction
-      ...new TextEncoder().encode(swapAmount.toString().padStart(8, '0')), // Amount (8 bytes)
-      ...new TextEncoder().encode(type === 'front-run' ? 'FR' : 'BR'), // Type identifier (2 bytes)
-    ]);
-    const instructionData = Buffer.from(instructionBytes);
-    
-    // Example for a generic DEX swap
-    const instruction = new TransactionInstruction({
-      programId: new PublicKey(opportunity.programId),
-      keys: [
-        // Account keys would be specific to each DEX
-        // This is just a placeholder structure
-        { pubkey: new PublicKey(opportunity.tokenMintA), isSigner: false, isWritable: true },
-        { pubkey: new PublicKey(opportunity.tokenMintB), isSigner: false, isWritable: true },
-      ],
-      data: instructionData
-    });
+  private async createDexSwapInstruction(params: DexSwapParams): Promise<TransactionInstruction> {
+    try {
+      switch (params.dexType) {
+        case 'raydium':
+          return await this.createRaydiumSwapInstruction(params);
+        case 'orca':
+          return await this.createOrcaSwapInstruction(params);
+        case 'jupiter':
+          return await this.createJupiterSwapInstruction(params);
+        default:
+          throw new Error(`Unsupported DEX type: ${params.dexType}`);
+      }
+    } catch (error) {
+      console.error(`Failed to create ${params.dexType} swap instruction:`, error);
+      throw error;
+    }
+  }
 
-    return instruction;
+  private async createRaydiumSwapInstruction(params: DexSwapParams): Promise<TransactionInstruction> {
+    // TODO: Replace with real Raydium SDK integration
+    // Example: 
+    // import { Liquidity, LiquidityPoolKeys, TokenAmount, Token, Percent } from '@raydium-io/raydium-sdk'
+    // const poolKeys = await Liquidity.fetchPoolKeys(this.connection, poolAddress)
+    // const instruction = Liquidity.makeSwapInstruction({
+    //   poolKeys,
+    //   userKeys: { tokenAccountIn, tokenAccountOut, owner: params.userPublicKey },
+    //   amountIn: new TokenAmount(inputToken, params.amount),
+    //   amountOut: new TokenAmount(outputToken, minAmountOut),
+    //   fixedSide: 'in'
+    // })
+    
+    // For now, creating a basic instruction structure
+    const data = Buffer.alloc(32); // Placeholder instruction data
+    data.writeUInt32LE(0, 0); // Instruction discriminator for swap
+    data.writeUInt32LE(params.amount, 4);
+    data.writeUInt32LE(params.slippageBps, 8);
+
+    return new TransactionInstruction({
+      programId: this.DEX_PROGRAMS.raydium,
+      keys: [
+        { pubkey: params.userPublicKey, isSigner: true, isWritable: true },
+        { pubkey: params.inputMint, isSigner: false, isWritable: true },
+        { pubkey: params.outputMint, isSigner: false, isWritable: true },
+        // Additional accounts would be needed for real implementation:
+        // - Pool state account
+        // - User token accounts (source and destination)
+        // - Pool token accounts
+        // - Pool authority
+        // - Token program
+      ],
+      data
+    });
+  }
+
+  private async createOrcaSwapInstruction(params: DexSwapParams): Promise<TransactionInstruction> {
+    // TODO: Replace with real Orca SDK integration
+    // Example:
+    // import { OrcaPoolConfig, orcaPoolConfigs, OrcaPoolToken } from '@orca-so/sdk'
+    // const orcaPool = getPool(orcaPoolConfigs[poolAddress])
+    // const inputToken = orcaPool.getTokenA()
+    // const outputToken = orcaPool.getTokenB()
+    // const quote = await orcaPool.getQuote(inputToken, new Decimal(params.amount))
+    // const swapPayload = await orcaPool.swap(
+    //   params.userPublicKey,
+    //   inputToken,
+    //   new Decimal(params.amount),
+    //   new Decimal(quote.getMinOutputAmount())
+    // )
+    
+    const data = Buffer.alloc(32);
+    data.writeUInt32LE(1, 0); // Orca swap instruction
+    data.writeUInt32LE(params.amount, 4);
+    data.writeUInt32LE(params.slippageBps, 8);
+
+    return new TransactionInstruction({
+      programId: this.DEX_PROGRAMS.orca,
+      keys: [
+        { pubkey: params.userPublicKey, isSigner: true, isWritable: true },
+        { pubkey: params.inputMint, isSigner: false, isWritable: true },
+        { pubkey: params.outputMint, isSigner: false, isWritable: true },
+        // Real implementation would need:
+        // - Whirlpool account
+        // - Token vaults
+        // - Tick arrays
+        // - Oracle account
+      ],
+      data
+    });
+  }
+
+  private async createJupiterSwapInstruction(params: DexSwapParams): Promise<TransactionInstruction> {
+    // TODO: Replace with real Jupiter SDK integration
+    // Example:
+    // import { Jupiter, RouteInfo } from '@jup-ag/core'
+    // const jupiter = await Jupiter.load({
+    //   connection: this.connection,
+    //   cluster: 'mainnet-beta',
+    //   user: params.userPublicKey
+    // })
+    // const routes = await jupiter.computeRoutes({
+    //   inputMint: params.inputMint,
+    //   outputMint: params.outputMint,
+    //   amount: JSBI.BigInt(params.amount),
+    //   slippageBps: params.slippageBps
+    // })
+    // const { execute } = await jupiter.exchange({ routeInfo: routes.routesInfos[0] })
+    
+    const data = Buffer.alloc(32);
+    data.writeUInt32LE(2, 0); // Jupiter swap instruction
+    data.writeUInt32LE(params.amount, 4);
+    data.writeUInt32LE(params.slippageBps, 8);
+
+    return new TransactionInstruction({
+      programId: this.DEX_PROGRAMS.jupiter,
+      keys: [
+        { pubkey: params.userPublicKey, isSigner: true, isWritable: true },
+        { pubkey: params.inputMint, isSigner: false, isWritable: true },
+        { pubkey: params.outputMint, isSigner: false, isWritable: true },
+        // Real implementation would use Jupiter's route accounts dynamically
+      ],
+      data
+    });
   }
 
   async submitBundle(bundleId: string): Promise<JitoBundleResult> {
@@ -197,85 +369,103 @@ export class JitoClient extends EventEmitter {
     }
 
     try {
-      // Serialize transactions for submission
+      const startTime = Date.now();
+      
+      // Serialize transactions for Jito submission
       const serializedTxs = bundle.transactions.map(tx => {
         return Buffer.from(tx.serialize()).toString('base64');
       });
 
-      // Submit bundle to Jito
-      const response = await axios.post(`${this.config.blockEngineUrl}/api/v1/bundles`, {
+      const payload = {
         jsonrpc: '2.0',
         id: 1,
         method: 'sendBundle',
         params: [serializedTxs]
-      }, {
+      };
+
+      const response = await axios.post(`${this.config.blockEngineUrl}/api/v1/bundles`, payload, {
         headers: {
           'Content-Type': 'application/json'
-        }
+        },
+        timeout: 30000
       });
+
+      if (response.data.error) {
+        bundle.status = 'failed';
+        bundle.failureReason = response.data.error.message;
+        this.metrics.failedBundles++;
+        throw new Error(`Bundle submission failed: ${response.data.error.message}`);
+      }
 
       const result: JitoBundleResult = {
         bundleId: bundle.id,
-        success: !response.data.error,
-        signature: response.data.result,
-        landed: false
+        submitted: true,
+        landed: false,
+        transactions: serializedTxs
       };
 
-      if (result.success) {
-        this.emit('bundleSubmitted', bundle, result);
-        // Monitor bundle landing
-        this.monitorBundleLanding(bundle, result);
-      } else {
-        bundle.status = 'failed';
-        bundle.failureReason = response.data.error?.message || 'Submission failed';
-        result.error = bundle.failureReason || 'Unknown error';
-        this.emit('bundleFailed', bundle);
-      }
+      bundle.status = 'pending';
+      this.emit('bundleSubmitted', bundle, result);
+      
+      // Start monitoring bundle landing
+      this.monitorBundleLanding(bundle, result);
+
+      // Update metrics
+      const latency = Date.now() - startTime;
+      this.updateMetrics({ latency });
 
       return result;
-
     } catch (error) {
       bundle.status = 'failed';
       bundle.failureReason = error instanceof Error ? error.message : 'Unknown error';
-      
-      const result: JitoBundleResult = {
-        bundleId: bundle.id,
-        success: false,
-        error: bundle.failureReason,
-        landed: false
-      };
-
+      this.metrics.failedBundles++;
       this.emit('bundleFailed', bundle);
-      return result;
+      throw error;
     }
   }
 
   private async monitorBundleLanding(bundle: SolanaMevBundle, result: JitoBundleResult): Promise<void> {
-    const maxAttempts = 30; // Monitor for ~1 minute (2s intervals)
+    const maxAttempts = this.config.maxBundleAttempts;
     let attempts = 0;
 
     const checkLanding = async (): Promise<void> => {
       try {
         if (attempts >= maxAttempts) {
           bundle.status = 'failed';
-          bundle.failureReason = 'Bundle did not land within timeout';
+          bundle.failureReason = 'Bundle not landed within timeout';
+          result.landed = false;
+          this.metrics.failedBundles++;
           this.emit('bundleFailed', bundle);
           return;
         }
 
-        // Check if any transaction from the bundle has been confirmed
+        // Check if any of the bundle transactions have been confirmed
         for (const tx of bundle.transactions) {
-          // Extract signature from transaction for monitoring
           const signature = this.extractTransactionSignature(tx);
-          const status = await this.connection.getSignatureStatus(signature);
-          
-          if (status.value?.confirmationStatus === 'finalized') {
-            bundle.status = 'landed';
-            bundle.landingTime = Date.now();
-            result.landed = true;
-            result.landedSlot = status.context.slot;
-            this.emit('bundleLanded', bundle);
-            return;
+          if (signature) {
+            try {
+              const status = await this.connection.getSignatureStatus(signature);
+              
+              if (status.value?.confirmationStatus === 'finalized') {
+                bundle.status = 'landed';
+                bundle.landingTime = Date.now();
+                result.landed = true;
+                result.landedSlot = status.context.slot;
+                
+                // Update metrics
+                this.metrics.landedBundles++;
+                this.updateMetrics({ 
+                  profit: bundle.estimatedProfit,
+                  tip: bundle.tipAmount,
+                  latency: bundle.landingTime - bundle.submissionTime
+                });
+                
+                this.emit('bundleLanded', bundle);
+                return;
+              }
+            } catch (error) {
+              // Transaction might not exist yet, continue monitoring
+            }
           }
         }
 
@@ -285,6 +475,7 @@ export class JitoClient extends EventEmitter {
       } catch (error) {
         bundle.status = 'failed';
         bundle.failureReason = error instanceof Error ? error.message : 'Monitoring error';
+        this.metrics.failedBundles++;
         this.emit('bundleFailed', bundle);
       }
     };
@@ -292,92 +483,93 @@ export class JitoClient extends EventEmitter {
     checkLanding();
   }
 
-  private extractTransactionSignature(tx: VersionedTransaction): string {
-    // Extract signature from a signed transaction
-    // For monitoring purposes, we need to handle both signed and unsigned transactions
-    if (tx.signatures && tx.signatures.length > 0 && tx.signatures[0]) {
-      // Return the first signature if transaction is signed
-      return tx.signatures[0].toString();
+  private extractTransactionSignature(tx: VersionedTransaction): string | null {
+    try {
+      // Extract signature from transaction (simplified)
+      // In reality, this would depend on the transaction structure
+      const signatures = tx.signatures;
+      if (signatures.length > 0 && signatures[0]) {
+        // Convert Uint8Array to base58 string if needed
+        const signature = signatures[0];
+        return typeof signature === 'string' ? signature : Buffer.from(signature).toString('base64');
+      }
+      return null;
+    } catch (error) {
+      console.warn('Failed to extract transaction signature:', error);
+      return null;
     }
-    
-    // For unsigned transactions, create a deterministic identifier based on transaction content
-    const txBuffer = tx.serialize();
-    const hash = require('crypto').createHash('sha256').update(txBuffer).digest('hex');
-    return `unsigned_${hash.substring(0, 16)}`;
   }
 
   private async calculateOptimalTip(opportunity: SolanaSandwichOpportunity): Promise<number> {
-    // Calculate tip based on estimated profit and network congestion
-    const estimatedProfitLamports = parseFloat(opportunity.estimatedProfit) * LAMPORTS_PER_SOL;
-    const profitMargin = 0.2; // Keep 80% of profit, tip up to 20%
-    const maxTip = Math.floor(estimatedProfitLamports * profitMargin);
-    
-    // Consider network congestion
-    const priorityFeeMultiplier = await this.getNetworkCongestionMultiplier();
-    const adjustedTip = Math.floor(maxTip * priorityFeeMultiplier);
-    
-    // Cap at maximum tip amount
-    return Math.min(adjustedTip, this.config.maxTipLamports);
-  }
-
-  private calculateFrontRunAmount(opportunity: SolanaSandwichOpportunity): number {
-    // Calculate optimal front-run amount
-    // This is simplified - production would use AMM math
-    const victimAmount = opportunity.amountIn;
-    const frontRunRatio = 0.4; // Front-run with 40% of victim's trade size
-    return Math.floor(victimAmount * frontRunRatio);
-  }
-
-  private async estimateTotalComputeUnits(transactions: VersionedTransaction[]): Promise<number> {
-    // Estimate total compute units for all transactions
-    // This is simplified - would use actual simulation in production
-    return transactions.length * 200000; // Conservative estimate
+    try {
+      const estimatedProfitLamports = opportunity.estimatedProfit;
+      const profitMargin = this.config.profitMarginPercent / 100; // Convert to decimal
+      const maxTip = Math.floor(estimatedProfitLamports * profitMargin);
+      
+      // Get network congestion multiplier
+      const priorityFeeMultiplier = await this.getNetworkCongestionMultiplier();
+      const adjustedTip = Math.floor(maxTip * priorityFeeMultiplier);
+      
+      // Ensure tip doesn't exceed maximum
+      const finalTip = Math.min(adjustedTip, this.config.maxTipLamports);
+      
+      console.log(`Calculated optimal tip: ${finalTip} lamports (${finalTip / 1e9} SOL)`);
+      return finalTip;
+    } catch (error) {
+      console.warn('Failed to calculate optimal tip:', error);
+      return Math.min(10000, this.config.maxTipLamports); // Default tip
+    }
   }
 
   private async getNetworkCongestionMultiplier(): Promise<number> {
     try {
-      // Get recent block production to estimate congestion
+      // Get recent performance samples to assess network congestion
       const recentBlocks = await this.connection.getRecentPerformanceSamples(10);
       const avgTps = recentBlocks.reduce((sum, block) => sum + block.numTransactions, 0) / recentBlocks.length;
       
-      // Scale tip based on TPS (higher TPS = more congestion = higher tips)
-      const baseTps = 2000; // Baseline TPS
-      const congestionMultiplier = Math.max(1, avgTps / baseTps);
+      // Calculate congestion based on TPS relative to baseline
+      const congestionMultiplier = Math.max(1, avgTps / this.config.baseTps);
       
-      return Math.min(congestionMultiplier, 3); // Cap at 3x multiplier
+      // Cap the multiplier to prevent excessive tips
+      return Math.min(congestionMultiplier, this.config.networkCongestionMultiplier);
     } catch (error) {
       console.warn('Failed to get network congestion data:', error);
-      return 1.5; // Default moderate multiplier
+      return 1.0; // Default multiplier
     }
   }
 
-  // Validator selection and routing
-  async getOptimalValidator(): Promise<string> {
-    try {
-      const response = await axios.get(`${this.config.blockEngineUrl}/api/v1/validators`);
-      const validators = response.data;
-      
-      // Filter by preferred validators if specified
-      if (this.config.validatorPreferences.length > 0) {
-        const preferredValidators = validators.filter((v: any) => 
-          this.config.validatorPreferences.includes(v.vote_account)
-        );
-        if (preferredValidators.length > 0) {
-          return preferredValidators[0].vote_account;
-        }
-      }
-      
-      // Select validator with highest stake
-      const topValidator = validators.sort((a: any, b: any) => b.activated_stake - a.activated_stake)[0];
-      return topValidator.vote_account;
-      
-    } catch (error) {
-      console.warn('Failed to get optimal validator:', error);
-      return this.config.validatorPreferences[0] || '';
+  private selectOptimalValidator(): string {
+    // Select from preferred validators or use default
+    if (this.config.validatorPreferences.length > 0) {
+      const randomIndex = Math.floor(Math.random() * this.config.validatorPreferences.length);
+      return this.config.validatorPreferences[randomIndex] || 'default';
     }
+    
+    return 'default'; // Would use actual validator selection logic
   }
 
-  // Bundle management
+  private updateMetrics(data: { profit?: number; tip?: number; latency?: number }): void {
+    if (data.profit) {
+      this.metrics.totalProfit += data.profit;
+    }
+
+    if (data.tip) {
+      this.metrics.totalTips += data.tip;
+    }
+
+    if (data.latency) {
+      // Update average latency
+      const totalLatency = this.metrics.averageLatency * (this.metrics.totalBundles - 1);
+      this.metrics.averageLatency = (totalLatency + data.latency) / this.metrics.totalBundles;
+    }
+
+    // Update success rate
+    this.metrics.successRate = this.metrics.totalBundles > 0 
+      ? (this.metrics.landedBundles / this.metrics.totalBundles) * 100 
+      : 0;
+  }
+
+  // Public API methods
   getBundles(): SolanaMevBundle[] {
     return Array.from(this.bundles.values());
   }
@@ -394,38 +586,26 @@ export class JitoClient extends EventEmitter {
     }
   }
 
-  // Performance metrics
   getPerformanceMetrics(): {
     totalBundles: number;
     landedBundles: number;
     failedBundles: number;
-    landingRate: number;
-    totalProfit: string;
-    averageProfit: string;
+    successRate: number;
+    totalProfit: number;
     totalTips: number;
+    netProfit: number;
+    averageLatency: number;
     averageTip: number;
   } {
-    const bundles = Array.from(this.bundles.values());
-    const landedBundles = bundles.filter(b => b.status === 'landed');
-    const failedBundles = bundles.filter(b => b.status === 'failed');
-    
-    const totalProfit = landedBundles.reduce((sum, bundle) => {
-      return sum + parseFloat(bundle.estimatedProfit);
-    }, 0);
-    
-    const totalTips = bundles.reduce((sum, bundle) => sum + bundle.tipAmount, 0);
-    const averageProfit = landedBundles.length > 0 ? totalProfit / landedBundles.length : 0;
-    const averageTip = bundles.length > 0 ? totalTips / bundles.length : 0;
+    const netProfit = this.metrics.totalProfit - this.metrics.totalTips;
+    const averageTip = this.metrics.totalBundles > 0 
+      ? this.metrics.totalTips / this.metrics.totalBundles 
+      : 0;
 
     return {
-      totalBundles: bundles.length,
-      landedBundles: landedBundles.length,
-      failedBundles: failedBundles.length,
-      landingRate: bundles.length > 0 ? (landedBundles.length / bundles.length) * 100 : 0,
-      totalProfit: totalProfit.toFixed(6),
-      averageProfit: averageProfit.toFixed(6),
-      totalTips,
-      averageTip: Math.floor(averageTip)
+      ...this.metrics,
+      netProfit,
+      averageTip
     };
   }
 
@@ -435,6 +615,45 @@ export class JitoClient extends EventEmitter {
 
   async disconnect(): Promise<void> {
     this.isConnected = false;
+    
+    // Cancel any pending bundles
+    for (const bundle of this.bundles.values()) {
+      if (bundle.status === 'pending') {
+        bundle.status = 'cancelled';
+      }
+    }
+
     this.emit('disconnected');
+  }
+
+  // Configuration management
+  updateConfig(newConfig: Partial<JitoConfig>): void {
+    this.config = { ...this.config, ...newConfig };
+    this.emit('configUpdated', this.config);
+  }
+
+  getConfig(): JitoConfig {
+    return { ...this.config };
+  }
+
+  // Get statistics for monitoring
+  getStats(): {
+    isConnected: boolean;
+    totalBundles: number;
+    pendingBundles: number;
+    successRate: number;
+    averageLatency: number;
+    totalProfit: number;
+  } {
+    const pendingBundles = Array.from(this.bundles.values()).filter(b => b.status === 'pending').length;
+    
+    return {
+      isConnected: this.isConnected,
+      totalBundles: this.metrics.totalBundles,
+      pendingBundles,
+      successRate: this.metrics.successRate,
+      averageLatency: this.metrics.averageLatency,
+      totalProfit: this.metrics.totalProfit
+    };
   }
 }

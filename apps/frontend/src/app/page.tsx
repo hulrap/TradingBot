@@ -5,21 +5,26 @@ import { useRouter } from 'next/navigation';
 import { useAuth } from '../context/AuthContext';
 
 export default function Page() {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, isLoading } = useAuth();
   const router = useRouter();
 
   useEffect(() => {
-    // This check will run on the client side after hydration.
-    if (isAuthenticated) {
-      router.replace('/dashboard');
-    } else {
-      router.replace('/login');
+    if (!isLoading) {
+      if (isAuthenticated) {
+        router.replace('/dashboard');
+      } else {
+        router.replace('/login');
+      }
     }
-  }, [isAuthenticated, router]);
+  }, [isAuthenticated, isLoading, router]);
 
+  // Show loading spinner while checking authentication
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center p-24 bg-gray-900">
-      <p className="text-white">Loading...</p>
+    <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center">
+      <div className="flex flex-col items-center space-y-4">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
+        <p className="text-gray-400">Loading...</p>
+      </div>
     </div>
   );
 } 

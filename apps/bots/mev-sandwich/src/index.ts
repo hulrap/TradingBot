@@ -5,11 +5,13 @@ import { Connection } from '@solana/web3.js';
 import { FlashbotsClient, type FlashbotsConfig } from './flashbots-client';
 import { JitoClient, type JitoConfig } from './jito-client';
 import { BscMevClient, type BscMevConfig } from './bsc-mev-client';
-import { SandwichDetector, type MempoolConfig, type SandwichOpportunity } from './sandwich-detector';
+import { MempoolMonitor, type MempoolConfig, type PendingTransaction } from '@trading-bot/chain-client';
+import { SandwichDetector, type SandwichOpportunity } from './sandwich-detector';
 import { ProfitCalculator } from './profit-calculator';
 import { SandwichExecutionEngine, type ExecutionParams } from './execution-engine';
 import { RiskManager, type RiskConfig } from './risk-manager';
 import { PerformanceOptimizer, type PerformanceConfig } from './performance-optimizer';
+import { TokenMetadataService } from './services/token-metadata';
 
 // Load environment variables
 dotenv.config();
@@ -36,15 +38,24 @@ const logger = winston.createLogger({
 interface MevBotConfig {
   enabledChains: ('ethereum' | 'solana' | 'bsc')[];
   minProfitThresholds: {
-    ethereum: string; // ETH
-    solana: string;   // SOL
-    bsc: string;      // BNB
+    ethereum: string;
+    solana: string;
+    bsc: string;
   };
   maxConcurrentBundles: number;
   globalKillSwitch: boolean;
   paperTradingMode: boolean;
   enableRiskManagement: boolean;
   enablePerformanceOptimization: boolean;
+}
+
+interface TokenMetadata {
+  address: string;
+  decimals: number;
+  symbol: string;
+  name: string;
+  priceUsd: number;
+  verified: boolean;
 }
 
 class AdvancedMevSandwichBot {
@@ -54,11 +65,13 @@ class AdvancedMevSandwichBot {
   private bscMevClient?: BscMevClient;
   
   // Advanced sandwich components
+  private mempoolMonitor?: MempoolMonitor;
   private sandwichDetector?: SandwichDetector;
   private profitCalculator!: ProfitCalculator;
   private executionEngine?: SandwichExecutionEngine;
   private riskManager?: RiskManager;
   private performanceOptimizer?: PerformanceOptimizer;
+  private tokenMetadataService?: TokenMetadataService;
   
   private config: MevBotConfig;
   private isRunning = false;
@@ -69,8 +82,11 @@ class AdvancedMevSandwichBot {
   private solConnection?: Connection;
   private bscProvider?: ethers.JsonRpcProvider;
 
+
+
   constructor() {
     this.config = this.loadConfiguration();
+    this.validateConfiguration();
     this.initializeProviders();
   }
 
@@ -90,27 +106,60 @@ class AdvancedMevSandwichBot {
     };
   }
 
+  private validateConfiguration(): void {
+    const required = ['MEV_PRIVATE_KEY'];
+    
+    // Add chain-specific required variables
+    if (this.config.enabledChains.includes('ethereum')) {
+      required.push('ETH_RPC_URL', 'FLASHBOTS_RELAY_URL');
+    }
+    if (this.config.enabledChains.includes('solana')) {
+      required.push('SOL_RPC_URL', 'JITO_BLOCK_ENGINE_URL');
+    }
+    if (this.config.enabledChains.includes('bsc')) {
+      required.push('BSC_RPC_URL', 'BSC_MEV_API_KEY');
+    }
+
+    for (const env of required) {
+      if (!process.env[env]) {
+        throw new Error(`Missing required environment variable: ${env}`);
+      }
+    }
+
+    // Validate RPC URLs
+    if (this.config.enabledChains.includes('ethereum')) {
+      const ethRpc = process.env['ETH_RPC_URL']!;
+      if (ethRpc.includes('your-api-key')) {
+        throw new Error('ETH_RPC_URL contains placeholder API key. Please configure a real RPC URL.');
+      }
+    }
+
+    // Validate API keys
+    if (this.config.enabledChains.includes('bsc')) {
+      const bscApiKey = process.env['BSC_MEV_API_KEY']!;
+      if (bscApiKey.length < 10) {
+        throw new Error('BSC_MEV_API_KEY appears to be invalid or placeholder');
+      }
+    }
+  }
+
   private initializeProviders(): void {
     // Initialize Ethereum provider
     if (this.config.enabledChains.includes('ethereum')) {
-      this.ethProvider = new ethers.JsonRpcProvider(
-        process.env['ETH_RPC_URL'] || 'https://eth-mainnet.alchemyapi.io/v2/your-api-key'
-      );
+      const ethRpcUrl = process.env['ETH_RPC_URL']!;
+      this.ethProvider = new ethers.JsonRpcProvider(ethRpcUrl);
     }
 
     // Initialize Solana connection
     if (this.config.enabledChains.includes('solana')) {
-      this.solConnection = new Connection(
-        process.env['SOL_RPC_URL'] || 'https://api.mainnet-beta.solana.com',
-        'confirmed'
-      );
+      const solRpcUrl = process.env['SOL_RPC_URL'] || 'https://api.mainnet-beta.solana.com';
+      this.solConnection = new Connection(solRpcUrl, 'confirmed');
     }
 
     // Initialize BSC provider
     if (this.config.enabledChains.includes('bsc')) {
-      this.bscProvider = new ethers.JsonRpcProvider(
-        process.env['BSC_RPC_URL'] || 'https://bsc-dataseed1.binance.org'
-      );
+      const bscRpcUrl = process.env['BSC_RPC_URL'] || 'https://bsc-dataseed1.binance.org';
+      this.bscProvider = new ethers.JsonRpcProvider(bscRpcUrl);
     }
   }
 
@@ -147,16 +196,16 @@ class AdvancedMevSandwichBot {
   }
 
   private async initializeComponents(): Promise<void> {
-    const privateKey = process.env['MEV_PRIVATE_KEY'];
-    if (!privateKey) {
-      throw new Error('MEV_PRIVATE_KEY environment variable is required');
-    }
+    const privateKey = process.env['MEV_PRIVATE_KEY']!;
 
     // Initialize MEV clients
     await this.initializeMevClients(privateKey);
     
     // Initialize profit calculator
     this.initializeProfitCalculator();
+    
+    // Initialize token metadata service
+    this.initializeTokenMetadataService();
     
     // Initialize sandwich detector
     await this.initializeSandwichDetector();
@@ -180,16 +229,55 @@ class AdvancedMevSandwichBot {
     logger.info('Profit calculator initialized');
   }
 
+  private initializeTokenMetadataService(): void {
+    // Initialize TokenMetadataService with the existing services
+    const config = {
+      cacheTimeout: 600, // 10 minutes
+      enablePriceUpdates: true,
+      enableVerification: true,
+      maxRetries: 3,
+      retryDelay: 1000,
+      batchSize: 10
+    };
+
+    // We'll initialize with minimal services for now
+    // In production, this would integrate with PriceOracle, DEXAggregator, etc.
+    const mockPriceOracle = {} as any;
+    const mockDexAggregator = {} as any; 
+    const mockChainAbstraction = {} as any;
+
+    this.tokenMetadataService = new TokenMetadataService(
+      config,
+      mockPriceOracle,
+      mockDexAggregator,
+      mockChainAbstraction,
+      logger
+    );
+    
+    logger.info('Token metadata service initialized');
+  }
+
   private async initializeMevClients(privateKey: string): Promise<void> {
     // Initialize Flashbots client for Ethereum
     if (this.config.enabledChains.includes('ethereum') && this.ethProvider) {
       const flashbotsConfig: FlashbotsConfig = {
-        relayUrl: process.env['FLASHBOTS_RELAY_URL'] || 'https://relay.flashbots.net',
+        relayUrl: process.env['FLASHBOTS_RELAY_URL']!,
         authKey: process.env['FLASHBOTS_AUTH_KEY'] || privateKey,
         maxBaseFeeInFutureBlock: process.env['MAX_BASE_FEE'] || '100',
         maxPriorityFeePerGas: process.env['MAX_PRIORITY_FEE'] || '5',
         minProfitWei: ethers.parseEther(this.config.minProfitThresholds.ethereum).toString(),
-        reputationBonus: parseFloat(process.env['REPUTATION_BONUS'] || '0')
+        reputationBonus: parseFloat(process.env['REPUTATION_BONUS'] || '0'),
+        maxGasLimit: parseInt(process.env['MAX_GAS_LIMIT'] || '500000'),
+        deadlineMinutes: parseInt(process.env['DEADLINE_MINUTES'] || '20'),
+        profitMargin: parseFloat(process.env['PROFIT_MARGIN'] || '0.3'),
+        maxRetryAttempts: parseInt(process.env['MAX_RETRY_ATTEMPTS'] || '3'),
+        retryDelayMs: parseInt(process.env['RETRY_DELAY_MS'] || '1000'),
+        bundleTimeoutMs: parseInt(process.env['BUNDLE_TIMEOUT_MS'] || '60000'),
+        simulationTimeoutMs: parseInt(process.env['SIMULATION_TIMEOUT_MS'] || '10000'),
+        enableBundleCompetition: process.env['ENABLE_BUNDLE_COMPETITION'] === 'true',
+        enableAdvancedGasBidding: process.env['ENABLE_ADVANCED_GAS_BIDDING'] === 'true',
+        wethAddress: process.env['WETH_ADDRESS'] || '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+        supportedDexes: process.env['SUPPORTED_DEXES']?.split(',') || ['uniswap-v2', 'uniswap-v3']
       };
 
       this.flashbotsClient = new FlashbotsClient(this.ethProvider, privateKey, flashbotsConfig);
@@ -199,12 +287,17 @@ class AdvancedMevSandwichBot {
     // Initialize Jito client for Solana
     if (this.config.enabledChains.includes('solana') && this.solConnection) {
       const jitoConfig: JitoConfig = {
-        blockEngineUrl: process.env['JITO_BLOCK_ENGINE_URL'] || 'https://mainnet.block-engine.jito.wtf',
+        blockEngineUrl: process.env['JITO_BLOCK_ENGINE_URL']!,
         relayerUrl: process.env['JITO_RELAYER_URL'] || 'https://mainnet.relayer.jito.wtf',
         tipAccount: process.env['JITO_TIP_ACCOUNT'] || 'Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY',
         maxTipLamports: parseInt(process.env['MAX_TIP_LAMPORTS'] || '100000'),
         minProfitLamports: parseInt(process.env['MIN_PROFIT_LAMPORTS'] || '1000000'),
-        validatorPreferences: process.env['PREFERRED_VALIDATORS']?.split(',') || []
+        validatorPreferences: process.env['PREFERRED_VALIDATORS']?.split(',') || [],
+        profitMarginPercent: parseFloat(process.env['JITO_PROFIT_MARGIN_PERCENT'] || '20'),
+        frontRunRatio: parseFloat(process.env['JITO_FRONT_RUN_RATIO'] || '0.4'),
+        networkCongestionMultiplier: parseFloat(process.env['JITO_NETWORK_CONGESTION_MULTIPLIER'] || '1.5'),
+        maxBundleAttempts: parseInt(process.env['JITO_MAX_BUNDLE_ATTEMPTS'] || '30'),
+        baseTps: parseInt(process.env['JITO_BASE_TPS'] || '2000')
       };
 
       this.jitoClient = new JitoClient(this.solConnection, jitoConfig);
@@ -215,12 +308,16 @@ class AdvancedMevSandwichBot {
     if (this.config.enabledChains.includes('bsc') && this.bscProvider) {
       const bscMevConfig: BscMevConfig = {
         provider: (process.env['BSC_MEV_PROVIDER'] as any) || 'bloxroute',
-        apiKey: process.env['BSC_MEV_API_KEY'] || '',
+        apiKey: process.env['BSC_MEV_API_KEY']!,
         endpoint: process.env['BSC_MEV_ENDPOINT'] || '',
         maxGasPrice: process.env['BSC_MAX_GAS_PRICE'] || '20',
         minProfitBnb: this.config.minProfitThresholds.bsc,
         preferredValidators: process.env['BSC_PREFERRED_VALIDATORS']?.split(',') || [],
-        mempoolSubscription: process.env['BSC_MEMPOOL_SUBSCRIPTION'] === 'true'
+        mempoolSubscription: process.env['BSC_MEMPOOL_SUBSCRIPTION'] === 'true',
+        maxSlippagePercent: parseFloat(process.env['BSC_MAX_SLIPPAGE_PERCENT'] || '5'),
+        frontRunRatio: parseFloat(process.env['BSC_FRONT_RUN_RATIO'] || '0.35'),
+        gasPremiumPercent: parseFloat(process.env['BSC_GAS_PREMIUM_PERCENT'] || '20'),
+        bundleTimeoutAttempts: parseInt(process.env['BSC_BUNDLE_TIMEOUT_ATTEMPTS'] || '20')
       };
 
       this.bscMevClient = new BscMevClient(this.bscProvider, privateKey, bscMevConfig);
@@ -229,7 +326,26 @@ class AdvancedMevSandwichBot {
   }
 
   private async initializeSandwichDetector(): Promise<void> {
+    // Initialize shared mempool monitor
     const mempoolConfig: MempoolConfig = {
+      enableRealtimeSubscription: true,
+      subscriptionFilters: {
+        minTradeValue: process.env['MIN_TRADE_VALUE'] || '1000',
+        maxGasPrice: process.env['MAX_GAS_PRICE'] || '100',
+        whitelistedDexes: process.env['WHITELISTED_DEXES']?.split(',') || [],
+        blacklistedTokens: process.env['BLACKLISTED_TOKENS']?.split(',') || []
+      },
+      batchSize: 10,
+      processingDelayMs: 100,
+      heartbeatIntervalMs: 30000,
+      reconnectDelayMs: 5000,
+      maxReconnectAttempts: 5
+    };
+
+    this.mempoolMonitor = new MempoolMonitor(mempoolConfig);
+    
+    // Initialize sandwich detector with local config
+    const sandwichConfig = {
       chains: this.config.enabledChains,
       minTradeValue: process.env['MIN_TRADE_VALUE'] || '1000',
       maxGasPrice: process.env['MAX_GAS_PRICE'] || '100',
@@ -240,24 +356,37 @@ class AdvancedMevSandwichBot {
       profitabilityThreshold: parseFloat(process.env['PROFITABILITY_THRESHOLD'] || '1')
     };
 
-    this.sandwichDetector = new SandwichDetector(mempoolConfig);
+    this.sandwichDetector = new SandwichDetector(sandwichConfig);
     
     const providers: any = {};
     if (this.ethProvider) providers.ethereum = this.ethProvider;
     if (this.bscProvider) providers.bsc = this.bscProvider;
     if (this.solConnection) providers.solana = this.solConnection;
     
+    // Initialize both components
+    await this.mempoolMonitor.initialize(providers);
     await this.sandwichDetector.initialize(providers);
+    
+    this.setupMempoolMonitorEvents();
     this.setupSandwichDetectorEvents();
   }
 
   private async initializeExecutionEngine(): Promise<void> {
     this.executionEngine = new SandwichExecutionEngine(this.config.maxConcurrentBundles);
     
-    const clients: { flashbots?: FlashbotsClient; jito?: JitoClient; bscMev?: BscMevClient; } = {};
+    const clients: { 
+      flashbots?: FlashbotsClient; 
+      jito?: JitoClient; 
+      bscMev?: BscMevClient;
+      solanaConnection?: Connection;
+      tokenMetadataService?: TokenMetadataService;
+    } = {};
+    
     if (this.flashbotsClient) clients.flashbots = this.flashbotsClient;
     if (this.jitoClient) clients.jito = this.jitoClient;
     if (this.bscMevClient) clients.bscMev = this.bscMevClient;
+    if (this.solConnection) clients.solanaConnection = this.solConnection;
+    if (this.tokenMetadataService) clients.tokenMetadataService = this.tokenMetadataService;
     
     await this.executionEngine.initialize(clients);
     
@@ -316,6 +445,21 @@ class AdvancedMevSandwichBot {
     this.setupPerformanceOptimizerEvents();
   }
 
+  private setupMempoolMonitorEvents(): void {
+    if (!this.mempoolMonitor) return;
+
+    // Process transaction batches from the shared mempool monitor
+    this.mempoolMonitor.on('transactionBatch', ({ chain, transactions }: { chain: string; transactions: PendingTransaction[] }) => {
+      // For now, log that we received transactions
+      // TODO: Integrate with sandwich detector
+      logger.debug(`Received ${transactions.length} transactions for ${chain}`);
+    });
+
+    this.mempoolMonitor.on('error', (error: any) => {
+      logger.error('Mempool monitor error', { error: error.message });
+    });
+  }
+
   private setupSandwichDetectorEvents(): void {
     if (!this.sandwichDetector) return;
 
@@ -359,7 +503,7 @@ class AdvancedMevSandwichBot {
           gasUsed: result.simulation.gasUsed,
           success: result.success,
           profit: result.execution.actualProfit || result.simulation.estimatedProfit,
-          chain: 'ethereum' // Would extract from opportunity
+          chain: result.execution.chain || 'ethereum'
         });
       }
 
@@ -367,10 +511,10 @@ class AdvancedMevSandwichBot {
       if (this.riskManager) {
         this.riskManager.recordTrade({
           id: executionId,
-          chain: 'ethereum', // Would extract from opportunity
-          tokenIn: 'token_in',
-          tokenOut: 'token_out',
-          amount: '0',
+          chain: result.execution.chain || 'ethereum',
+          tokenIn: result.execution.tokenIn || 'unknown',
+          tokenOut: result.execution.tokenOut || 'unknown',
+          amount: result.execution.amountIn || '0',
           success: result.success,
           profit: parseFloat(result.execution.actualProfit || '0'),
           gasUsed: result.simulation.gasUsed
@@ -416,21 +560,43 @@ class AdvancedMevSandwichBot {
     });
   }
 
+  /**
+   * Fetch token metadata using the token metadata service
+   */
+  private async getTokenMetadata(address: string, chain: string): Promise<TokenMetadata | null> {
+    if (!this.tokenMetadataService) {
+      logger.warn('Token metadata service not available');
+      return null;
+    }
+    return await this.tokenMetadataService.getTokenMetadata(address, chain);
+  }
+
+
+
   private async processSandwichOpportunity(opportunity: SandwichOpportunity): Promise<void> {
     try {
-      // Detailed profit calculation
+      // Fetch real token metadata
+      const tokenInMetadata = await this.getTokenMetadata(opportunity.tokenIn, opportunity.chain);
+      const tokenOutMetadata = await this.getTokenMetadata(opportunity.tokenOut, opportunity.chain);
+
+      if (!tokenInMetadata || !tokenOutMetadata) {
+        logger.debug('Failed to fetch token metadata, skipping opportunity');
+        return;
+      }
+
+      // Detailed profit calculation with real data
       const profitParams = {
         victimAmountIn: opportunity.amountIn,
         victimAmountOutMin: opportunity.expectedAmountOut,
         tokenInAddress: opportunity.tokenIn,
         tokenOutAddress: opportunity.tokenOut,
-        tokenInDecimals: 18, // Would need to fetch from contract
-        tokenOutDecimals: 18, // Would need to fetch from contract  
-        tokenInPrice: 1, // Would need to fetch from price oracle
-        tokenOutPrice: 1, // Would need to fetch from price oracle
+        tokenInDecimals: tokenInMetadata.decimals,
+        tokenOutDecimals: tokenOutMetadata.decimals,
+        tokenInPrice: tokenInMetadata.priceUsd,
+        tokenOutPrice: tokenOutMetadata.priceUsd,
         poolReserve0: opportunity.poolLiquidity,
         poolReserve1: opportunity.poolLiquidity,
-        poolFee: 300, // 0.3% - would extract from pool data
+        poolFee: 300, // Would extract from pool data
         gasPrice: opportunity.gasPrice,
         chain: opportunity.chain as 'ethereum' | 'bsc' | 'solana',
         dexType: opportunity.dexType
@@ -500,100 +666,99 @@ class AdvancedMevSandwichBot {
 
         logger.info('Risk assessment passed', {
           riskScore: riskAssessment.riskScore,
-          adjustedPositionSize: riskAssessment.limits.positionSize,
-          recommendations: riskAssessment.recommendations
+          recommendedPositionSize: riskAssessment.limits.positionSize,
+          warnings: riskAssessment.warnings
         });
+
+        // Use risk-adjusted position size
+        opportunity.amountIn = riskAssessment.limits.positionSize;
       }
 
-      // Execute sandwich attack
-      if (this.executionEngine) {
-        const executionParams: ExecutionParams = {
-          opportunity: {
-            victimTxHash: opportunity.victimTxHash,
-            victimTransaction: opportunity.victimTransaction,
-            chain: opportunity.chain,
-            dexType: opportunity.dexType,
-            tokenIn: opportunity.tokenIn,
-            tokenOut: opportunity.tokenOut,
-            amountIn: opportunity.amountIn,
-            expectedAmountOut: opportunity.expectedAmountOut,
-            poolAddress: opportunity.poolAddress,
-            poolLiquidity: opportunity.poolLiquidity,
-            gasPrice: opportunity.gasPrice,
-            estimatedProfit: opportunity.estimatedProfit,
-            profitability: opportunity.profitability,
-            confidence: opportunity.confidence,
-            mevScore: opportunity.mevScore
-          },
-          frontRunAmount: opportunity.amountIn, // Could be adjusted by risk manager
-          maxGasPrice: process.env['MAX_GAS_PRICE'] || '100',
-          maxSlippage: 5,
-          deadline: Date.now() + 60000, // 1 minute deadline
-          minProfit: this.config.minProfitThresholds[opportunity.chain],
-          simulationOnly: this.config.paperTradingMode
-        };
-
-        const executionId = `exec_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      // Execute the sandwich attack
+      if (this.executionEngine && this.activeBundles.size < this.config.maxConcurrentBundles) {
+        const executionId = `execution_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
         this.activeBundles.add(executionId);
 
-        const result = await this.executionEngine.executeSandwich(executionParams);
-        
-        if (this.config.paperTradingMode) {
-          logger.info('Paper trading execution completed', {
-            estimatedProfit: result.simulation.estimatedProfit,
-            gasUsed: result.simulation.gasUsed,
-            simulationTime: result.metrics.simulationTime
-          });
-        }
+        const executionParams: ExecutionParams = {
+          opportunity,
+          profitOptimization,
+          riskAssessment: this.riskManager?.getRiskMetrics(),
+          optimizationResult,
+          paperTradingMode: this.config.paperTradingMode
+        };
+
+        await this.executionEngine.executeSandwich(executionParams);
+
+        logger.info('Sandwich execution initiated', {
+          executionId,
+          chain: opportunity.chain,
+          estimatedProfit: profitOptimization.maxProfit,
+          paperTradingMode: this.config.paperTradingMode
+        });
+      } else {
+        logger.warn('Cannot execute sandwich - concurrent bundle limit reached or execution engine unavailable');
       }
 
     } catch (error) {
-      logger.error('Error processing sandwich opportunity', {
+      logger.error('Failed to process sandwich opportunity', {
         error: error instanceof Error ? error.message : error,
         opportunity: {
           chain: opportunity.chain,
-          estimatedProfit: opportunity.estimatedProfit
+          tokenIn: opportunity.tokenIn,
+          tokenOut: opportunity.tokenOut
         }
       });
     }
   }
 
   private startAdvancedSandwichDetection(): void {
-    if (!this.sandwichDetector) {
-      logger.error('Sandwich detector not initialized');
-      return;
+    // Start shared mempool monitor
+    if (this.mempoolMonitor && !this.mempoolMonitor.isActive()) {
+      this.mempoolMonitor.startMonitoring().catch(error => {
+        logger.error('Failed to start mempool monitoring', { error: error.message });
+      });
     }
 
-    logger.info('Starting advanced sandwich detection...');
-    this.sandwichDetector.startMonitoring();
+    // Start sandwich detector
+    if (this.sandwichDetector && !this.sandwichDetector.getStats().isMonitoring) {
+      this.sandwichDetector.startMonitoring().catch(error => {
+        logger.error('Failed to start sandwich detection', { error: error.message });
+      });
+    }
   }
 
   async stop(): Promise<void> {
     try {
       logger.info('Stopping Advanced MEV Sandwich Bot...');
-      
       this.isRunning = false;
+
+      // Stop mempool monitoring
+      if (this.mempoolMonitor) {
+        await this.mempoolMonitor.stopMonitoring();
+      }
 
       // Stop sandwich detection
       if (this.sandwichDetector) {
         await this.sandwichDetector.stopMonitoring();
       }
 
-      // Wait for active executions to complete
-      const maxWaitTime = 60000;
+      // Stop execution engine
+      if (this.executionEngine) {
+        await this.executionEngine.stop();
+      }
+
+      // Wait for active bundles to complete (with timeout)
+      const timeout = 30000; // 30 seconds
       const startTime = Date.now();
-      
-      while (this.activeBundles.size > 0 && (Date.now() - startTime) < maxWaitTime) {
-        logger.info(`Waiting for ${this.activeBundles.size} active executions to complete...`);
-        await new Promise(resolve => setTimeout(resolve, 2000));
+      while (this.activeBundles.size > 0 && Date.now() - startTime < timeout) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
 
-      // Cleanup components
-      if (this.performanceOptimizer) {
-        this.performanceOptimizer.cleanup();
+      if (this.activeBundles.size > 0) {
+        logger.warn(`Bot stopped with ${this.activeBundles.size} active bundles still pending`);
       }
 
-      // Disconnect MEV clients
+      // Disconnect clients
       if (this.flashbotsClient) {
         await this.flashbotsClient.disconnect();
       }
@@ -605,9 +770,8 @@ class AdvancedMevSandwichBot {
       }
 
       logger.info('Advanced MEV Sandwich Bot stopped successfully');
-
     } catch (error) {
-      logger.error('Error stopping Advanced MEV Sandwich Bot', { 
+      logger.error('Error while stopping bot', { 
         error: error instanceof Error ? error.message : error 
       });
       throw error;
@@ -620,113 +784,87 @@ class AdvancedMevSandwichBot {
     activeBundles: number;
     paperTradingMode: boolean;
     components: {
+      mempoolMonitor: boolean;
       sandwichDetector: boolean;
       executionEngine: boolean;
       riskManager: boolean;
       performanceOptimizer: boolean;
     };
     metrics: {
+      mempoolMonitor?: any;
       sandwichDetector?: any;
       riskManager?: any;
       performanceOptimizer?: any;
     };
   } {
-    const metrics: any = {};
-
-    if (this.sandwichDetector) {
-      metrics.sandwichDetector = this.sandwichDetector.getStats();
-    }
-
-    if (this.riskManager) {
-      metrics.riskManager = this.riskManager.getRiskMetrics();
-    }
-
-    if (this.performanceOptimizer) {
-      metrics.performanceOptimizer = {
-        stats: this.performanceOptimizer.getPerformanceStats(),
-        cache: this.performanceOptimizer.getCacheStats()
-      };
-    }
-
     return {
       isRunning: this.isRunning,
       enabledChains: this.config.enabledChains,
       activeBundles: this.activeBundles.size,
       paperTradingMode: this.config.paperTradingMode,
       components: {
+        mempoolMonitor: !!this.mempoolMonitor,
         sandwichDetector: !!this.sandwichDetector,
         executionEngine: !!this.executionEngine,
         riskManager: !!this.riskManager,
         performanceOptimizer: !!this.performanceOptimizer
       },
-      metrics
+      metrics: {
+        mempoolMonitor: this.mempoolMonitor?.getStats(),
+        sandwichDetector: this.sandwichDetector?.getStats(),
+        riskManager: this.riskManager?.getRiskMetrics(),
+        performanceOptimizer: this.performanceOptimizer?.getStats()
+      }
     };
   }
 
   async emergencyStop(): Promise<void> {
-    logger.error('EMERGENCY STOP ACTIVATED - ADVANCED MEV BOT');
+    logger.error('EMERGENCY STOP INITIATED');
     this.config.globalKillSwitch = true;
     
-    if (this.executionEngine) {
-      await this.executionEngine.emergencyStop();
+    // Cancel all active bundles
+    for (const bundleId of this.activeBundles) {
+      try {
+        if (this.executionEngine) {
+          await this.executionEngine.cancelExecution(bundleId);
+        }
+      } catch (error) {
+        logger.error('Failed to cancel bundle during emergency stop', { bundleId, error });
+      }
     }
     
     await this.stop();
   }
 }
 
-// Main execution
 async function main() {
   const bot = new AdvancedMevSandwichBot();
-  
-  // Graceful shutdown handling
+
   const shutdown = async (signal: string) => {
     logger.info(`Received ${signal}, shutting down gracefully...`);
     try {
       await bot.stop();
       process.exit(0);
     } catch (error) {
-      logger.error('Error during shutdown', { error: error instanceof Error ? error.message : error });
+      logger.error('Error during shutdown', { error });
       process.exit(1);
     }
   };
 
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
-  process.on('SIGQUIT', () => shutdown('SIGQUIT'));
-
-  // Handle uncaught exceptions
-  process.on('uncaughtException', (error) => {
-    logger.error('Uncaught exception', { error: error.message, stack: error.stack });
-    bot.emergencyStop();
-  });
-
-  process.on('unhandledRejection', (reason, promise) => {
-    logger.error('Unhandled rejection', { reason, promise });
-    bot.emergencyStop();
-  });
 
   try {
     await bot.start();
-    
-    // Log advanced status every 2 minutes
-    setInterval(() => {
-      const status = bot.getAdvancedStatus();
-      logger.info('Advanced bot status', status);
-    }, 120000);
-    
   } catch (error) {
-    logger.error('Failed to start Advanced MEV Sandwich Bot', { 
-      error: error instanceof Error ? error.message : error 
-    });
+    logger.error('Failed to start bot', { error });
     process.exit(1);
   }
 }
 
-// Run the bot
 if (require.main === module) {
-  main().catch((error) => {
-    console.error('Fatal error:', error);
+  main().catch(error => {
+    console.error('Unhandled error in main:', error);
     process.exit(1);
   });
 }

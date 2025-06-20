@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useMemo, useCallback } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -12,7 +12,10 @@ import {
   Settings2,
   Zap,
   AlertCircle,
-  CheckCircle
+  CheckCircle,
+  BarChart3,
+  Shield,
+  Activity
 } from 'lucide-react';
 import { BotConfiguration, ArbitrageConfiguration, TokenPair } from '../BotConfigurationDashboard';
 
@@ -21,40 +24,249 @@ interface ArbitrageConfigProps {
   onChange: (config: BotConfiguration) => void;
 }
 
-// Available DEXes for arbitrage
+// Enhanced DEX data with real-time status simulation
 const AVAILABLE_DEXES = [
-  { id: 'uniswap', name: 'Uniswap V3', icon: '🦄', chains: ['ethereum', 'arbitrum', 'polygon'] },
-  { id: 'sushiswap', name: 'SushiSwap', icon: '🍣', chains: ['ethereum', 'arbitrum', 'polygon'] },
-  { id: 'pancakeswap', name: 'PancakeSwap', icon: '🥞', chains: ['bsc'] },
-  { id: '1inch', name: '1inch', icon: '1️⃣', chains: ['ethereum', 'bsc', 'polygon'] },
-  { id: 'curve', name: 'Curve', icon: '🌀', chains: ['ethereum', 'arbitrum', 'polygon'] },
-  { id: 'balancer', name: 'Balancer', icon: '⚖️', chains: ['ethereum', 'arbitrum', 'polygon'] }
+  { 
+    id: 'uniswap', 
+    name: 'Uniswap V3', 
+    icon: '🦄', 
+    chains: ['ethereum', 'arbitrum', 'polygon'],
+    tvl: 4200000000, // $4.2B
+    dailyVolume: 1200000000, // $1.2B
+    avgSlippage: 0.05,
+    status: 'active' as const,
+    latency: 45,
+    gasEfficiency: 'medium'
+  },
+  { 
+    id: 'sushiswap', 
+    name: 'SushiSwap', 
+    icon: '🍣', 
+    chains: ['ethereum', 'arbitrum', 'polygon'],
+    tvl: 800000000, // $800M
+    dailyVolume: 150000000, // $150M
+    avgSlippage: 0.08,
+    status: 'active' as const,
+    latency: 52,
+    gasEfficiency: 'medium'
+  },
+  { 
+    id: 'pancakeswap', 
+    name: 'PancakeSwap', 
+    icon: '🥞', 
+    chains: ['bsc'],
+    tvl: 2100000000, // $2.1B
+    dailyVolume: 400000000, // $400M
+    avgSlippage: 0.06,
+    status: 'active' as const,
+    latency: 35,
+    gasEfficiency: 'high'
+  },
+  { 
+    id: '1inch', 
+    name: '1inch', 
+    icon: '1️⃣', 
+    chains: ['ethereum', 'bsc', 'polygon'],
+    tvl: 300000000, // $300M
+    dailyVolume: 800000000, // $800M
+    avgSlippage: 0.04,
+    status: 'active' as const,
+    latency: 38,
+    gasEfficiency: 'high'
+  },
+  { 
+    id: 'curve', 
+    name: 'Curve', 
+    icon: '🌀', 
+    chains: ['ethereum', 'arbitrum', 'polygon'],
+    tvl: 1800000000, // $1.8B
+    dailyVolume: 200000000, // $200M
+    avgSlippage: 0.02,
+    status: 'active' as const,
+    latency: 48,
+    gasEfficiency: 'low'
+  },
+  { 
+    id: 'balancer', 
+    name: 'Balancer', 
+    icon: '⚖️', 
+    chains: ['ethereum', 'arbitrum', 'polygon'],
+    tvl: 600000000, // $600M
+    dailyVolume: 80000000, // $80M
+    avgSlippage: 0.07,
+    status: 'maintenance' as const,
+    latency: 65,
+    gasEfficiency: 'low'
+  }
 ];
 
-// Popular token pairs for arbitrage
+// Enhanced token pairs with market data
 const POPULAR_TOKEN_PAIRS = [
-  { baseToken: 'ETH', quoteToken: 'USDC', popular: true },
-  { baseToken: 'ETH', quoteToken: 'USDT', popular: true },
-  { baseToken: 'WBTC', quoteToken: 'USDC', popular: true },
-  { baseToken: 'WBTC', quoteToken: 'ETH', popular: true },
-  { baseToken: 'LINK', quoteToken: 'ETH', popular: true },
-  { baseToken: 'UNI', quoteToken: 'ETH', popular: false },
-  { baseToken: 'AAVE', quoteToken: 'ETH', popular: false },
-  { baseToken: 'MATIC', quoteToken: 'USDC', popular: false }
+  { 
+    baseToken: 'ETH', 
+    quoteToken: 'USDC', 
+    popular: true,
+    marketCap: 300000000000, // $300B
+    dailyVolume: 2000000000, // $2B
+    volatility: 0.15,
+    spread: 0.02
+  },
+  { 
+    baseToken: 'ETH', 
+    quoteToken: 'USDT', 
+    popular: true,
+    marketCap: 300000000000,
+    dailyVolume: 1500000000,
+    volatility: 0.15,
+    spread: 0.03
+  },
+  { 
+    baseToken: 'WBTC', 
+    quoteToken: 'USDC', 
+    popular: true,
+    marketCap: 800000000000, // $800B
+    dailyVolume: 800000000,
+    volatility: 0.18,
+    spread: 0.04
+  },
+  { 
+    baseToken: 'WBTC', 
+    quoteToken: 'ETH', 
+    popular: true,
+    marketCap: 800000000000,
+    dailyVolume: 400000000,
+    volatility: 0.12,
+    spread: 0.05
+  },
+  { 
+    baseToken: 'LINK', 
+    quoteToken: 'ETH', 
+    popular: true,
+    marketCap: 8000000000, // $8B
+    dailyVolume: 150000000,
+    volatility: 0.25,
+    spread: 0.08
+  },
+  { 
+    baseToken: 'UNI', 
+    quoteToken: 'ETH', 
+    popular: false,
+    marketCap: 5000000000,
+    dailyVolume: 100000000,
+    volatility: 0.30,
+    spread: 0.12
+  },
+  { 
+    baseToken: 'AAVE', 
+    quoteToken: 'ETH', 
+    popular: false,
+    marketCap: 2000000000,
+    dailyVolume: 50000000,
+    volatility: 0.35,
+    spread: 0.15
+  },
+  { 
+    baseToken: 'MATIC', 
+    quoteToken: 'USDC', 
+    popular: false,
+    marketCap: 6000000000,
+    dailyVolume: 80000000,
+    volatility: 0.28,
+    spread: 0.10
+  }
 ];
+
+// Advanced arbitrage opportunity calculation
+const calculateArbitrageOpportunities = (config: ArbitrageConfiguration): {
+  totalOpportunities: number;
+  estimatedDailyProfit: number;
+  riskScore: number;
+  recommendations: string[];
+} => {
+  const enabledPairs = config.tokenPairs.filter(pair => pair.enabled);
+  const selectedDexes = AVAILABLE_DEXES.filter(dex => (config.dexes || []).includes(dex.id) && dex.status === 'active');
+  
+  // Calculate opportunity matrix
+  const pairDexCombinations = enabledPairs.length * selectedDexes.length * (selectedDexes.length - 1);
+  
+  // Adjust for market conditions
+  const marketEfficiency = 0.85; // Market efficiency factor
+  const competitionFactor = Math.max(0.3, 1 - (selectedDexes.length * 0.1)); // More DEXes = more competition
+  
+  const totalOpportunities = Math.floor(pairDexCombinations * marketEfficiency * competitionFactor);
+  
+  // Estimate daily profit based on opportunities and configuration
+  const avgOpportunityProfit = config.profitThreshold * 0.6; // Conservative estimate
+  const dailyOpportunityCount = Math.min(totalOpportunities, config.maxSimultaneousTrades * 24); // Max per day
+  const avgTradeSize = (config.maxTradeSize + config.minTradeSize) / 2;
+  
+  const estimatedDailyProfit = dailyOpportunityCount * avgOpportunityProfit * 0.01 * avgTradeSize;
+  
+  // Calculate risk score
+  const riskFactors = {
+    highTradeSize: config.maxTradeSize > 5000 ? 2 : 0,
+    lowProfitThreshold: config.profitThreshold < 0.2 ? 3 : 0,
+    highSlippage: config.slippageTolerance > 1 ? 2 : 0,
+    manySimultaneous: config.maxSimultaneousTrades > 5 ? 1 : 0,
+    highGasLimit: config.gasLimit > 400000 ? 1 : 0,
+    lowRebalanceThreshold: config.rebalanceThreshold < 5 ? 1 : 0
+  };
+  
+  const riskScore = Object.values(riskFactors).reduce((sum, factor) => sum + factor, 0);
+  
+  // Generate recommendations
+  const recommendations: string[] = [];
+  if (selectedDexes.length < 3) recommendations.push('Consider adding more DEXes to increase opportunities');
+  if (config.profitThreshold < 0.3) recommendations.push('Increase profit threshold to reduce risk');
+  if (config.slippageTolerance > 0.8) recommendations.push('Lower slippage tolerance for better execution');
+  if (enabledPairs.length < 3) recommendations.push('Add more token pairs to diversify opportunities');
+  if (config.maxSimultaneousTrades > 3) recommendations.push('Consider reducing simultaneous trades to manage risk');
+  
+  return {
+    totalOpportunities,
+    estimatedDailyProfit,
+    riskScore,
+    recommendations
+  };
+};
+
+
 
 export function ArbitrageConfig({ config, onChange }: ArbitrageConfigProps) {
   const [showAdvanced, setShowAdvanced] = useState(false);
+  
   const arbConfig = config.configuration as ArbitrageConfiguration;
 
-  const updateConfig = (updates: Partial<ArbitrageConfiguration>) => {
+  // Memoized calculations for performance
+  const opportunityAnalysis = useMemo(() => 
+    calculateArbitrageOpportunities(arbConfig), 
+    [arbConfig]
+  );
+
+  const selectedDexes = useMemo(() => 
+    AVAILABLE_DEXES.filter(dex => (arbConfig.dexes || []).includes(dex.id)),
+    [arbConfig.dexes]
+  );
+
+  const totalTVL = useMemo(() => 
+    selectedDexes.reduce((sum, dex) => sum + dex.tvl, 0),
+    [selectedDexes]
+  );
+
+  const updateConfig = useCallback((updates: Partial<ArbitrageConfiguration>) => {
     onChange({
       ...config,
       configuration: { ...arbConfig, ...updates }
     });
-  };
+  }, [config, arbConfig, onChange]);
 
-  const addTokenPair = () => {
+  // Real-time pair validation - simplified for now
+  const validatePairAsync = useCallback(async (_index: number, pair: TokenPair) => {
+    if (!pair.baseToken || !pair.quoteToken) return;
+    // Validation logic can be re-implemented later if needed
+  }, []);
+
+  const addTokenPair = useCallback(() => {
     const newPair: TokenPair = {
       baseToken: '',
       quoteToken: '',
@@ -64,28 +276,44 @@ export function ArbitrageConfig({ config, onChange }: ArbitrageConfigProps) {
     updateConfig({
       tokenPairs: [...arbConfig.tokenPairs, newPair]
     });
-  };
+  }, [arbConfig.tokenPairs, arbConfig.profitThreshold, updateConfig]);
 
-  const updateTokenPair = (index: number, updates: Partial<TokenPair>) => {
+  const updateTokenPair = useCallback((index: number, updates: Partial<TokenPair>) => {
     const updatedPairs = arbConfig.tokenPairs.map((pair, i) => 
       i === index ? { ...pair, ...updates } : pair
     );
     updateConfig({ tokenPairs: updatedPairs });
-  };
+    
+    // Trigger validation if tokens changed
+    if (updates.baseToken || updates.quoteToken) {
+      const currentPair = arbConfig.tokenPairs[index];
+      if (currentPair) {
+        const updatedPair: TokenPair = {
+          baseToken: updates.baseToken ?? currentPair.baseToken,
+          quoteToken: updates.quoteToken ?? currentPair.quoteToken,
+          enabled: updates.enabled ?? currentPair.enabled,
+          minProfitThreshold: updates.minProfitThreshold ?? currentPair.minProfitThreshold ?? arbConfig.profitThreshold,
+          maxTradeSize: updates.maxTradeSize ?? currentPair.maxTradeSize ?? arbConfig.maxTradeSize
+        };
+        validatePairAsync(index, updatedPair);
+      }
+    }
+  }, [arbConfig.tokenPairs, updateConfig, validatePairAsync]);
 
-  const removeTokenPair = (index: number) => {
+  const removeTokenPair = useCallback((index: number) => {
     const updatedPairs = arbConfig.tokenPairs.filter((_, i) => i !== index);
     updateConfig({ tokenPairs: updatedPairs });
-  };
+  }, [arbConfig.tokenPairs, updateConfig]);
 
-  const addPopularPair = (popularPair: { baseToken: string; quoteToken: string }) => {
+  const addPopularPair = useCallback((popularPair: { baseToken: string; quoteToken: string }) => {
     const exists = arbConfig.tokenPairs.some(
       pair => pair.baseToken === popularPair.baseToken && pair.quoteToken === popularPair.quoteToken
     );
     
     if (!exists) {
       const newPair: TokenPair = {
-        ...popularPair,
+        baseToken: popularPair.baseToken,
+        quoteToken: popularPair.quoteToken,
         enabled: true,
         minProfitThreshold: arbConfig.profitThreshold
       };
@@ -93,35 +321,22 @@ export function ArbitrageConfig({ config, onChange }: ArbitrageConfigProps) {
         tokenPairs: [...arbConfig.tokenPairs, newPair]
       });
     }
-  };
+  }, [arbConfig.tokenPairs, arbConfig.profitThreshold, updateConfig]);
 
-  const toggleDex = (dexId: string) => {
+  const toggleDex = useCallback((dexId: string) => {
     const currentDexes = arbConfig.dexes || [];
     const updatedDexes = currentDexes.includes(dexId)
       ? currentDexes.filter(id => id !== dexId)
       : [...currentDexes, dexId];
     
     updateConfig({ dexes: updatedDexes });
-  };
+  }, [arbConfig.dexes, updateConfig]);
 
-  const getEstimatedOpportunities = () => {
-    const enabledPairs = arbConfig.tokenPairs.filter(pair => pair.enabled).length;
-    const selectedDexes = (arbConfig.dexes || []).length;
-    return enabledPairs * selectedDexes * (selectedDexes - 1);
-  };
-
-  const getRiskLevel = () => {
-    const riskFactors = {
-      highTradeSize: arbConfig.maxTradeSize > 2000,
-      lowProfitThreshold: arbConfig.profitThreshold < 0.2,
-      highSlippage: arbConfig.slippageTolerance > 1,
-      manySimultaneous: arbConfig.maxSimultaneousTrades > 5
-    };
-
-    const riskCount = Object.values(riskFactors).filter(Boolean).length;
-    
-    if (riskCount >= 3) return { level: 'high', color: 'text-red-600' };
-    if (riskCount >= 2) return { level: 'medium', color: 'text-yellow-600' };
+  const getRiskLevel = (): { level: 'low' | 'medium' | 'high' | 'extreme'; color: string } => {
+    const score = opportunityAnalysis.riskScore;
+    if (score >= 8) return { level: 'extreme', color: 'text-red-700' };
+    if (score >= 5) return { level: 'high', color: 'text-red-600' };
+    if (score >= 3) return { level: 'medium', color: 'text-yellow-600' };
     return { level: 'low', color: 'text-green-600' };
   };
 
@@ -129,7 +344,29 @@ export function ArbitrageConfig({ config, onChange }: ArbitrageConfigProps) {
 
   return (
     <div className="space-y-6">
-      {/* Configuration Overview */}
+      {/* Risk Warning */}
+      {risk.level === 'high' || risk.level === 'extreme' ? (
+        <Card className="border-red-200 bg-red-50">
+          <CardContent className="p-4">
+            <div className="flex items-start gap-2">
+              <AlertCircle className="h-5 w-5 text-red-600 mt-0.5" />
+              <div>
+                <div className="font-medium text-red-800 mb-1">High Risk Configuration</div>
+                <div className="text-sm text-red-700 space-y-1">
+                  <p>Risk Score: {opportunityAnalysis.riskScore}/10 - Consider the following recommendations:</p>
+                  <ul className="list-disc list-inside space-y-1 ml-4">
+                    {opportunityAnalysis.recommendations.map((rec, index) => (
+                      <li key={index}>{rec}</li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {/* Enhanced Configuration Overview */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -138,18 +375,63 @@ export function ArbitrageConfig({ config, onChange }: ArbitrageConfigProps) {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div className="text-center p-4 border rounded-lg">
               <div className="text-2xl font-bold text-blue-600">{arbConfig.tokenPairs.filter(p => p.enabled).length}</div>
               <div className="text-sm text-muted-foreground">Active Token Pairs</div>
             </div>
             <div className="text-center p-4 border rounded-lg">
-              <div className="text-2xl font-bold text-green-600">{getEstimatedOpportunities()}</div>
+              <div className="text-2xl font-bold text-green-600">{opportunityAnalysis.totalOpportunities}</div>
               <div className="text-sm text-muted-foreground">Est. Opportunities</div>
             </div>
             <div className="text-center p-4 border rounded-lg">
-              <div className={`text-2xl font-bold ${risk.color}`}>{risk.level.toUpperCase()}</div>
+              <div className="text-2xl font-bold text-purple-600 flex items-center justify-center gap-1">
+                <DollarSign className="h-6 w-6" />
+                {opportunityAnalysis.estimatedDailyProfit.toFixed(0)}
+              </div>
+              <div className="text-sm text-muted-foreground">Est. Daily Profit</div>
+            </div>
+            <div className="text-center p-4 border rounded-lg">
+              <div className={`text-2xl font-bold ${risk.color} flex items-center justify-center gap-1`}>
+                {risk.level === 'extreme' && <AlertCircle className="h-6 w-6" />}
+                {risk.level === 'high' && <AlertCircle className="h-6 w-6" />}
+                {risk.level === 'medium' && <Activity className="h-6 w-6" />}
+                {risk.level === 'low' && <Shield className="h-6 w-6" />}
+                {risk.level.toUpperCase()}
+              </div>
               <div className="text-sm text-muted-foreground">Risk Level</div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Market Overview */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <BarChart3 className="h-5 w-5 text-green-500" />
+            Market Overview
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="text-center p-4 border rounded-lg">
+              <div className="text-2xl font-bold text-green-600">
+                ${(totalTVL / 1000000000).toFixed(1)}B
+              </div>
+              <div className="text-sm text-muted-foreground">Total Value Locked</div>
+            </div>
+            <div className="text-center p-4 border rounded-lg">
+              <div className="text-2xl font-bold text-blue-600">
+                {selectedDexes.filter(dex => dex.status === 'active').length}/{selectedDexes.length}
+              </div>
+              <div className="text-sm text-muted-foreground">Active DEXes</div>
+            </div>
+            <div className="text-center p-4 border rounded-lg">
+              <div className="text-2xl font-bold text-orange-600">
+                {selectedDexes.length > 0 ? Math.round(selectedDexes.reduce((sum, dex) => sum + dex.latency, 0) / selectedDexes.length) : 0}ms
+              </div>
+              <div className="text-sm text-muted-foreground">Avg Latency</div>
             </div>
           </div>
         </CardContent>
