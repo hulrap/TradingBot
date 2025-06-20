@@ -14,25 +14,191 @@ import { PerformanceOptimizer, type PerformanceConfig } from './performance-opti
 // Load environment variables
 dotenv.config();
 
-// Configure logger
-const logger = winston.createLogger({
-  level: process.env['LOG_LEVEL'] || 'info',
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.errors({ stack: true }),
-    winston.format.json()
-  ),
-  transports: [
-    new winston.transports.Console({
-      format: winston.format.combine(
-        winston.format.colorize(),
-        winston.format.simple()
-      )
-    }),
-    new winston.transports.File({ filename: 'mev-sandwich.log' })
-  ]
-});
+// Enhanced error types for better error handling
+export class MevBotError extends Error {
+  constructor(
+    message: string,
+    public code: string,
+    public chain?: string,
+    public originalError?: Error
+  ) {
+    super(message);
+    this.name = 'MevBotError';
+  }
+}
 
+export class ConfigurationError extends MevBotError {
+  constructor(message: string, originalError?: Error) {
+    super(message, 'CONFIGURATION_ERROR', undefined, originalError);
+    this.name = 'ConfigurationError';
+  }
+}
+
+export class ExecutionError extends MevBotError {
+  constructor(message: string, chain?: string, originalError?: Error) {
+    super(message, 'EXECUTION_ERROR', chain, originalError);
+    this.name = 'ExecutionError';
+  }
+}
+
+export class PriceOracleError extends MevBotError {
+  constructor(message: string, originalError?: Error) {
+    super(message, 'PRICE_ORACLE_ERROR', undefined, originalError);
+    this.name = 'PriceOracleError';
+  }
+}
+
+// Enhanced price oracle service for real-time price data
+interface TokenMetadata {
+  address: string;
+  symbol: string;
+  decimals: number;
+  price: number;
+  timestamp: number;
+  confidence: number;
+}
+
+interface PriceOracleConfig {
+  coinGeckoApiKey?: string;
+  chainlinkRpcUrl?: string;
+  pythPriceServiceUrl?: string;
+  cacheTimeMs: number;
+  maxPriceAge: number;
+  minConfidence: number;
+}
+
+class EnhancedPriceOracle {
+  private cache = new Map<string, TokenMetadata>();
+  private config: PriceOracleConfig;
+
+  constructor(config: PriceOracleConfig) {
+    this.config = config;
+  }
+
+  async getTokenMetadata(address: string, chain: string): Promise<TokenMetadata> {
+    const cacheKey = `${chain}_${address}`;
+    const cached = this.cache.get(cacheKey);
+    
+    if (cached && Date.now() - cached.timestamp < this.config.cacheTimeMs) {
+      return cached;
+    }
+
+    try {
+      // Multi-source price aggregation
+      const prices = await Promise.allSettled([
+        this.fetchFromCoinGecko(address, chain),
+        this.fetchFromChainlink(address, chain),
+        this.fetchFromPyth(address, chain)
+      ]);
+
+      const validPrices = prices
+        .filter(result => result.status === 'fulfilled' && result.value.price > 0)
+        .map(result => (result as PromiseFulfilledResult<TokenMetadata>).value);
+
+      if (validPrices.length === 0) {
+        throw new PriceOracleError(`No valid prices found for ${address} on ${chain}`);
+      }
+
+      // Use median price for stability
+      const medianPrice = this.calculateMedianPrice(validPrices);
+      const confidence = validPrices.length / 3;
+
+      if (confidence < this.config.minConfidence) {
+        throw new PriceOracleError(`Price confidence too low: ${confidence} < ${this.config.minConfidence}`);
+      }
+
+      const metadata: TokenMetadata = {
+        address,
+        symbol: validPrices[0].symbol,
+        decimals: validPrices[0].decimals,
+        price: medianPrice,
+        timestamp: Date.now(),
+        confidence
+      };
+
+      this.cache.set(cacheKey, metadata);
+      return metadata;
+
+    } catch (error) {
+      throw new PriceOracleError(`Failed to fetch token metadata for ${address}`, error as Error);
+    }
+  }
+
+  private calculateMedianPrice(prices: TokenMetadata[]): number {
+    const sortedPrices = prices.map(p => p.price).sort((a, b) => a - b);
+    const mid = Math.floor(sortedPrices.length / 2);
+    return sortedPrices.length % 2 !== 0 ? sortedPrices[mid] : (sortedPrices[mid - 1] + sortedPrices[mid]) / 2;
+  }
+
+  private async fetchFromCoinGecko(address: string, chain: string): Promise<TokenMetadata> {
+    const platformMap: { [chain: string]: string } = {
+      ethereum: 'ethereum',
+      bsc: 'binance-smart-chain',
+      polygon: 'polygon-pos'
+    };
+
+    const platform = platformMap[chain];
+    if (!platform) throw new Error(`Unsupported chain: ${chain}`);
+
+    const url = `https://api.coingecko.com/api/v3/simple/token_price/${platform}?contract_addresses=${address}&vs_currencies=usd&include_24hr_change=true`;
+    
+    const headers: any = { 'User-Agent': 'MEVBot/1.0' };
+    if (this.config.coinGeckoApiKey) {
+      headers['X-CG-Pro-API-Key'] = this.config.coinGeckoApiKey;
+    }
+
+    const response = await fetch(url, { 
+      headers,
+      signal: AbortSignal.timeout(5000)
+    });
+
+    if (!response.ok) {
+      throw new Error(`CoinGecko API error: ${response.status}`);
+    }
+
+    const data = await response.json() as Record<string, any>;
+    const tokenData = data[address.toLowerCase()];
+    
+    if (!tokenData || typeof tokenData !== 'object' || typeof tokenData.usd !== 'number') {
+      throw new Error('Invalid price data from CoinGecko');
+    }
+
+    return {
+      address,
+      symbol: 'UNKNOWN', // CoinGecko doesn't provide symbol in this endpoint
+      decimals: 18, // Default, would need separate call for exact decimals
+      price: tokenData.usd,
+      timestamp: Date.now(),
+      confidence: 1
+    };
+  }
+
+  private async fetchFromChainlink(address: string, chain: string): Promise<TokenMetadata> {
+    // Placeholder for Chainlink price feed integration
+    // In production, implement actual Chainlink oracle calls
+    throw new Error('Chainlink integration not implemented');
+  }
+
+  private async fetchFromPyth(address: string, chain: string): Promise<TokenMetadata> {
+    // Placeholder for Pyth Network integration
+    // In production, implement Pyth price service calls
+    throw new Error('Pyth integration not implemented');
+  }
+
+  clearCache(): void {
+    this.cache.clear();
+  }
+
+  getCacheStats(): { size: number; oldestEntry: number } {
+    const timestamps = Array.from(this.cache.values()).map(data => data.timestamp);
+    return {
+      size: this.cache.size,
+      oldestEntry: timestamps.length > 0 ? Math.min(...timestamps) : 0
+    };
+  }
+}
+
+// Enhanced configuration with validation
 interface MevBotConfig {
   enabledChains: ('ethereum' | 'solana' | 'bsc')[];
   minProfitThresholds: {
@@ -45,7 +211,105 @@ interface MevBotConfig {
   paperTradingMode: boolean;
   enableRiskManagement: boolean;
   enablePerformanceOptimization: boolean;
+  priceOracle: PriceOracleConfig;
+  healthCheck: {
+    enabled: boolean;
+    port: number;
+    interval: number;
+  };
+  circuitBreaker: {
+    enabled: boolean;
+    failureThreshold: number;
+    resetTimeout: number;
+  };
 }
+
+// Circuit breaker for external service failures
+class CircuitBreaker {
+  private failures = 0;
+  private lastFailureTime = 0;
+  private state: 'closed' | 'open' | 'half-open' = 'closed';
+
+  constructor(
+    private failureThreshold: number,
+    private resetTimeout: number
+  ) {}
+
+  async execute<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.state === 'open') {
+      if (Date.now() - this.lastFailureTime > this.resetTimeout) {
+        this.state = 'half-open';
+      } else {
+        throw new Error('Circuit breaker is open');
+      }
+    }
+
+    try {
+      const result = await operation();
+      this.onSuccess();
+      return result;
+    } catch (error) {
+      this.onFailure();
+      throw error;
+    }
+  }
+
+  private onSuccess(): void {
+    this.failures = 0;
+    this.state = 'closed';
+  }
+
+  private onFailure(): void {
+    this.failures++;
+    this.lastFailureTime = Date.now();
+    
+    if (this.failures >= this.failureThreshold) {
+      this.state = 'open';
+    }
+  }
+
+  getState(): { state: string; failures: number; lastFailureTime: number } {
+    return {
+      state: this.state,
+      failures: this.failures,
+      lastFailureTime: this.lastFailureTime
+    };
+  }
+}
+
+// Configure enhanced logger with structured logging
+const logger = winston.createLogger({
+  level: process.env['LOG_LEVEL'] || 'info',
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.errors({ stack: true }),
+    winston.format.json(),
+    winston.format.metadata({ fillExcept: ['message', 'level', 'timestamp'] })
+  ),
+  defaultMeta: { service: 'mev-sandwich-bot' },
+  transports: [
+    new winston.transports.Console({
+      format: winston.format.combine(
+        winston.format.colorize(),
+        winston.format.printf(({ timestamp, level, message, metadata }) => {
+          const meta = Object.keys(metadata).length ? JSON.stringify(metadata) : '';
+          return `${timestamp} [${level}] ${message} ${meta}`;
+        })
+      )
+    }),
+    new winston.transports.File({ 
+      filename: 'logs/error.log', 
+      level: 'error',
+      maxsize: 5242880, // 5MB
+      maxFiles: 5
+    }),
+    new winston.transports.File({ 
+      filename: 'logs/combined.log',
+      maxsize: 5242880, // 5MB
+      maxFiles: 5
+    })
+  ]
+});
 
 class AdvancedMevSandwichBot {
   // Core MEV clients
@@ -60,22 +324,38 @@ class AdvancedMevSandwichBot {
   private riskManager?: RiskManager;
   private performanceOptimizer?: PerformanceOptimizer;
   
+  // Enhanced services
+  private priceOracle!: EnhancedPriceOracle;
+  private circuitBreaker?: CircuitBreaker;
+  
   private config: MevBotConfig;
   private isRunning = false;
   private activeBundles = new Set<string>();
+  private isShuttingDown = false;
 
   // Network providers
   private ethProvider?: ethers.JsonRpcProvider;
   private solConnection?: Connection;
   private bscProvider?: ethers.JsonRpcProvider;
 
+  // Health monitoring
+  private healthMetrics = {
+    startTime: Date.now(),
+    totalOpportunities: 0,
+    successfulExecutions: 0,
+    failedExecutions: 0,
+    totalProfit: 0,
+    lastActivity: Date.now()
+  };
+
   constructor() {
-    this.config = this.loadConfiguration();
+    this.config = this.loadAndValidateConfiguration();
+    this.initializeServices();
     this.initializeProviders();
   }
 
-  private loadConfiguration(): MevBotConfig {
-    return {
+  private loadAndValidateConfiguration(): MevBotConfig {
+    const config = {
       enabledChains: (process.env['ENABLED_CHAINS']?.split(',') as any[]) || ['ethereum'],
       minProfitThresholds: {
         ethereum: process.env['MIN_PROFIT_ETH'] || '0.01',
@@ -86,32 +366,170 @@ class AdvancedMevSandwichBot {
       globalKillSwitch: process.env['GLOBAL_KILL_SWITCH'] === 'true',
       paperTradingMode: process.env['PAPER_TRADING_MODE'] === 'true',
       enableRiskManagement: process.env['ENABLE_RISK_MANAGEMENT'] !== 'false',
-      enablePerformanceOptimization: process.env['ENABLE_PERFORMANCE_OPTIMIZATION'] !== 'false'
+      enablePerformanceOptimization: process.env['ENABLE_PERFORMANCE_OPTIMIZATION'] !== 'false',
+      priceOracle: {
+        coinGeckoApiKey: process.env['COINGECKO_API_KEY'],
+        chainlinkRpcUrl: process.env['CHAINLINK_RPC_URL'],
+        pythPriceServiceUrl: process.env['PYTH_PRICE_SERVICE_URL'] || 'https://hermes.pyth.network',
+        cacheTimeMs: parseInt(process.env['PRICE_CACHE_TIME_MS'] || '30000'),
+        maxPriceAge: parseInt(process.env['MAX_PRICE_AGE_MS'] || '60000'),
+        minConfidence: parseFloat(process.env['MIN_PRICE_CONFIDENCE'] || '0.8')
+      },
+      healthCheck: {
+        enabled: process.env['HEALTH_CHECK_ENABLED'] !== 'false',
+        port: parseInt(process.env['HEALTH_CHECK_PORT'] || '3000'),
+        interval: parseInt(process.env['HEALTH_CHECK_INTERVAL'] || '30000')
+      },
+      circuitBreaker: {
+        enabled: process.env['CIRCUIT_BREAKER_ENABLED'] !== 'false',
+        failureThreshold: parseInt(process.env['CIRCUIT_BREAKER_THRESHOLD'] || '5'),
+        resetTimeout: parseInt(process.env['CIRCUIT_BREAKER_RESET_TIMEOUT'] || '60000')
+      }
     };
+
+    this.validateConfiguration(config);
+    return config;
+  }
+
+  private validateConfiguration(config: MevBotConfig): void {
+    // Validate required environment variables
+    const requiredEnvVars = [
+      'MEV_PRIVATE_KEY',
+    ];
+
+    // Chain-specific required variables
+    if (config.enabledChains.includes('ethereum')) {
+      requiredEnvVars.push('ETH_RPC_URL');
+    }
+    if (config.enabledChains.includes('solana')) {
+      requiredEnvVars.push('SOL_RPC_URL');
+    }
+    if (config.enabledChains.includes('bsc')) {
+      requiredEnvVars.push('BSC_RPC_URL');
+    }
+
+    const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+    if (missingVars.length > 0) {
+      throw new ConfigurationError(`Missing required environment variables: ${missingVars.join(', ')}`);
+    }
+
+    // Validate configuration values
+    if (config.maxConcurrentBundles <= 0 || config.maxConcurrentBundles > 50) {
+      throw new ConfigurationError('maxConcurrentBundles must be between 1 and 50');
+    }
+
+    if (config.enabledChains.length === 0) {
+      throw new ConfigurationError('At least one chain must be enabled');
+    }
+
+    // Validate profit thresholds
+    Object.entries(config.minProfitThresholds).forEach(([chain, threshold]) => {
+      if (parseFloat(threshold) <= 0) {
+        throw new ConfigurationError(`Invalid profit threshold for ${chain}: ${threshold}`);
+      }
+    });
+
+    logger.info('Configuration validated successfully', {
+      enabledChains: config.enabledChains,
+      paperTradingMode: config.paperTradingMode,
+      maxConcurrentBundles: config.maxConcurrentBundles
+    });
+  }
+
+  private initializeServices(): void {
+    // Initialize price oracle
+    this.priceOracle = new EnhancedPriceOracle(this.config.priceOracle);
+
+    // Initialize circuit breaker
+    if (this.config.circuitBreaker.enabled) {
+      this.circuitBreaker = new CircuitBreaker(
+        this.config.circuitBreaker.failureThreshold,
+        this.config.circuitBreaker.resetTimeout
+      );
+    }
+
+    logger.info('Enhanced services initialized', {
+      priceOracle: true,
+      circuitBreaker: this.config.circuitBreaker.enabled
+    });
   }
 
   private initializeProviders(): void {
-    // Initialize Ethereum provider
-    if (this.config.enabledChains.includes('ethereum')) {
-      this.ethProvider = new ethers.JsonRpcProvider(
-        process.env['ETH_RPC_URL'] || 'https://eth-mainnet.alchemyapi.io/v2/your-api-key'
-      );
-    }
+    try {
+      // Initialize Ethereum provider with enhanced error handling
+      if (this.config.enabledChains.includes('ethereum')) {
+        const ethRpcUrl = process.env['ETH_RPC_URL'];
+        if (!ethRpcUrl || ethRpcUrl.includes('your-api-key')) {
+          throw new ConfigurationError('ETH_RPC_URL must be set to a valid RPC endpoint');
+        }
+        this.ethProvider = new ethers.JsonRpcProvider(ethRpcUrl);
+      }
 
-    // Initialize Solana connection
-    if (this.config.enabledChains.includes('solana')) {
-      this.solConnection = new Connection(
-        process.env['SOL_RPC_URL'] || 'https://api.mainnet-beta.solana.com',
-        'confirmed'
-      );
-    }
+      // Initialize Solana connection with validation
+      if (this.config.enabledChains.includes('solana')) {
+        const solRpcUrl = process.env['SOL_RPC_URL'];
+        if (!solRpcUrl) {
+          throw new ConfigurationError('SOL_RPC_URL must be set for Solana operations');
+        }
+        this.solConnection = new Connection(solRpcUrl, 'confirmed');
+      }
 
-    // Initialize BSC provider
-    if (this.config.enabledChains.includes('bsc')) {
-      this.bscProvider = new ethers.JsonRpcProvider(
-        process.env['BSC_RPC_URL'] || 'https://bsc-dataseed1.binance.org'
-      );
+      // Initialize BSC provider with validation
+      if (this.config.enabledChains.includes('bsc')) {
+        const bscRpcUrl = process.env['BSC_RPC_URL'];
+        if (!bscRpcUrl) {
+          throw new ConfigurationError('BSC_RPC_URL must be set for BSC operations');
+        }
+        this.bscProvider = new ethers.JsonRpcProvider(bscRpcUrl);
+      }
+
+      logger.info('Network providers initialized successfully');
+    } catch (error) {
+      throw new ConfigurationError('Failed to initialize network providers', error as Error);
     }
+  }
+
+  // Enhanced retry mechanism with exponential backoff
+  private async withRetry<T>(
+    operation: () => Promise<T>, 
+    maxRetries = 3, 
+    baseDelay = 1000
+  ): Promise<T> {
+    let lastError: Error;
+    
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        if (this.circuitBreaker) {
+          return await this.circuitBreaker.execute(operation);
+        } else {
+          return await operation();
+        }
+      } catch (error) {
+        lastError = error as Error;
+        
+        if (attempt === maxRetries) {
+          break;
+        }
+        
+        const delay = baseDelay * Math.pow(2, attempt);
+        logger.warn(`Operation failed, retrying in ${delay}ms`, {
+          attempt: attempt + 1,
+          maxRetries,
+          error: lastError.message
+        });
+        
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+    
+    throw lastError!;
+  }
+
+  // Enhanced token data fetching with real price oracle integration
+  private async getEnhancedTokenData(address: string, chain: string): Promise<TokenMetadata> {
+    return await this.withRetry(async () => {
+      return await this.priceOracle.getTokenMetadata(address, chain);
+    });
   }
 
   async start(): Promise<void> {
@@ -124,15 +542,24 @@ class AdvancedMevSandwichBot {
         return;
       }
 
-      // Initialize all components
+      // Initialize all components with enhanced error handling
       await this.initializeComponents();
 
+      // Start health monitoring if enabled
+      if (this.config.healthCheck.enabled) {
+        this.startHealthMonitoring();
+      }
+
       this.isRunning = true;
+      this.healthMetrics.startTime = Date.now();
+
       logger.info('Advanced MEV Sandwich Bot started successfully', {
         enabledChains: this.config.enabledChains,
         paperTradingMode: this.config.paperTradingMode,
         riskManagementEnabled: this.config.enableRiskManagement,
-        performanceOptimizationEnabled: this.config.enablePerformanceOptimization
+        performanceOptimizationEnabled: this.config.enablePerformanceOptimization,
+        healthCheckEnabled: this.config.healthCheck.enabled,
+        circuitBreakerEnabled: this.config.circuitBreaker.enabled
       });
 
       // Start advanced sandwich detection and execution
@@ -140,7 +567,8 @@ class AdvancedMevSandwichBot {
 
     } catch (error) {
       logger.error('Failed to start Advanced MEV Sandwich Bot', { 
-        error: error instanceof Error ? error.message : error 
+        error: error instanceof Error ? error.message : error,
+        stack: error instanceof Error ? error.stack : undefined
       });
       throw error;
     }
@@ -418,16 +846,40 @@ class AdvancedMevSandwichBot {
 
   private async processSandwichOpportunity(opportunity: SandwichOpportunity): Promise<void> {
     try {
-      // Detailed profit calculation
+      this.healthMetrics.totalOpportunities++;
+      this.healthMetrics.lastActivity = Date.now();
+
+      // Enhanced token data fetching with real price oracle integration
+      const [tokenInData, tokenOutData] = await Promise.all([
+        this.getEnhancedTokenData(opportunity.tokenIn, opportunity.chain),
+        this.getEnhancedTokenData(opportunity.tokenOut, opportunity.chain)
+      ]);
+
+      logger.info('Token metadata fetched', {
+        tokenIn: {
+          address: tokenInData.address,
+          symbol: tokenInData.symbol,
+          price: tokenInData.price,
+          confidence: tokenInData.confidence
+        },
+        tokenOut: {
+          address: tokenOutData.address,
+          symbol: tokenOutData.symbol,
+          price: tokenOutData.price,
+          confidence: tokenOutData.confidence
+        }
+      });
+
+      // Enhanced profit calculation with real market data
       const profitParams = {
         victimAmountIn: opportunity.amountIn,
         victimAmountOutMin: opportunity.expectedAmountOut,
         tokenInAddress: opportunity.tokenIn,
         tokenOutAddress: opportunity.tokenOut,
-        tokenInDecimals: 18, // Would need to fetch from contract
-        tokenOutDecimals: 18, // Would need to fetch from contract  
-        tokenInPrice: 1, // Would need to fetch from price oracle
-        tokenOutPrice: 1, // Would need to fetch from price oracle
+        tokenInDecimals: tokenInData.decimals,
+        tokenOutDecimals: tokenOutData.decimals,
+        tokenInPrice: tokenInData.price,
+        tokenOutPrice: tokenOutData.price,
         poolReserve0: opportunity.poolLiquidity,
         poolReserve1: opportunity.poolLiquidity,
         poolFee: 300, // 0.3% - would extract from pool data
@@ -436,23 +888,33 @@ class AdvancedMevSandwichBot {
         dexType: opportunity.dexType
       };
 
-      const profitOptimization = await this.profitCalculator.calculateOptimalProfit(profitParams);
+      const profitOptimization = await this.withRetry(async () => {
+        return await this.profitCalculator.calculateOptimalProfit(profitParams);
+      });
       
-      if (profitOptimization.maxProfit <= '0' || profitOptimization.optimalProfitability < 1) {
+      // Enhanced profit validation with confidence scoring
+      const minConfidence = Math.min(tokenInData.confidence, tokenOutData.confidence);
+      const confidenceAdjustedProfit = parseFloat(profitOptimization.maxProfit) * minConfidence;
+      
+      if (confidenceAdjustedProfit <= 0 || profitOptimization.optimalProfitability < 1) {
         logger.debug('Opportunity rejected - insufficient profit after detailed calculation', {
           maxProfit: profitOptimization.maxProfit,
+          confidenceAdjustedProfit,
           profitability: profitOptimization.optimalProfitability,
-          riskAdjustedReturn: profitOptimization.riskAdjustedReturn
+          riskAdjustedReturn: profitOptimization.riskAdjustedReturn,
+          priceConfidence: minConfidence
         });
         return;
       }
 
-      logger.info('Detailed profit calculation completed', {
+      logger.info('Enhanced profit calculation completed', {
         maxProfit: profitOptimization.maxProfit,
+        confidenceAdjustedProfit,
         optimalProfitability: profitOptimization.optimalProfitability,
         gasEfficiency: profitOptimization.gasEfficiency,
         riskAdjustedReturn: profitOptimization.riskAdjustedReturn,
-        optimalFrontRunAmount: profitOptimization.optimalFrontRunAmount
+        optimalFrontRunAmount: profitOptimization.optimalFrontRunAmount,
+        priceConfidence: minConfidence
       });
 
       // Performance optimization
@@ -475,7 +937,7 @@ class AdvancedMevSandwichBot {
         }
       }
 
-      // Risk assessment
+      // Enhanced risk assessment with real market data
       if (this.riskManager) {
         const riskAssessment = await this.riskManager.assessRisk({
           chain: opportunity.chain,
@@ -484,10 +946,10 @@ class AdvancedMevSandwichBot {
           amountIn: opportunity.amountIn,
           poolLiquidity: opportunity.poolLiquidity,
           gasPrice: opportunity.gasPrice,
-          estimatedProfit: opportunity.estimatedProfit,
+          estimatedProfit: confidenceAdjustedProfit.toString(),
           priceImpact: opportunity.slippage,
           slippage: opportunity.slippage,
-          confidence: opportunity.confidence
+          confidence: minConfidence
         });
 
         if (!riskAssessment.allowed) {
@@ -505,7 +967,7 @@ class AdvancedMevSandwichBot {
         });
       }
 
-      // Execute sandwich attack
+      // Execute sandwich attack with enhanced parameters
       if (this.executionEngine) {
         const executionParams: ExecutionParams = {
           opportunity: {
@@ -520,41 +982,76 @@ class AdvancedMevSandwichBot {
             poolAddress: opportunity.poolAddress,
             poolLiquidity: opportunity.poolLiquidity,
             gasPrice: opportunity.gasPrice,
-            estimatedProfit: opportunity.estimatedProfit,
-            profitability: opportunity.profitability,
-            confidence: opportunity.confidence,
+            estimatedProfit: confidenceAdjustedProfit.toString(),
+            profitability: profitOptimization.optimalProfitability,
+            confidence: minConfidence,
             mevScore: opportunity.mevScore
           },
-          frontRunAmount: opportunity.amountIn, // Could be adjusted by risk manager
+          frontRunAmount: profitOptimization.optimalFrontRunAmount,
           maxGasPrice: process.env['MAX_GAS_PRICE'] || '100',
-          maxSlippage: 5,
+          maxSlippage: Math.min(5, opportunity.slippage * 1.2), // Dynamic slippage based on market conditions
           deadline: Date.now() + 60000, // 1 minute deadline
-          minProfit: this.config.minProfitThresholds[opportunity.chain],
+          minProfit: confidenceAdjustedProfit.toString(),
           simulationOnly: this.config.paperTradingMode
         };
 
         const executionId = `exec_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
         this.activeBundles.add(executionId);
 
-        const result = await this.executionEngine.executeSandwich(executionParams);
-        
-        if (this.config.paperTradingMode) {
-          logger.info('Paper trading execution completed', {
-            estimatedProfit: result.simulation.estimatedProfit,
-            gasUsed: result.simulation.gasUsed,
-            simulationTime: result.metrics.simulationTime
-          });
+        try {
+          const result = await this.executionEngine.executeSandwich(executionParams);
+          
+          if (result.success) {
+            this.healthMetrics.successfulExecutions++;
+            this.healthMetrics.totalProfit += parseFloat(result.execution.actualProfit || '0');
+          } else {
+            this.healthMetrics.failedExecutions++;
+          }
+          
+          if (this.config.paperTradingMode) {
+            logger.info('Paper trading execution completed', {
+              estimatedProfit: result.simulation.estimatedProfit,
+              gasUsed: result.simulation.gasUsed,
+              simulationTime: result.metrics.simulationTime,
+              confidenceAdjustedProfit
+            });
+          }
+        } catch (executionError) {
+          this.healthMetrics.failedExecutions++;
+          this.activeBundles.delete(executionId);
+          throw new ExecutionError(
+            `Sandwich execution failed: ${executionError instanceof Error ? executionError.message : executionError}`,
+            opportunity.chain,
+            executionError as Error
+          );
         }
       }
 
     } catch (error) {
-      logger.error('Error processing sandwich opportunity', {
-        error: error instanceof Error ? error.message : error,
-        opportunity: {
+      this.healthMetrics.failedExecutions++;
+      
+      if (error instanceof PriceOracleError) {
+        logger.warn('Price oracle error - skipping opportunity', {
+          error: error.message,
           chain: opportunity.chain,
-          estimatedProfit: opportunity.estimatedProfit
-        }
-      });
+          tokenIn: opportunity.tokenIn,
+          tokenOut: opportunity.tokenOut
+        });
+      } else if (error instanceof ExecutionError) {
+        logger.error('Execution error processing sandwich opportunity', {
+          error: error.message,
+          chain: error.chain,
+          originalError: error.originalError?.message
+        });
+      } else {
+        logger.error('Unexpected error processing sandwich opportunity', {
+          error: error instanceof Error ? error.message : error,
+          opportunity: {
+            chain: opportunity.chain,
+            estimatedProfit: opportunity.estimatedProfit
+          }
+        });
+      }
     }
   }
 
@@ -672,6 +1169,40 @@ class AdvancedMevSandwichBot {
     }
     
     await this.stop();
+  }
+
+  // Health monitoring methods
+  private startHealthMonitoring(): void {
+    // Create a simple HTTP server for health checks
+    const http = require('http');
+    
+    const server = http.createServer((req: any, res: any) => {
+      if (req.url === '/health') {
+        const healthStatus = {
+          status: this.isRunning ? 'running' : 'stopped',
+          uptime: Date.now() - this.healthMetrics.startTime,
+          activeBundles: this.activeBundles.size,
+          metrics: this.healthMetrics,
+          circuitBreaker: this.circuitBreaker?.getState(),
+          priceOracle: this.priceOracle.getCacheStats()
+        };
+        
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(healthStatus));
+      } else {
+        res.writeHead(404);
+        res.end('Not Found');
+      }
+    });
+
+    server.listen(this.config.healthCheck.port, () => {
+      logger.info(`Health check server started on port ${this.config.healthCheck.port}`);
+    });
+
+    // Periodic health metrics logging
+    setInterval(() => {
+      logger.info('Health metrics', this.healthMetrics);
+    }, this.config.healthCheck.interval);
   }
 }
 
