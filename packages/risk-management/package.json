@@ -1,7 +1,7 @@
 {
   "name": "@trading-bot/risk-management",
-  "version": "1.0.0",
-  "description": "Comprehensive risk management system with global kill switch for trading bots",
+  "version": "2.0.0",
+  "description": "Enterprise-grade risk management system with advanced analytics, sophisticated position sizing, and institutional-quality kill switch for trading bots",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -24,8 +24,11 @@
     "zod": "^3.22.4"
   },
   "devDependencies": {
+    "@trading-bot/config": "workspace:^",
     "@types/lodash": "^4.14.202",
     "@types/node": "^20.11.16",
+    "@typescript-eslint/eslint-plugin": "^8.34.1",
+    "@typescript-eslint/parser": "^8.34.1",
     "eslint": "^8.56.0",
     "jest": "^29.7.0",
     "tsup": "^8.0.1",
@@ -39,7 +42,22 @@
     "trading",
     "kill-switch",
     "position-sizing",
-    "risk-controls"
+    "risk-controls",
+    "value-at-risk",
+    "var",
+    "expected-shortfall",
+    "monte-carlo",
+    "stress-testing",
+    "kelly-criterion",
+    "black-litterman",
+    "portfolio-optimization",
+    "correlation-analysis",
+    "tail-risk",
+    "institutional-trading",
+    "enterprise-risk",
+    "quantitative-finance",
+    "risk-analytics",
+    "predictive-analytics"
   ],
   "author": "Trading Bot Platform",
   "license": "MIT"

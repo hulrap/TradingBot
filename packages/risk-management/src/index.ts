@@ -44,7 +44,13 @@ export const createDefaultKillSwitchConfig = (): KillSwitchConfig => ({
   maxConsecutiveFailures: 5,
   emergencyContacts: [],
   gracefulShutdownTimeout: 30000, // 30 seconds
-  forceShutdownAfter: 120000 // 2 minutes
+  forceShutdownAfter: 120000, // 2 minutes
+  enableEnhancedMonitoring: true, // Enable sophisticated monitoring
+  volatilityThreshold: 0.5, // 50% volatility threshold
+  liquidityThreshold: 0.3, // 30% minimum liquidity
+  correlationThreshold: 0.8, // 80% correlation breakdown threshold
+  recoveryTimeLimit: 24 * 60 * 60 * 1000, // 24 hours recovery limit
+  enablePredictiveTriggers: false // Disable ML triggers by default
 });
 
 export const createDefaultPositionSizingConfig = (): PositionSizingConfig => ({
@@ -55,7 +61,13 @@ export const createDefaultPositionSizingConfig = (): PositionSizingConfig => ({
   maxDailyRisk: 10, // 10% daily risk limit
   correlationThreshold: 0.7, // 70% correlation threshold
   riskScalingMethod: 'volatility',
-  enableDynamicSizing: true
+  enableDynamicSizing: true,
+  enableVolatilityCaching: true,
+  volatilityCacheTTL: 300000, // 5 minutes
+  enablePositionTracking: true,
+  maxPositionHistory: 1000,
+  kellyFractionCap: 0.25,
+  adaptivePerformanceWindow: 50
 });
 
 export const createDefaultStressTestScenarios = (): StressTestScenario[] => [
@@ -65,7 +77,9 @@ export const createDefaultStressTestScenarios = (): StressTestScenario[] => [
     marketShock: -20,
     volatilityMultiplier: 2.0,
     liquidityReduction: 50,
-    correlationIncrease: 0.3
+    correlationIncrease: 0.3,
+    duration: 7, // 1 week stress
+    recoveryTime: 90 // 3 months recovery
   },
   {
     name: 'Flash Crash',
@@ -73,7 +87,9 @@ export const createDefaultStressTestScenarios = (): StressTestScenario[] => [
     marketShock: -10,
     volatilityMultiplier: 3.0,
     liquidityReduction: 80,
-    correlationIncrease: 0.5
+    correlationIncrease: 0.5,
+    duration: 1, // 1 day flash
+    recoveryTime: 30 // 1 month recovery
   },
   {
     name: 'Black Swan',
@@ -81,7 +97,9 @@ export const createDefaultStressTestScenarios = (): StressTestScenario[] => [
     marketShock: -30,
     volatilityMultiplier: 4.0,
     liquidityReduction: 90,
-    correlationIncrease: 0.8
+    correlationIncrease: 0.8,
+    duration: 30, // 1 month stress
+    recoveryTime: 365 // 1 year recovery
   },
   {
     name: 'Sector Rotation',
@@ -89,7 +107,9 @@ export const createDefaultStressTestScenarios = (): StressTestScenario[] => [
     marketShock: -5,
     volatilityMultiplier: 1.5,
     liquidityReduction: 20,
-    correlationIncrease: 0.6
+    correlationIncrease: 0.6,
+    duration: 14, // 2 weeks
+    recoveryTime: 60 // 2 months recovery
   }
 ];
 
@@ -100,12 +120,37 @@ export const createDefaultRiskManagerConfig = (): RiskManagerConfig => ({
     maxPortfolioRisk: 20, // 20% maximum portfolio risk
     maxSectorConcentration: 25, // 25% maximum in single sector
     maxCorrelation: 0.8, // 80% maximum correlation
-    rebalanceThreshold: 15 // Rebalance at 15% deviation
+    rebalanceThreshold: 15, // Rebalance at 15% deviation
+    maxLeverage: 3.0, // Maximum 3x leverage
+    maxDrawdownLimit: 20, // 20% maximum drawdown
+    concentrationDecayFactor: 0.95, // Concentration decay factor
+    liquidityBufferPercent: 10 // 10% liquidity buffer
   },
   stressTest: {
     enabled: true,
     scenarios: createDefaultStressTestScenarios(),
-    failureThreshold: 15 // 15% maximum acceptable loss in stress test
+    failureThreshold: 15, // 15% maximum acceptable loss in stress test
+    monteCarloIterations: 10000, // 10k Monte Carlo iterations
+    confidenceLevel: 0.95, // 95% confidence level
+    timeHorizon: 21 // 21-day stress test horizon
+  },
+  riskModels: {
+    enableValueAtRisk: true,
+    enableExpectedShortfall: true,
+    enableTailRisk: true,
+    enableCorrelationAnalysis: true,
+    enableRegimeDetection: true,
+    varConfidenceLevel: 0.95,
+    shortfallConfidenceLevel: 0.97,
+    correlationWindow: 252,
+    regimeChangeThreshold: 0.05
+  },
+  monitoring: {
+    realTimeAlerts: true,
+    alertCooldownPeriod: 300000, // 5 minutes cooldown
+    riskReportFrequency: 30000, // 30 seconds
+    performanceTrackingWindow: 30, // 30 days
+    enablePredictiveAnalytics: false
   }
 });
 
@@ -207,7 +252,8 @@ export const createRiskAlert = (
   type: RiskAlert['type'],
   severity: RiskAlert['severity'],
   message: string,
-  positions: string[] = []
+  positions: string[] = [],
+  metadata?: Partial<RiskAlert['metadata']>
 ): RiskAlert => ({
   id: `${type}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
   type,
@@ -215,7 +261,15 @@ export const createRiskAlert = (
   message,
   timestamp: new Date().toISOString(),
   acknowledged: false,
-  positions
+  positions,
+  metadata: {
+    currentValue: 0,
+    threshold: 0,
+    trend: 'stable',
+    historicalContext: 'No historical context available',
+    recommendedAction: 'Review and acknowledge alert',
+    ...metadata
+  }
 });
 
 // Portfolio analysis helpers

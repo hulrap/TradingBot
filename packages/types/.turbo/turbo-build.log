@@ -1,4 +1,12 @@
 
-> @trading-bot/types@0.0.0 build C:\Users\User1\Downloads\TradingBot\packages\types
-> tsc
+> @trading-bot/types@2.0.0 build C:\Users\User1\Downloads\TradingBot\packages\types
+> pnpm run build:clean && pnpm run build:types && pnpm run build:esm && pnpm run build:cjs
+
+
+> @trading-bot/types@2.0.0 build:clean C:\Users\User1\Downloads\TradingBot\packages\types
+> rimraf dist
+
+
+> @trading-bot/types@2.0.0 build:types C:\Users\User1\Downloads\TradingBot\packages\types
+> tsc --project tsconfig.build.json
 

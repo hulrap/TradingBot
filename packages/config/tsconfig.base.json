@@ -1,11 +1,37 @@
 {
   "$schema": "https://json.schemastore.org/tsconfig",
-  "display": "Default",
+  "display": "Trading Bot Enterprise TypeScript Base Configuration",
   "compilerOptions": {
+    /* ========================================
+     * LANGUAGE AND ENVIRONMENT
+     * ======================================== */
     "target": "ES2022",
-    "lib": ["ES2022"],
-    "allowJs": true,
-    "skipLibCheck": true,
+    "lib": [
+      "ES2023",
+      "DOM",
+      "DOM.Iterable",
+      "WebWorker"
+    ],
+    "useDefineForClassFields": true,
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+
+    /* ========================================
+     * MODULE SYSTEM
+     * ======================================== */
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "allowUmdGlobalAccess": false,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": false,
+
+    /* ========================================
+     * TYPE CHECKING - MAXIMUM STRICTNESS
+     * ======================================== */
     "strict": true,
     "noImplicitAny": true,
     "strictNullChecks": true,
@@ -14,30 +40,167 @@
     "strictPropertyInitialization": true,
     "noImplicitThis": true,
     "alwaysStrict": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "exactOptionalPropertyTypes": true,
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
+    "useUnknownInCatchVariables": true,
+    "exactOptionalPropertyTypes": true,
     "noPropertyAccessFromIndexSignature": true,
-    "forceConsistentCasingInFileNames": true,
+
+    /* ========================================
+     * ADDITIONAL TYPE CHECKING
+     * ======================================== */
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+
+    /* ========================================
+     * EMIT CONFIGURATION
+     * ======================================== */
     "noEmit": true,
-    "esModuleInterop": true,
-    "module": "esnext",
-    "moduleResolution": "bundler",
-    "resolveJsonModule": true,
-    "isolatedModules": true,
-    "jsx": "preserve",
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
+    "inlineSourceMap": false,
+    "inlineSources": false,
     "outDir": "./dist",
+    "removeComments": false,
+    "preserveConstEnums": true,
+    "preserveSymlinks": false,
+    "stripInternal": true,
+    "noEmitHelpers": false,
+    "importHelpers": true,
+    "downlevelIteration": true,
+    "noEmitOnError": true,
+
+    /* ========================================
+     * JAVASCRIPT SUPPORT
+     * ======================================== */
+    "allowJs": true,
+    "checkJs": false,
+    "maxNodeModuleJsDepth": 2,
+
+    /* ========================================
+     * EDITOR SUPPORT
+     * ======================================== */
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "skipDefaultLibCheck": true,
+
+    /* ========================================
+     * INCREMENTAL COMPILATION
+     * ======================================== */
+    "incremental": true,
+    "composite": false,
+    "tsBuildInfoFile": "./.tsbuildinfo",
+
+    /* ========================================
+     * OUTPUT FORMATTING
+     * ======================================== */
+    "pretty": true,
+    "noErrorTruncation": false,
+
+    /* ========================================
+     * JSX CONFIGURATION
+     * ======================================== */
+    "jsx": "preserve",
+    "jsxImportSource": "react",
+
+    /* ========================================
+     * PATH MAPPING FOR MONOREPO
+     * ======================================== */
     "baseUrl": ".",
     "paths": {
-      "@trading-bot/*": ["packages/*/src", "packages/*"]
+      "@trading-bot/*": [
+        "packages/*/src", 
+        "packages/*"
+      ],
+      "@trading-bot/ui": [
+        "packages/ui/index.tsx",
+        "packages/ui"
+      ],
+      "@trading-bot/ui/*": [
+        "packages/ui/*"
+      ],
+      "@trading-bot/types": [
+        "packages/types/src/index.ts",
+        "packages/types"
+      ],
+      "@trading-bot/types/*": [
+        "packages/types/src/*"
+      ],
+      "@trading-bot/config": [
+        "packages/config/index.ts",
+        "packages/config"
+      ],
+      "@trading-bot/config/*": [
+        "packages/config/*"
+      ],
+      "@trading-bot/chain-client": [
+        "packages/chain-client/src/index.ts",
+        "packages/chain-client"
+      ],
+      "@trading-bot/chain-client/*": [
+        "packages/chain-client/src/*"
+      ],
+      "@trading-bot/risk-management": [
+        "packages/risk-management/src/index.ts",
+        "packages/risk-management"
+      ],
+      "@trading-bot/risk-management/*": [
+        "packages/risk-management/src/*"
+      ],
+      "@trading-bot/paper-trading": [
+        "packages/paper-trading/src/index.ts",
+        "packages/paper-trading"
+      ],
+      "@trading-bot/paper-trading/*": [
+        "packages/paper-trading/src/*"
+      ],
+      "@trading-bot/crypto": [
+        "packages/crypto/index.ts",
+        "packages/crypto"
+      ],
+      "@trading-bot/crypto/*": [
+        "packages/crypto/*"
+      ]
     }
   },
-  "exclude": ["node_modules", "dist", ".next", ".turbo"]
+  "include": [
+    "**/*.ts",
+    "**/*.tsx",
+    "**/*.js",
+    "**/*.jsx",
+    "**/*.json"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "build",
+    ".next",
+    ".turbo",
+    "coverage",
+    "**/*.min.js",
+    "**/*.bundle.js",
+    "**/vendor/**",
+    "**/third-party/**"
+  ],
+  "watchOptions": {
+    "watchFile": "useFsEvents",
+    "watchDirectory": "useFsEvents",
+    "fallbackPolling": "dynamicPriority",
+    "synchronousWatchDirectory": true,
+    "excludeDirectories": [
+      "**/node_modules",
+      "**/dist",
+      "**/coverage",
+      "**/.git"
+    ]
+  },
+  "typeAcquisition": {
+    "enable": false,
+    "disableFilenameBasedTypeAcquisition": true
+  }
 }

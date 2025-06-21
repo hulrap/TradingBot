@@ -8,9 +8,27 @@
 
 import { EventEmitter } from 'events';
 import axios from 'axios';
+import winston from 'winston';
+
+// Import Oracle interfaces for perfect integration
+export interface RateLimitConfig {
+  requestsPerSecond: number;
+  burstLimit: number;
+  timeWindowMs: number;
+}
+
+export interface AlertConfig {
+  priceDeviationThreshold: number; // Alert if price deviates more than this %
+  connectionFailureThreshold: number; // Alert after this many connection failures
+  latencyThreshold: number; // Alert if latency exceeds this (ms)
+  qualityScoreThreshold: number; // Alert if quality drops below this
+  enableSlackAlerts?: boolean;
+  enableEmailAlerts?: boolean;
+  webhookUrl?: string;
+}
 
 export interface ZeroLatencyConfig {
-  // Core Latency Targets
+  // Core Latency Targets - Enterprise Grade
   performance: {
     maxTotalLatency: number;        // Target: <50ms total execution
     maxPriceLatency: number;        // Target: <5ms price updates  
@@ -18,6 +36,10 @@ export interface ZeroLatencyConfig {
     maxRouteLatency: number;        // Target: <1ms route calculation
     maxExecutionLatency: number;    // Target: <25ms transaction execution
     cacheValidityMs: number;        // Target: 100ms cache validity
+    maxLatencyMs: number;           // Oracle max latency
+    priceValidityMs: number;        // How long prices remain valid
+    maxHistoryLength: number;       // Maximum price history to store
+    aggregationIntervalMs: number;  // Price aggregation interval
   };
 
   // Livshits Research Parameters
@@ -109,6 +131,53 @@ export interface ZeroLatencyConfig {
       maxCopyDelayMs: number;
     };
   };
+
+  // Oracle Integration - Rate limiting per source
+  rateLimiting: {
+    pyth: RateLimitConfig;
+    binance: RateLimitConfig;
+    dexscreener: RateLimitConfig;
+    chainlink: RateLimitConfig;
+  };
+
+  // Oracle Integration - Pyth Network configuration
+  pyth: {
+    endpoint: string; // 'wss://hermes.pyth.network/ws'
+    priceIds: Record<string, string>; // token -> pyth price feed ID
+    confidence: number;
+    maxReconnectAttempts: number;
+    reconnectDelay: number;
+  };
+  
+  // Oracle Integration - Binance WebSocket configuration
+  binance: {
+    endpoint: string; // 'wss://stream.binance.com:9443/ws'
+    symbols: string[]; // ['ETHUSDT', 'BTCUSDT']
+    maxReconnectAttempts: number;
+    reconnectDelay: number;
+  };
+  
+  // Oracle Integration - DexScreener WebSocket configuration
+  dexscreener: {
+    endpoint: string; // 'wss://io.dexscreener.com/dex/screener'
+    pairs: string[];
+    maxReconnectAttempts: number;
+    reconnectDelay: number;
+  };
+  
+  // Oracle Integration - Chainlink Price Feeds configuration
+  chainlink: {
+    feeds: Record<string, string>; // token -> chainlink feed address
+    updateThreshold: number; // minimum price change to emit
+    rpcEndpoints: string[];
+  };
+
+  // Oracle Integration - Alert configuration
+  alerts: AlertConfig;
+
+  // Cost management integration
+  costManager?: DynamicCostManager;
+  bridgeMonitor?: DynamicBridgeMonitor;
 }
 
 // Dynamic Bridge Monitor - Real-time bridge cost and timing tracking
@@ -123,16 +192,15 @@ export class DynamicBridgeMonitor extends EventEmitter {
     networkCongestion: number;
   }>();
 
-  private bridgeApis = {
-    stargate: 'https://stargateprotocol.gitbook.io/stargate/developers/bridge-fee-oracle',
-    layerzero: 'https://layerzero.gitbook.io/docs/technical-reference/mainnet/estimated-message-pricing',
-    across: 'https://docs.across.to/bridge/developers/estimating-fees',
-    hop: 'https://docs.hop.exchange/js-sdk/estimate-fees',
-    multichain: 'https://docs.multichain.org/developer-guide/api'
-  };
+  private logger: winston.Logger;
 
-  constructor() {
+  constructor(logger?: winston.Logger) {
     super();
+    this.logger = logger || winston.createLogger({
+      level: 'info',
+      format: winston.format.json(),
+      transports: [new winston.transports.Console()]
+    });
     this.startRealTimeMonitoring();
   }
 
@@ -169,6 +237,11 @@ export class DynamicBridgeMonitor extends EventEmitter {
   private async updateBridgeCost(route: string): Promise<void> {
     try {
       const [fromChain, toChain] = route.split('-');
+      
+      if (!fromChain || !toChain) {
+        this.logger.warn('Invalid route format', { route });
+        return;
+      }
       
       // Get real-time bridge costs from multiple sources
       const costs = await Promise.allSettled([
@@ -321,11 +394,17 @@ export class DynamicBridgeMonitor extends EventEmitter {
       if (recentTimes.length > 0) {
         // Use median of recent actual completion times
         const sortedTimes = recentTimes.sort((a, b) => a - b);
-        const median = sortedTimes[Math.floor(sortedTimes.length / 2)];
-        return median;
+        const medianIndex = Math.floor(sortedTimes.length / 2);
+        const median = sortedTimes[medianIndex];
+        return median || 0;
       }
 
       // Fallback: Dynamic calculation based on current network conditions
+      if (!fromChain || !toChain) {
+        this.logger.warn('Invalid chain names for bridge timing calculation', { route });
+        return 600000; // 10 minute fallback
+      }
+
       const [fromCongestion, toCongestion, fromBlockTime, toBlockTime] = await Promise.all([
         this.getNetworkCongestion(fromChain),
         this.getNetworkCongestion(toChain),
@@ -359,6 +438,11 @@ export class DynamicBridgeMonitor extends EventEmitter {
       // This would integrate with bridge indexers or transaction monitoring
       const [fromChain, toChain] = route.split('-');
       
+      if (!fromChain || !toChain) {
+        this.logger.warn('Invalid route format for bridge completion times', { route });
+        return [];
+      }
+      
       // Example: Query bridge events from the last 24 hours
       const recentTransactions = await this.queryRecentBridgeTransactions(fromChain, toChain, 86400000);
       
@@ -373,44 +457,258 @@ export class DynamicBridgeMonitor extends EventEmitter {
     completionTime: number;
     txHash: string;
   }[]> {
-    // This would query actual bridge transaction data
-    // Implementation depends on available indexing services
-    return [];
+    try {
+      // Construct bridge route identifier
+      const route = `${fromChain}-${toChain}`;
+      const cutoffTime = Date.now() - timeWindowMs;
+      
+      // Query multiple indexing services for bridge transaction data
+      const queries = await Promise.allSettled([
+        this.queryTheGraphBridgeData(fromChain, toChain, cutoffTime),
+        this.queryLayerZeroScan(fromChain, toChain, cutoffTime),
+        this.queryBridgeSpecificAPIs(route, cutoffTime)
+      ]);
+      
+      // Aggregate results from all successful queries
+      const allTransactions: Array<{
+        initiationTime: number;
+        completionTime: number;
+        txHash: string;
+      }> = [];
+      
+      queries.forEach(result => {
+        if (result.status === 'fulfilled' && Array.isArray(result.value)) {
+          allTransactions.push(...result.value);
+        }
+      });
+      
+      // Deduplicate by transaction hash and filter by time window
+      const uniqueTransactions = new Map<string, {
+        initiationTime: number;
+        completionTime: number;
+        txHash: string;
+      }>();
+      
+      allTransactions.forEach(tx => {
+        if (tx.initiationTime >= cutoffTime && tx.completionTime > tx.initiationTime) {
+          uniqueTransactions.set(tx.txHash, tx);
+        }
+      });
+      
+      // Sort by completion time (most recent first)
+      return Array.from(uniqueTransactions.values())
+        .sort((a, b) => b.completionTime - a.completionTime)
+        .slice(0, 50); // Limit to most recent 50 transactions
+        
+    } catch (error) {
+      this.logger?.warn('Failed to query recent bridge transactions', { 
+        fromChain, 
+        toChain, 
+        timeWindowMs,
+        error: (error as Error).message 
+      });
+      return [];
+    }
+  }
+
+  private async queryTheGraphBridgeData(fromChain: string, toChain: string, cutoffTime: number): Promise<Array<{
+    initiationTime: number;
+    completionTime: number;
+    txHash: string;
+  }>> {
+    // Query The Graph for bridge transaction data
+    const graphEndpoints: Record<string, string> = {
+      'ethereum-polygon': 'https://api.thegraph.com/subgraphs/name/maticnetwork/plasma-bridge',
+      'ethereum-arbitrum': 'https://api.thegraph.com/subgraphs/name/gip-org/arbitrum-bridge',
+      'ethereum-optimism': 'https://api.thegraph.com/subgraphs/name/ethereum-optimism/optimism-bridge'
+    };
+    
+    const endpoint = graphEndpoints[`${fromChain}-${toChain}`];
+    if (!endpoint) return [];
+    
+    const query = `
+      query BridgeTransactions($cutoff: BigInt!) {
+        bridgeTransactions(
+          first: 50
+          where: { timestamp_gte: $cutoff }
+          orderBy: timestamp
+          orderDirection: desc
+        ) {
+          id
+          initiationTime: timestamp
+          completionTime: completedAt
+          txHash: transactionHash
+        }
+      }
+    `;
+    
+    try {
+      const response = await axios.post(endpoint, {
+        query,
+        variables: { cutoff: Math.floor(cutoffTime / 1000).toString() }
+      }, { timeout: 5000 });
+      
+      return response.data?.data?.bridgeTransactions?.map((tx: any) => ({
+        initiationTime: parseInt(tx.initiationTime) * 1000,
+        completionTime: parseInt(tx.completionTime) * 1000,
+        txHash: tx.txHash
+      })) || [];
+    } catch {
+      return [];
+    }
+  }
+
+  private async queryLayerZeroScan(fromChain: string, toChain: string, cutoffTime: number): Promise<Array<{
+    initiationTime: number;
+    completionTime: number;
+    txHash: string;
+  }>> {
+    // Query LayerZero Scan API for cross-chain transactions
+    const chainIds = this.getChainId(fromChain);
+    const toChainId = this.getChainId(toChain);
+    
+    try {
+      const response = await axios.get('https://api.layerzeroscan.com/v1/messages', {
+        params: {
+          srcChainId: chainIds,
+          dstChainId: toChainId,
+          created_at_gte: Math.floor(cutoffTime / 1000),
+          limit: 50
+        },
+        timeout: 5000
+      });
+      
+      return response.data?.data?.map((msg: any) => ({
+        initiationTime: new Date(msg.created_at).getTime(),
+        completionTime: new Date(msg.updated_at).getTime(),
+        txHash: msg.src_tx_hash
+      })) || [];
+    } catch {
+      return [];
+    }
+  }
+
+  private async queryBridgeSpecificAPIs(route: string, cutoffTime: number): Promise<Array<{
+    initiationTime: number;
+    completionTime: number;
+    txHash: string;
+  }>> {
+    // Query bridge-specific APIs based on the route
+    const bridgeAPIs: Record<string, string> = {
+      'ethereum-polygon': 'https://proof-generator.polygon.technology/api/v1/exits',
+      'ethereum-arbitrum': 'https://bridge.arbitrum.io/api/l1-to-l2-tx',
+      'ethereum-optimism': 'https://mainnet-l2.optimism.io/api/bridge-history'
+    };
+    
+    const apiUrl = bridgeAPIs[route];
+    if (!apiUrl) return [];
+    
+    try {
+      const response = await axios.get(apiUrl, {
+        params: {
+          from_timestamp: Math.floor(cutoffTime / 1000),
+          limit: 50
+        },
+        timeout: 5000
+      });
+      
+      // Transform API response to standard format
+      return response.data?.transactions?.map((tx: any) => ({
+        initiationTime: tx.initiation_timestamp * 1000,
+        completionTime: tx.completion_timestamp * 1000,
+        txHash: tx.hash
+      })) || [];
+    } catch {
+      return [];
+    }
   }
 
   private async getCurrentBlockTime(chain: string): Promise<number> {
     try {
-      // Get current average block time for the chain
-      const response = await axios.get(`https://api.etherscan.io/api`, {
+      // Get current average block time for the chain using chain-specific APIs
+      let response;
+      const apiKey = process.env['ETHERSCAN_API_KEY'] || 'demo';
+      
+      // Use chain-specific API endpoints
+      const chainAPIs: Record<string, string> = {
+        ethereum: 'https://api.etherscan.io/api',
+        polygon: 'https://api.polygonscan.com/api',
+        arbitrum: 'https://api.arbiscan.io/api',
+        optimism: 'https://api-optimistic.etherscan.io/api',
+        bsc: 'https://api.bscscan.com/api',
+      };
+      
+      const apiUrl = chainAPIs[chain] || chainAPIs['ethereum'] || 'https://api.etherscan.io/api';
+      
+      // Get recent block data to calculate actual block time
+      response = await axios.get(apiUrl, {
         params: {
-          module: 'stats',
-          action: 'chainsize',
-          apikey: process.env.ETHERSCAN_API_KEY || 'demo'
+          module: 'proxy',
+          action: 'eth_getBlockByNumber',
+          tag: 'latest',
+          boolean: 'true',
+          apikey: apiKey
         },
         timeout: 3000
       });
       
-      // Chain-specific block times (in ms)
-      const chainBlockTimes: Record<string, number> = {
-        ethereum: 12000,   // ~12 seconds
-        polygon: 2000,     // ~2 seconds
-        arbitrum: 250,     // ~0.25 seconds
-        optimism: 2000,    // ~2 seconds
-        bsc: 3000,         // ~3 seconds
-      };
+      if (response.data?.result?.timestamp) {
+        // Get previous block to calculate time difference
+        const latestBlockHex = response.data.result.number;
+        const latestBlockNumber = parseInt(latestBlockHex, 16);
+        const previousBlockNumber = '0x' + (latestBlockNumber - 10).toString(16); // Check 10 blocks back
+        
+        const previousResponse = await axios.get(apiUrl, {
+          params: {
+            module: 'proxy',
+            action: 'eth_getBlockByNumber',
+            tag: previousBlockNumber,
+            boolean: 'true',
+            apikey: apiKey
+          },
+          timeout: 3000
+        });
+        
+        if (previousResponse.data?.result?.timestamp) {
+          const latestTimestamp = parseInt(response.data.result.timestamp, 16);
+          const previousTimestamp = parseInt(previousResponse.data.result.timestamp, 16);
+          
+          // Calculate average block time over the last 10 blocks
+          const blockTimeDiff = latestTimestamp - previousTimestamp;
+          const averageBlockTime = (blockTimeDiff / 10) * 1000; // Convert to milliseconds
+          
+          // Validate the calculated block time is reasonable
+          if (averageBlockTime > 100 && averageBlockTime < 60000) { // Between 0.1s and 60s
+            this.logger?.debug('Calculated real-time block time', { 
+              chain, 
+              averageBlockTime, 
+              latestBlock: latestBlockNumber 
+            });
+            return averageBlockTime;
+          }
+        }
+      }
       
-      return chainBlockTimes[chain] || 12000;
+      // If API fails or returns invalid data, fall back to chain-specific averages
+      this.logger?.debug('Using fallback block times for chain', { chain });
+      
     } catch (error) {
-      // Fallback to known block times
-      const fallbackBlockTimes: Record<string, number> = {
-        ethereum: 12000,
-        polygon: 2000,
-        arbitrum: 250,
-        optimism: 2000,
-        bsc: 3000,
-      };
-      return fallbackBlockTimes[chain] || 12000;
+      this.logger?.warn('Failed to get real-time block time, using fallback', { 
+        chain, 
+        error: (error as Error).message 
+      });
     }
+    
+    // Fallback to known average block times (in ms)
+    const fallbackBlockTimes: Record<string, number> = {
+      ethereum: 12000,   // ~12 seconds
+      polygon: 2000,     // ~2 seconds  
+      arbitrum: 250,     // ~0.25 seconds
+      optimism: 2000,    // ~2 seconds
+      bsc: 3000,         // ~3 seconds
+    };
+    
+    return fallbackBlockTimes[chain] || 12000;
   }
 
   private getChainFinalityBlocks(chain: string): number {
@@ -443,24 +741,66 @@ export class DynamicBridgeMonitor extends EventEmitter {
 
   private async getNetworkCongestion(chain: string): Promise<number> {
     try {
-      // Get current gas prices and block utilization to determine congestion
-      const response = await axios.get(`https://api.etherscan.io/api`, {
+      // Get current gas prices and block utilization to determine congestion using chain-specific APIs
+      const chainAPIs: Record<string, string> = {
+        ethereum: 'https://api.etherscan.io/api',
+        polygon: 'https://api.polygonscan.com/api',
+        arbitrum: 'https://api.arbiscan.io/api',
+        optimism: 'https://api-optimistic.etherscan.io/api',
+        bsc: 'https://api.bscscan.com/api',
+      };
+      
+      const apiUrl = chainAPIs[chain] || chainAPIs['ethereum'] || 'https://api.etherscan.io/api';
+      const apiKey = process.env['ETHERSCAN_API_KEY'] || 'demo';
+      
+      const response = await axios.get(apiUrl, {
         params: {
           module: 'gastracker',
           action: 'gasoracle',
-          apikey: process.env.ETHERSCAN_API_KEY || 'demo'
+          apikey: apiKey
         },
         timeout: 3000
       });
       
       const gasPrice = parseInt(response.data.result.SafeGasPrice);
       
-      // Determine congestion multiplier based on gas price
-      if (gasPrice > 100) return 2.0;      // Very high congestion
-      if (gasPrice > 50) return 1.5;       // High congestion  
-      if (gasPrice > 20) return 1.2;       // Medium congestion
-      return 1.0;                          // Normal congestion
+      // Chain-specific congestion thresholds (in gwei)
+      const congestionThresholds: Record<string, {
+        high: number;
+        medium: number;
+        low: number;
+      }> = {
+        ethereum: { high: 100, medium: 50, low: 20 },
+        polygon: { high: 200, medium: 100, low: 50 },     // Polygon has higher gas price variance
+        arbitrum: { high: 5, medium: 2, low: 1 },         // L2 has much lower gas prices
+        optimism: { high: 5, medium: 2, low: 1 },         // L2 has much lower gas prices
+        bsc: { high: 20, medium: 10, low: 5 },            // BSC has lower gas prices than Ethereum
+      };
+      
+      const thresholds = congestionThresholds[chain] || congestionThresholds['ethereum'] || { high: 100, medium: 50, low: 20 };
+      
+      // Determine congestion multiplier based on chain-specific gas price thresholds
+      if (gasPrice > thresholds.high) {
+        this.logger?.info('High network congestion detected', { chain, gasPrice, threshold: thresholds.high });
+        return 2.0;      // Very high congestion
+      }
+      if (gasPrice > thresholds.medium) {
+        this.logger?.debug('Medium network congestion detected', { chain, gasPrice, threshold: thresholds.medium });
+        return 1.5;      // High congestion  
+      }
+      if (gasPrice > thresholds.low) {
+        this.logger?.debug('Low network congestion detected', { chain, gasPrice, threshold: thresholds.low });
+        return 1.2;      // Medium congestion
+      }
+      
+      this.logger?.debug('Normal network congestion', { chain, gasPrice });
+      return 1.0;        // Normal congestion
+      
     } catch (error) {
+      this.logger?.warn('Failed to get network congestion, using default', { 
+        chain, 
+        error: (error as Error).message 
+      });
       return 1.0; // Default to normal congestion
     }
   }
@@ -564,12 +904,12 @@ export class DynamicCostManager extends EventEmitter {
     // Analyze ROI per strategy and reallocate budget dynamically
     const strategyPerformance = new Map<string, { profit: number; cost: number; roi: number }>();
     
-    for (const [strategy, cost] of this.currentSpend.byStrategy) {
+    this.currentSpend.byStrategy.forEach((cost, strategy) => {
       const profit = this.getStrategyProfit(strategy);
       const roi = cost > 0 ? (profit - cost) / cost : 0;
       
       strategyPerformance.set(strategy, { profit, cost, roi });
-    }
+    });
 
     // Reallocate budget to highest performing strategies
     let totalBudget = this.budgetLimits.monthly;
@@ -698,18 +1038,35 @@ export function createZeroLatencyConfig(): ZeroLatencyConfig {
   const bridgeMonitor = new DynamicBridgeMonitor();
   const costManager = new DynamicCostManager();
 
+  // Set up cost monitoring integration
+  costManager.on('budgetWarning', (data) => {
+    console.warn('Budget warning:', data);
+  });
+  
+  costManager.on('budgetEmergency', (data) => {
+    console.error('Budget emergency:', data);
+  });
+  
+  costManager.on('budgetOptimized', (data) => {
+    console.info('Budget optimized:', data);
+  });
+
   return {
     performance: {
-      maxTotalLatency: parseInt(process.env.ZL_MAX_LATENCY || '50'),
+      maxTotalLatency: parseInt(process.env['ZL_MAX_LATENCY'] || '50'),
       maxPriceLatency: 5,
       maxGasLatency: 10,
       maxRouteLatency: 1,
       maxExecutionLatency: 25,
       cacheValidityMs: 100,
+      maxLatencyMs: 100,              // Oracle max latency
+      priceValidityMs: 30000,         // 30 seconds price validity
+      maxHistoryLength: 100,          // Keep last 100 price points
+      aggregationIntervalMs: 1000,    // Aggregate every second
     },
 
     livshitsOptimization: {
-      enableGraphRouting: process.env.ZL_ENABLE_LIVSHITS !== 'false',
+      enableGraphRouting: process.env['ZL_ENABLE_LIVSHITS'] !== 'false',
       maxHopDepth: 3,
       precomputeRoutes: true,
       routeRefreshMs: 30000,
@@ -739,7 +1096,7 @@ export function createZeroLatencyConfig(): ZeroLatencyConfig {
       
       gasTracking: {
         bloxroute: {
-          enabled: !!process.env.BLOXROUTE_API_KEY,
+          enabled: !!process.env['BLOXROUTE_API_KEY'],
           costPerUpdate: 0.001,
           updateFrequencyMs: 50,
           predictionEnabled: true,
@@ -758,7 +1115,7 @@ export function createZeroLatencyConfig(): ZeroLatencyConfig {
 
       mempool: {
         bloxroute: {
-          enabled: !!process.env.BLOXROUTE_API_KEY,
+          enabled: !!process.env['BLOXROUTE_API_KEY'],
           costPerTx: 0.001,
           latencyMs: 10,
         },
@@ -803,6 +1160,88 @@ export function createZeroLatencyConfig(): ZeroLatencyConfig {
         maxCopyDelayMs: 500,
       },
     },
+
+    // Oracle Integration - Rate limiting configuration
+    rateLimiting: {
+      pyth: {
+        requestsPerSecond: 10,
+        burstLimit: 20,
+        timeWindowMs: 1000,
+      },
+      binance: {
+        requestsPerSecond: 50,
+        burstLimit: 100,
+        timeWindowMs: 1000,
+      },
+      dexscreener: {
+        requestsPerSecond: 5,
+        burstLimit: 10,
+        timeWindowMs: 1000,
+      },
+      chainlink: {
+        requestsPerSecond: 2,
+        burstLimit: 5,
+        timeWindowMs: 1000,
+      },
+    },
+
+    // Oracle Integration - Pyth Network configuration
+    pyth: {
+      endpoint: 'wss://hermes.pyth.network/ws',
+      priceIds: {
+        'ETH': '0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace',
+        'BTC': '0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43',
+        'USDC': '0xeaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a',
+      },
+      confidence: 0.95,
+      maxReconnectAttempts: 5,
+      reconnectDelay: 1000,
+    },
+
+    // Oracle Integration - Binance WebSocket configuration
+    binance: {
+      endpoint: 'wss://stream.binance.com:9443/ws',
+      symbols: ['ETHUSDT', 'BTCUSDT', 'ADAUSDT', 'SOLUSDT'],
+      maxReconnectAttempts: 5,
+      reconnectDelay: 1000,
+    },
+
+    // Oracle Integration - DexScreener WebSocket configuration
+    dexscreener: {
+      endpoint: 'wss://io.dexscreener.com/dex/screener',
+      pairs: ['ethereum', 'bsc', 'polygon'],
+      maxReconnectAttempts: 5,
+      reconnectDelay: 1000,
+    },
+
+    // Oracle Integration - Chainlink configuration
+    chainlink: {
+      feeds: {
+        'ETH': '0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419', // ETH/USD
+        'BTC': '0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c', // BTC/USD
+        'USDC': '0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6', // USDC/USD
+      },
+      updateThreshold: 0.5, // 0.5% minimum change
+      rpcEndpoints: [
+        'https://eth-mainnet.alchemyapi.io/v2/demo',
+        'https://mainnet.infura.io/v3/demo',
+      ],
+    },
+
+    // Oracle Integration - Alert configuration
+    alerts: {
+      priceDeviationThreshold: 5.0, // Alert if price deviates more than 5%
+      connectionFailureThreshold: 3, // Alert after 3 connection failures
+      latencyThreshold: 200, // Alert if latency exceeds 200ms
+      qualityScoreThreshold: 80, // Alert if quality drops below 80
+      enableSlackAlerts: false,
+      enableEmailAlerts: false,
+      ...(process.env['WEBHOOK_URL'] && { webhookUrl: process.env['WEBHOOK_URL'] }),
+    },
+
+    // Cost management integration
+    costManager,
+    bridgeMonitor,
   };
 }
 
@@ -812,6 +1251,66 @@ export class CostTracker {
   
   constructor(private config: ZeroLatencyConfig) {
     this.costManager = new DynamicCostManager();
+    
+    // Initialize cost tracking based on configuration
+    this.initializeCostTracking();
+  }
+  
+  private initializeCostTracking(): void {
+    // Set up cost monitoring for different data sources based on config
+    const dataSources = this.config.dataSources;
+    
+    // Track costs for price feeds
+    if (dataSources.priceFeeds.pyth.enabled) {
+      this.addPeriodicCost('pyth', 'price_feed', dataSources.priceFeeds.pyth.costPerUpdate);
+    }
+    
+    if (dataSources.priceFeeds.dexscreenerWs.enabled) {
+      this.addPeriodicCost('dexscreener', 'price_feed', dataSources.priceFeeds.dexscreenerWs.costPerUpdate);
+    }
+    
+    // Track costs for gas tracking
+    if (dataSources.gasTracking.bloxroute.enabled) {
+      this.addPeriodicCost('bloxroute', 'gas_tracking', dataSources.gasTracking.bloxroute.costPerUpdate);
+    }
+    
+    if (dataSources.gasTracking.chainlink.enabled) {
+      this.addPeriodicCost('chainlink', 'gas_tracking', dataSources.gasTracking.chainlink.costPerCall);
+    }
+    
+    // Track costs for mempool monitoring
+    if (dataSources.mempool.bloxroute.enabled) {
+      this.addPeriodicCost('bloxroute', 'mempool', dataSources.mempool.bloxroute.costPerTx);
+    }
+  }
+  
+  private addPeriodicCost(dataSource: string, strategy: string, costPerUpdate: number): void {
+    // Add periodic costs based on update frequency from config
+    const updateFrequency = this.getUpdateFrequency(dataSource);
+    const costPerHour = (3600000 / updateFrequency) * costPerUpdate; // Convert to hourly cost
+    
+    // Set up periodic cost tracking
+    setInterval(() => {
+      this.costManager.addCost(strategy, dataSource, costPerHour / 3600); // Add cost per second
+    }, 1000); // Every second
+  }
+  
+  private getUpdateFrequency(dataSource: string): number {
+    // Get update frequency from config based on data source
+    const dataSources = this.config.dataSources;
+    
+    switch (dataSource) {
+      case 'pyth':
+        return dataSources.priceFeeds.pyth.updateFrequencyMs;
+      case 'dexscreener':
+        return dataSources.priceFeeds.dexscreenerWs.updateFrequencyMs;
+      case 'bloxroute':
+        return dataSources.gasTracking.bloxroute?.updateFrequencyMs || 1000;
+      case 'chainlink':
+        return dataSources.gasTracking.chainlink.updateFrequencyMs;
+      default:
+        return 1000; // Default 1 second
+    }
   }
   
   addCost(strategy: string, amount: number, dataSource: string = 'unknown'): void {
@@ -824,6 +1323,39 @@ export class CostTracker {
 
   canAfford(strategy: string, amount: number): boolean {
     return this.costManager.canAfford(strategy, amount);
+  }
+  
+  // Configuration-based cost management methods
+  getMaxBudgetForStrategy(strategy: string): number {
+    // Get max budget based on configuration and current performance
+    const baseBudget = this.costManager.getBudgetForStrategy(strategy);
+    
+    // Adjust based on config performance targets
+    const performanceMultiplier = this.config.performance.maxTotalLatency < 50 ? 1.5 : 1.0;
+    
+    return baseBudget * performanceMultiplier;
+  }
+  
+  shouldEnableDataSource(dataSource: string): boolean {
+    // Check if we can afford to enable a data source based on budget
+    const cost = this.getDataSourceCost(dataSource);
+    return this.costManager.canAfford('data_feeds', cost);
+  }
+  
+  private getDataSourceCost(dataSource: string): number {
+    // Calculate expected daily cost for a data source
+    const dataSources = this.config.dataSources;
+    
+    switch (dataSource) {
+      case 'pyth':
+        return (86400000 / dataSources.priceFeeds.pyth.updateFrequencyMs) * dataSources.priceFeeds.pyth.costPerUpdate;
+      case 'dexscreener':
+        return (86400000 / dataSources.priceFeeds.dexscreenerWs.updateFrequencyMs) * dataSources.priceFeeds.dexscreenerWs.costPerUpdate;
+      case 'bloxroute':
+        return (86400000 / (dataSources.gasTracking.bloxroute?.updateFrequencyMs || 1000)) * dataSources.gasTracking.bloxroute.costPerUpdate;
+      default:
+        return 0;
+    }
   }
 }
 

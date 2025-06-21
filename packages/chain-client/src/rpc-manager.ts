@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events';
-import axios, { AxiosInstance, AxiosRequestConfig } from 'axios';
+import axios, { AxiosInstance } from 'axios';
 import WebSocket from 'ws';
 import winston from 'winston';
 
@@ -178,6 +178,20 @@ export class RPCManager extends EventEmitter {
       this.axiosInstances.set(provider.id, httpClient);
       this.costTracker.set(provider.id, []);
 
+      // Initialize RPC endpoint
+      const endpoint: RPCEndpoint = {
+        provider,
+        isHealthy: true,
+        latency: provider.latency,
+        successRate: provider.successRate,
+        lastUsed: 0,
+        requestCount: 0,
+        errorCount: 0,
+        consecutiveErrors: 0,
+        isBlacklisted: false
+      };
+      this.endpoints.set(provider.id, endpoint);
+
       // Initialize request queue for this chain
       if (!this.requestQueue.has(provider.chain)) {
         this.requestQueue.set(provider.chain, []);
@@ -346,23 +360,41 @@ export class RPCManager extends EventEmitter {
     timeout?: number;
     retries?: number;
     preferredProvider?: string;
+    chain?: string;
   } = {}): Promise<RPCResponse> {
+    const detectedChain = options.chain || this.detectChainFromMethod(method);
+    
     const request: RPCRequest = {
       id: `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       method,
       params,
-      chain: '',
+      chain: detectedChain,
       priority: 'medium',
       timestamp: Date.now(),
       retryCount: 0,
       maxRetries: options.retries || this.config.maxRetries,
-      preferredProvider: options.preferredProvider
+      ...(options.preferredProvider !== undefined && { preferredProvider: options.preferredProvider })
     };
 
     return this.executeRequest(request, options);
   }
 
   private async executeRequest(request: RPCRequest, options: any): Promise<RPCResponse> {
+    // Check cache first for cacheable requests
+    if (this.isCacheable(request.method)) {
+      const cacheKey = this.getCacheKey(request);
+      const cached = this.responseCache.get(cacheKey);
+      if (cached && cached.expiry > Date.now()) {
+        return {
+          id: request.id,
+          result: cached.response.result,
+          error: cached.response.error,
+          latency: 0, // Cached response
+          provider: 'cache'
+        };
+      }
+    }
+
     const availableProviders = this.getAvailableProviders();
     
     if (availableProviders.length === 0) {
@@ -371,6 +403,10 @@ export class RPCManager extends EventEmitter {
 
     // Use preferred provider if specified and available
     let targetProvider = availableProviders[0];
+    if (!targetProvider) {
+      throw new Error('No target provider available');
+    }
+
     if (options.preferredProvider) {
       const preferred = availableProviders.find(p => p.id === options.preferredProvider);
       if (preferred) targetProvider = preferred;
@@ -379,7 +415,10 @@ export class RPCManager extends EventEmitter {
     const startTime = Date.now();
 
     try {
-      const client = this.axiosInstances.get(targetProvider.id)!;
+      const client = this.axiosInstances.get(targetProvider.id);
+      if (!client) {
+        throw new Error(`No HTTP client available for provider ${targetProvider.id}`);
+      }
       
       const response = await client.post('', {
         jsonrpc: '2.0',
@@ -408,17 +447,44 @@ export class RPCManager extends EventEmitter {
         throw new Error(`RPC Error: ${rpcResponse.error.message}`);
       }
 
+      // Cache successful responses
+      if (this.isCacheable(request.method) && !rpcResponse.error) {
+        this.cacheResponse(request, rpcResponse);
+      }
+
+      // Update endpoint metrics
+      const endpoint = this.endpoints.get(targetProvider.id);
+      if (endpoint) {
+        endpoint.lastUsed = Date.now();
+        this.updateEndpointMetrics(endpoint, latency, true);
+        this.updateGlobalMetrics(targetProvider.id, latency, true);
+      }
+
       return rpcResponse;
 
     } catch (error) {
       this.emit('requestFailed', { request, error, provider: targetProvider.id });
 
+      // Update endpoint metrics for failed request
+      const endpoint = this.endpoints.get(targetProvider.id);
+      if (endpoint) {
+        const latency = Date.now() - startTime;
+        this.updateEndpointMetrics(endpoint, latency, false);
+        this.updateGlobalMetrics(targetProvider.id, latency, false);
+        
+        // Blacklist endpoint if too many consecutive errors
+        if (endpoint.consecutiveErrors >= 5) {
+          endpoint.isBlacklisted = true;
+          endpoint.blacklistUntil = Date.now() + this.config.blacklistDuration;
+        }
+      }
+
       // Retry with different provider if possible
-      if (request.retryCount < request.maxRetries) {
+      if (request.retryCount < request.maxRetries && this.isRetryableError(error)) {
         request.retryCount++;
         
-        // Wait before retry
-        await new Promise(resolve => setTimeout(resolve, this.config.retryDelay * Math.pow(2, request.retryCount)));
+        // Wait before retry using exponential backoff
+        await this.sleep(this.config.retryDelay * Math.pow(2, request.retryCount));
         
         // Temporarily blacklist failed provider for this request
         const filteredProviders = availableProviders.filter(p => p.id !== targetProvider.id);
@@ -477,11 +543,26 @@ export class RPCManager extends EventEmitter {
     this.axiosInstances.set(provider.id, httpClient);
     this.costTracker.set(provider.id, []);
 
+    // Initialize RPC endpoint
+    const endpoint: RPCEndpoint = {
+      provider,
+      isHealthy: true,
+      latency: provider.latency,
+      successRate: provider.successRate,
+      lastUsed: 0,
+      requestCount: 0,
+      errorCount: 0,
+      consecutiveErrors: 0,
+      isBlacklisted: false
+    };
+    this.endpoints.set(provider.id, endpoint);
+
     this.emit('providerAdded', provider);
   }
 
   public removeProvider(providerId: string): void {
     this.providers.delete(providerId);
+    this.endpoints.delete(providerId);
     this.metrics.delete(providerId);
     this.axiosInstances.delete(providerId);
     this.costTracker.delete(providerId);
@@ -562,10 +643,12 @@ export class RPCManager extends EventEmitter {
 
     // Clear all data
     this.providers.clear();
+    this.endpoints.clear();
     this.metrics.clear();
     this.axiosInstances.clear();
     this.costTracker.clear();
     this.requestQueue.clear();
+    this.responseCache.clear();
 
     this.removeAllListeners();
   }
@@ -673,11 +756,17 @@ export class RPCManager extends EventEmitter {
           if (!request) continue;
 
           try {
-            const response = await this.makeRequest(request.method, request.params, {
-              timeout: request.timeout,
-              retries: request.retries,
-              preferredProvider: request.preferredProvider
-            });
+            const requestOptions: {
+              timeout?: number;
+              retries?: number;
+              preferredProvider?: string;
+            } = {};
+            
+            if (request.timeout !== undefined) requestOptions.timeout = request.timeout;
+            if (request.retries !== undefined) requestOptions.retries = request.retries;
+            if (request.preferredProvider !== undefined) requestOptions.preferredProvider = request.preferredProvider;
+            
+            const response = await this.makeRequest(request.method, request.params, requestOptions);
             (request as any).resolve(response);
           } catch (error) {
             (request as any).reject(error);
@@ -729,23 +818,31 @@ export class RPCManager extends EventEmitter {
 
     // For critical requests, always use the best provider
     if (priority === 'critical') {
-      return chainProviders[0];
+      const bestProvider = chainProviders[0];
+      return bestProvider || null;
     }
 
     // For other requests, use weighted random selection from top 3
     const topProviders = chainProviders.slice(0, Math.min(3, chainProviders.length));
+    if (topProviders.length === 0) return null;
+    
     const weights = topProviders.map((_, index) => Math.pow(2, topProviders.length - index - 1));
     const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
     
     let random = Math.random() * totalWeight;
     for (let i = 0; i < topProviders.length; i++) {
-      random -= weights[i];
-      if (random <= 0) {
-        return topProviders[i];
+      const weight = weights[i];
+      if (weight !== undefined) {
+        random -= weight;
+        if (random <= 0) {
+          const selectedProvider = topProviders[i];
+          return selectedProvider || null;
+        }
       }
     }
 
-    return topProviders[0];
+    const fallbackProvider = topProviders[0];
+    return fallbackProvider || null;
   }
 
   // Metrics and monitoring
@@ -838,6 +935,38 @@ export class RPCManager extends EventEmitter {
   }
 
   // Utility methods
+  private detectChainFromMethod(method: string): string {
+    // Ethereum/EVM methods
+    if (method.startsWith('eth_') || method.startsWith('net_') || method.startsWith('web3_')) {
+      return 'ethereum';
+    }
+    
+    // Solana methods
+    if (['getHealth', 'getSlot', 'getBalance', 'getAccountInfo', 'getTransaction', 
+         'simulateTransaction', 'sendTransaction', 'getConfirmedBlock'].includes(method)) {
+      return 'solana';
+    }
+    
+    // Bitcoin methods
+    if (['getblockchaininfo', 'getbestblockhash', 'getblock', 'getrawtransaction',
+         'sendrawtransaction', 'estimatesmartfee'].includes(method)) {
+      return 'bitcoin';
+    }
+    
+    // Polygon methods (similar to Ethereum but can be distinguished by context)
+    if (method.startsWith('bor_') || method.startsWith('polygon_')) {
+      return 'polygon';
+    }
+    
+    // BSC methods (similar to Ethereum)
+    if (method.startsWith('bsc_')) {
+      return 'bsc';
+    }
+    
+    // Default to ethereum for unknown methods as it's most common
+    return 'ethereum';
+  }
+
   private isCacheable(method: string): boolean {
     const cacheableMethods = [
       'eth_blockNumber',
@@ -1013,7 +1142,23 @@ export class RPCManager extends EventEmitter {
   }
 
   async getOptimalProvider(chain: string, method: string): Promise<string | null> {
-    const endpoint = this.selectBestProvider(chain, 'high');
+    // Select provider priority based on method requirements
+    let priority = 'medium';
+    
+    // Critical methods need the best providers
+    if (['eth_sendTransaction', 'sendTransaction', 'eth_sendRawTransaction'].includes(method)) {
+      priority = 'critical';
+    }
+    // Read-heavy methods can use standard priority
+    else if (['eth_call', 'eth_getBalance', 'eth_blockNumber', 'getHealth'].includes(method)) {
+      priority = 'low';
+    }
+    // Cache-friendly methods for cost optimization
+    else if (this.isCacheable(method)) {
+      priority = 'low';
+    }
+    
+    const endpoint = this.selectBestProvider(chain, priority);
     return endpoint?.provider.id || null;
   }
 

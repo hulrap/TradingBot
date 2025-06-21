@@ -9,6 +9,12 @@ export interface KillSwitchConfig {
   emergencyContacts: string[]; // Email addresses
   gracefulShutdownTimeout: number; // milliseconds
   forceShutdownAfter: number; // milliseconds
+  enableEnhancedMonitoring: boolean; // Enable sophisticated monitoring
+  volatilityThreshold: number; // Volatility-based triggers
+  liquidityThreshold: number; // Liquidity-based triggers
+  correlationThreshold: number; // Correlation breakdown triggers
+  recoveryTimeLimit: number; // Maximum time to recover from drawdown
+  enablePredictiveTriggers: boolean; // Enable ML-based predictive triggers
 }
 
 export interface KillSwitchEvent {
@@ -38,7 +44,13 @@ const KillSwitchConfigSchema = z.object({
   maxConsecutiveFailures: z.number().positive(),
   emergencyContacts: z.array(z.string().email()),
   gracefulShutdownTimeout: z.number().positive(),
-  forceShutdownAfter: z.number().positive()
+  forceShutdownAfter: z.number().positive(),
+  enableEnhancedMonitoring: z.boolean(),
+  volatilityThreshold: z.number().min(0),
+  liquidityThreshold: z.number().min(0).max(1),
+  correlationThreshold: z.number().min(0).max(1),
+  recoveryTimeLimit: z.number().positive(),
+  enablePredictiveTriggers: z.boolean()
 });
 
 export class GlobalKillSwitch extends EventEmitter {
@@ -53,6 +65,17 @@ export class GlobalKillSwitch extends EventEmitter {
   private currentDrawdown: number = 0;
   private lastReset: Date = new Date();
   private shutdownTimers: Map<string, NodeJS.Timeout> = new Map();
+  private portfolioValue: number = 100000; // Default portfolio value
+  private enhancedMetrics: {
+    volatility: number;
+    liquidity: number;
+    correlation: number;
+    recoveryStartTime?: Date;
+  } = {
+    volatility: 0,
+    liquidity: 1,
+    correlation: 0
+  };
 
   constructor(config: KillSwitchConfig) {
     super();
@@ -71,9 +94,13 @@ export class GlobalKillSwitch extends EventEmitter {
     triggeredBy: 'user' | 'system' = 'user'
   ): Promise<void> {
     if (this.isTriggered) {
-      console.warn('Kill switch already triggered');
+      const warningMessage = 'Kill switch already triggered';
+      console.warn(warningMessage);
+      this.emit('warning', { message: warningMessage, reason: 'duplicate-trigger' });
       return;
     }
+
+    try {
 
     const event: KillSwitchEvent = {
       type: 'triggered',
@@ -111,6 +138,18 @@ export class GlobalKillSwitch extends EventEmitter {
 
     // Log the event
     await this.logKillSwitchEvent(event);
+    
+    } catch (error) {
+      const errorMessage = `Failed to trigger kill switch: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      console.error(errorMessage);
+      this.emit('error', { error, reason, severity, triggeredBy });
+      
+      // Even if there's an error, we should still mark as triggered for safety
+      this.isTriggered = true;
+      this.currentMode = 'emergency';
+      
+      throw new Error(errorMessage);
+    }
   }
 
   /**
@@ -149,6 +188,58 @@ export class GlobalKillSwitch extends EventEmitter {
         'system'
       );
       return;
+    }
+  }
+
+  /**
+   * Check enhanced trigger conditions based on sophisticated metrics
+   */
+  private checkEnhancedTriggerConditions(): void {
+    if (!this.config.enableEnhancedMonitoring || this.isTriggered) {
+      return;
+    }
+
+    // Check volatility threshold
+    if (this.enhancedMetrics.volatility > this.config.volatilityThreshold) {
+      this.triggerKillSwitch(
+        `Volatility threshold exceeded: ${(this.enhancedMetrics.volatility * 100).toFixed(2)}%`,
+        'medium',
+        'system'
+      );
+      return;
+    }
+
+    // Check liquidity threshold
+    if (this.enhancedMetrics.liquidity < this.config.liquidityThreshold) {
+      this.triggerKillSwitch(
+        `Liquidity below threshold: ${(this.enhancedMetrics.liquidity * 100).toFixed(2)}%`,
+        'high',
+        'system'
+      );
+      return;
+    }
+
+    // Check correlation breakdown
+    if (this.enhancedMetrics.correlation > this.config.correlationThreshold) {
+      this.triggerKillSwitch(
+        `Correlation breakdown detected: ${(this.enhancedMetrics.correlation * 100).toFixed(2)}%`,
+        'high',
+        'system'
+      );
+      return;
+    }
+
+    // Check recovery time limit
+    if (this.currentDrawdown > 0 && this.enhancedMetrics.recoveryStartTime) {
+      const recoveryTime = Date.now() - this.enhancedMetrics.recoveryStartTime.getTime();
+      if (recoveryTime > this.config.recoveryTimeLimit) {
+        this.triggerKillSwitch(
+          `Recovery time limit exceeded: ${Math.round(recoveryTime / (1000 * 60 * 60))} hours`,
+          'high',
+          'system'
+        );
+        return;
+      }
     }
   }
 
@@ -381,9 +472,63 @@ export class GlobalKillSwitch extends EventEmitter {
   }
 
   private updateDrawdown(): void {
-    // Simplified drawdown calculation - in production, this would use portfolio peak values
-    const dailyLossPercentage = (this.dailyLoss / 10000) * 100; // Assuming $10k base
-    this.currentDrawdown = Math.max(this.currentDrawdown, dailyLossPercentage);
+    // Enhanced drawdown calculation with portfolio value tracking
+    const portfolioValue = this.getPortfolioValue();
+    if (portfolioValue > 0) {
+      const dailyLossPercentage = (this.dailyLoss / portfolioValue) * 100;
+      this.currentDrawdown = Math.max(this.currentDrawdown, dailyLossPercentage);
+      
+      // Emit drawdown update for monitoring
+      this.emit('drawdown-updated', { 
+        currentDrawdown: this.currentDrawdown,
+        dailyLoss: this.dailyLoss,
+        portfolioValue: portfolioValue
+      });
+    }
+  }
+
+  /**
+   * Set portfolio value for accurate drawdown calculations
+   */
+  public setPortfolioValue(value: number): void {
+    if (value <= 0) {
+      throw new Error('Portfolio value must be positive');
+    }
+    this.portfolioValue = value;
+    this.emit('portfolio-value-updated', { portfolioValue: value });
+  }
+
+  /**
+   * Get current portfolio value
+   */
+  private getPortfolioValue(): number {
+    return this.portfolioValue;
+  }
+
+  /**
+   * Update enhanced metrics for sophisticated monitoring
+   */
+  public updateEnhancedMetrics(metrics: {
+    volatility?: number;
+    liquidity?: number;
+    correlation?: number;
+  }): void {
+    if (metrics.volatility !== undefined) {
+      this.enhancedMetrics.volatility = metrics.volatility;
+    }
+    if (metrics.liquidity !== undefined) {
+      this.enhancedMetrics.liquidity = metrics.liquidity;
+    }
+    if (metrics.correlation !== undefined) {
+      this.enhancedMetrics.correlation = metrics.correlation;
+    }
+
+    // Check enhanced trigger conditions if enabled
+    if (this.config.enableEnhancedMonitoring) {
+      this.checkEnhancedTriggerConditions();
+    }
+
+    this.emit('enhanced-metrics-updated', this.enhancedMetrics);
   }
 
   private determineSystemHealth(): 'healthy' | 'degraded' | 'critical' {

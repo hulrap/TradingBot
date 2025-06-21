@@ -1,10 +1,185 @@
 {
   "extends": "../../packages/config/tsconfig.base.json",
   "compilerOptions": {
-    "outDir": "dist",
+    /* Build Configuration */
+    "outDir": "./dist",
+    "rootDir": "./",
+    "declarationDir": "./dist/types",
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "inlineSourceMap": false,
+    "inlineSources": false,
+    "sourceRoot": "/",
+    "removeComments": false,
+    "preserveConstEnums": true,
+    "stripInternal": true,
+    "verbatimModuleSyntax": false,
+    
+    /* JSX and React Configuration */
     "jsx": "react-jsx",
-    "noEmit": false
+    "jsxImportSource": "react",
+    
+    /* Module Resolution */
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "target": "ES2022",
+    "lib": [
+      "ES2023",
+      "DOM",
+      "DOM.Iterable",
+      "WebWorker"
+    ],
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "allowUmdGlobalAccess": false,
+    "moduleDetection": "force",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    
+    /* Path Mapping */
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"],
+      "@/components/*": ["./src/components/*"],
+      "@/utils/*": ["./src/utils/*"],
+      "@/types/*": ["./src/types/*"],
+      "@/hooks/*": ["./src/hooks/*"],
+      "@/styles/*": ["./src/styles/*"],
+      "@/constants/*": ["./src/constants/*"],
+      "@/assets/*": ["./src/assets/*"],
+      "~/*": ["./*"]
+    },
+    
+    /* Type Checking - Strict Mode */
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "strictBindCallApply": true,
+    "strictPropertyInitialization": true,
+    "noImplicitThis": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "useUnknownInCatchVariables": true,
+    "exactOptionalPropertyTypes": true,
+    "noPropertyAccessFromIndexSignature": false,
+    
+    /* Additional Type Checking */
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+    "checkJs": false,
+    "maxNodeModuleJsDepth": 1,
+    
+    /* Emit Configuration */
+    "noEmit": false,
+    "noEmitOnError": true,
+    "noEmitHelpers": false,
+    "importHelpers": true,
+    "downlevelIteration": true,
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "preserveSymlinks": false,
+    "forceConsistentCasingInFileNames": true,
+    
+    /* Advanced Features */
+    "skipLibCheck": true,
+    "skipDefaultLibCheck": true,
+    "allowJs": false,
+    "incremental": true,
+    "tsBuildInfoFile": "./dist/.tsbuildinfo",
+    "composite": false,
+    
+    /* Interop Constraints */
+    "allowImportingTsExtensions": false,
+    "allowArbitraryExtensions": false,
+    "noResolve": false,
+    
+    /* Language and Environment */
+    "useDefineForClassFields": true,
+    "emitBOM": false,
+    "newLine": "lf",
+    
+    /* Output Formatting */
+    "pretty": true,
+    "noErrorTruncation": false,
+    "listFiles": false,
+    "listEmittedFiles": false,
+    "traceResolution": false,
+    "diagnostics": false,
+    "extendedDiagnostics": false,
+    "explainFiles": false
   },
-  "include": ["**/*.ts", "**/*.tsx"],
-  "exclude": ["node_modules", "dist"]
+  "include": [
+    "**/*.ts",
+    "**/*.tsx", 
+    "**/*.js",
+    "**/*.jsx",
+    "**/*.json",
+    "./*.config.*",
+    "./src/**/*",
+    "./stories/**/*",
+    "./tests/**/*",
+    "./__tests__/**/*",
+    "./types/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "build", 
+    "coverage",
+    ".next",
+    ".turbo",
+    "*.min.js",
+    "**/*.min.js",
+    "**/*.bundle.js",
+    "**/vendor/**",
+    "**/third-party/**",
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "**/*.spec.ts", 
+    "**/*.spec.tsx",
+    "**/__tests__/**",
+    "**/test-utils/**",
+    "**/.storybook/**",
+    "**/storybook-static/**",
+    "**/chromatic/**"
+  ],
+  "watchOptions": {
+    "watchFile": "useFsEvents",
+    "watchDirectory": "useFsEvents",
+    "fallbackPolling": "dynamicPriority",
+    "synchronousWatchDirectory": true,
+    "excludeDirectories": [
+      "**/node_modules",
+      "**/dist",
+      "**/coverage",
+      "**/.git"
+    ],
+    "excludeFiles": [
+      "**/*.log",
+      "**/*.tsbuildinfo"
+    ]
+  },
+  "typeAcquisition": {
+    "enable": false,
+    "include": [],
+    "exclude": [
+      "node"
+    ],
+    "disableFilenameBasedTypeAcquisition": true
+  },
+  "ts-node": {
+    "esm": true,
+    "experimentalSpecifierResolution": "node",
+    "transpileOnly": true,
+    "compilerOptions": {
+      "module": "ESNext",
+      "target": "ES2022"
+    }
+  }
 }
