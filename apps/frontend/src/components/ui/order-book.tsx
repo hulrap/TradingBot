@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { TrendingUp, TrendingDown, Activity, Layers, Settings } from 'lucide-react';
 
 interface OrderBookEntry {

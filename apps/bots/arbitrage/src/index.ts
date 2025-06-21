@@ -1,4 +1,4 @@
-import { ArbitrageBotConfig, Chain } from "@trading-bot/types";
+import { ArbitrageBotConfig } from "@trading-bot/types";
 import { 
   createEnhancedChainClient
 } from "@trading-bot/chain-client";
@@ -142,14 +142,46 @@ const DEFAULT_CONFIG: BotConfiguration = {
     id: "arbitrage-bot-1",
     userId: process.env['USER_ID'] || "user-arbitrage-1",
     walletId: process.env['WALLET_ID'] || "wallet-arbitrage-1",
-    chain: (process.env['CHAIN'] as Chain) || "ETH",
-    tokenPair: {
-      tokenA: process.env['TOKEN_A'] || "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", // Native token
-      tokenB: process.env['TOKEN_B'] || "0x6b175474e89094c44da98b954eedeac495271d0f", // DAI
+    name: "Enhanced Zero-Latency Arbitrage Bot",
+    enabled: true,
+    chain: "ethereum" as const,
+    type: "arbitrage" as const,
+    version: "2.0.0",
+    tokenPairs: [{
+      enabled: true,
+      tokenA: process.env['TOKEN_A'] || "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", // WETH
+      tokenASymbol: "WETH",
+      tokenB: process.env['TOKEN_B'] || "0x6B175474E89094C44Da98b954EedeAC495271d0F", // DAI
+      tokenBSymbol: "DAI",
+      minLiquidity: "10000", // $10k minimum liquidity
+      priority: 1,
+      maxPositionUsd: "1000" // $1k max position per pair
+    }],
+    minProfitPercentage: parseFloat(process.env['MIN_PROFIT_THRESHOLD'] || "0.5"), // 0.5% minimum
+    maxSlippage: parseFloat(process.env['MAX_SLIPPAGE'] || "0.5"), // 0.5% max slippage
+    gasSettings: {
+      maxGasPrice: process.env['MAX_GAS_PRICE'] || "100", // 100 gwei max
+      priorityFee: process.env['PRIORITY_FEE'] || "2", // 2 gwei priority fee
+      gasLimit: process.env['GAS_LIMIT'] || "300000", // 300k gas limit
+      gasPriceIncrease: {
+        enabled: true,
+        increasePercentage: 10, // 10% increase on resubmission
+        maxAttempts: 3
+      }
     },
-    minProfitThreshold: parseFloat(process.env['MIN_PROFIT_THRESHOLD'] || "0.5"), // 0.5% minimum for zero-latency
-    tradeSize: parseFloat(process.env['TRADE_SIZE'] || "0.1"), // 0.1 ETH for safety
-    isActive: true,
+    riskParams: {
+      maxPositionSize: process.env['MAX_POSITION_SIZE'] || "1.0", // 1 ETH max
+      maxDailyLoss: process.env['MAX_DAILY_LOSS'] || "0.05", // 5% daily loss limit
+      stopLossPercentage: parseFloat(process.env['STOP_LOSS_PERCENTAGE'] || "2.0"), // 2% stop loss
+      takeProfitPercentage: parseFloat(process.env['TAKE_PROFIT_PERCENTAGE'] || "1.0"), // 1% take profit
+      maxConcurrentTrades: parseInt(process.env['MAX_CONCURRENT_TRADES'] || "3"),
+      cooldownPeriod: parseInt(process.env['COOLDOWN_PERIOD'] || "30000"), // 30 seconds
+      dynamicRiskAdjustment: {
+        enabled: true,
+        volatilityThreshold: 0.2, // 20% volatility threshold
+        riskReductionFactor: 0.5 // 50% risk reduction when volatile
+      }
+    },
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   },
@@ -317,7 +349,8 @@ function validateEnvironment(): void {
     logger.warn('⚠️  SECURITY WARNING: Private key appears to be invalid length');
   }
   
-  if (process.env['NODE_ENV'] === 'production' && DEFAULT_CONFIG.arbitrage.tradeSize > 0.1) {
+  const maxPositionEth = parseFloat(DEFAULT_CONFIG.arbitrage.riskParams.maxPositionSize);
+  if (process.env['NODE_ENV'] === 'production' && maxPositionEth > 0.1) {
     logger.warn('⚠️  PRODUCTION WARNING: Trade size is high for production environment');
   }
   
@@ -331,8 +364,8 @@ async function initializeZeroLatencyInfrastructure(): Promise<void> {
   try {
     // Create enhanced chain client configuration
     const clientConfig = {
-      defaultChain: 'ethereum',
-      enabledChains: ['ethereum', 'bsc', 'polygon'],
+      defaultChain: 'ethereum' as any,
+      enabledChains: ['ethereum', 'bsc', 'polygon'] as any,
       riskManagement: {
         enabled: true,
         maxDrawdown: CONFIG.risk.maxDrawdown,
@@ -555,9 +588,16 @@ async function runEnhancedArbitrage(): Promise<void> {
       return;
     }
 
-    const tokenA = CONFIG.arbitrage.tokenPair.tokenA;
-    const tokenB = CONFIG.arbitrage.tokenPair.tokenB;
-    const amount = (CONFIG.arbitrage.tradeSize * 10 ** 18).toString();
+    const tokenPair = CONFIG.arbitrage.tokenPairs[0];
+    if (!tokenPair || !tokenPair.enabled) {
+      logger.debug("No enabled token pairs found");
+      return;
+    }
+    
+    const tokenA = tokenPair.tokenA;
+    const tokenB = tokenPair.tokenB;
+    const tradeSize = parseFloat(CONFIG.arbitrage.riskParams.maxPositionSize);
+    const amount = (tradeSize * 10 ** 18).toString();
 
     // Step 1: Get zero-latency price data
     const priceData = await getZeroLatencyPrice(tokenA, tokenB);
@@ -585,7 +625,7 @@ async function runEnhancedArbitrage(): Promise<void> {
     // Check final profitability
     const minProfitThreshold = routeOpportunity.bridgeRequired ? 
       CONFIG.trading.crossChainArbitrage.minProfitAfterBridgeFees : 
-      CONFIG.arbitrage.minProfitThreshold;
+      CONFIG.arbitrage.minProfitPercentage;
 
     if (profitPercent < minProfitThreshold) {
       logger.debug(`Profit ${profitPercent.toFixed(4)}% below threshold ${minProfitThreshold}%`);
@@ -649,10 +689,11 @@ async function executeEnhancedArbitrage(
     });
 
     // Create trade record with gas data
+    const firstTokenPair = CONFIG.arbitrage.tokenPairs[0];
     const activeTrade = {
       id: tradeId,
-      pair: `${CONFIG.arbitrage.tokenPair.tokenA}-${CONFIG.arbitrage.tokenPair.tokenB}`,
-      amount: CONFIG.arbitrage.tradeSize,
+      pair: `${firstTokenPair?.tokenA || 'UNKNOWN'}-${firstTokenPair?.tokenB || 'UNKNOWN'}`,
+      amount: parseFloat(CONFIG.arbitrage.riskParams.maxPositionSize),
       entryPrice: priceData?.price || 0,
       currentPrice: priceData?.price || 0,
       slippage: 0,
@@ -841,11 +882,13 @@ async function startEnhancedArbitrageBot(): Promise<void> {
     // Setup graceful shutdown
     setupGracefulShutdown();
     
+    const logTokenPair = CONFIG.arbitrage.tokenPairs[0];
     logger.info("Configuration loaded:", {
       chain: CONFIG.arbitrage.chain,
-      tokenPair: CONFIG.arbitrage.tokenPair,
-      minProfitThreshold: CONFIG.arbitrage.minProfitThreshold,
-      tradeSize: CONFIG.arbitrage.tradeSize,
+      tokenPairs: CONFIG.arbitrage.tokenPairs.length,
+      firstTokenPair: logTokenPair ? `${logTokenPair.tokenASymbol}-${logTokenPair.tokenBSymbol}` : 'None',
+      minProfitPercentage: CONFIG.arbitrage.minProfitPercentage,
+      maxPositionSize: CONFIG.arbitrage.riskParams.maxPositionSize,
       zeroLatencyEnabled: true,
       livshitsOptimization: CONFIG.trading.livshitsOptimization.enabled,
       crossChainArbitrage: CONFIG.trading.crossChainArbitrage.enabled,

@@ -1,8 +1,149 @@
-import Database, { Database as DatabaseType } from 'better-sqlite3';
-import { User, Wallet, Trade, BotConfig, TokenInfo, TradeMetadata, WalletBalance, WalletMetadata, UserRole, UserStatus, UserPreferences, Chain } from '@trading-bot/types';
+import Database from 'better-sqlite3';
+import * as path from 'path';
 
-// Database connection and transaction management
-const db: DatabaseType = new Database(process.env['DATABASE_PATH'] || 'trading_bot.db');
+// Local type definitions (aligned with packages/types structure)
+export type Chain = "ETH" | "BSC" | "SOL" | "POLYGON" | "ARBITRUM" | "OPTIMISM";
+export type UserRole = "admin" | "trader" | "viewer" | "developer" | "auditor";
+export type UserStatus = "active" | "inactive" | "suspended" | "pending" | "locked";
+
+export interface UserPreferences {
+  locale: string;
+  timezone: string;
+  theme: "light" | "dark" | "auto";
+  notifications: {
+    email: boolean;
+    push: boolean;
+    sms: boolean;
+    types: {
+      trades: boolean;
+      profits: boolean;
+      losses: boolean;
+      errors: boolean;
+      system: boolean;
+    };
+  };
+  trading: {
+    defaultSlippage: number;
+    gasStrategy: "slow" | "standard" | "fast" | "custom";
+    riskTolerance: "low" | "medium" | "high";
+    displayCurrency: "USD" | "EUR" | "BTC" | "ETH";
+  };
+}
+
+export interface WalletBalance {
+  native: {
+    amount: string;
+    usdValue: number;
+  };
+  tokens: Array<{
+    address: string;
+    symbol: string;
+    amount: string;
+    decimals: number;
+    usdValue: number;
+  }>;
+  totalUsdValue: number;
+  lastUpdated: string;
+}
+
+export interface WalletMetadata {
+  tags: string[];
+  description?: string;
+  riskLevel: "low" | "medium" | "high";
+  purpose: "arbitrage" | "copy-trading" | "mev" | "general" | "testing";
+}
+
+export interface User {
+  id: string;
+  email: string;
+  name?: string;
+  role: UserRole;
+  status: UserStatus;
+  preferences: UserPreferences;
+  createdAt: string;
+  updatedAt: string;
+  lastLoginAt?: string;
+  twoFactorEnabled: boolean;
+}
+
+export interface Wallet {
+  id: string;
+  userId: string;
+  address: string;
+  chain: Chain;
+  name?: string;
+  type: "hot" | "cold" | "hardware" | "multisig" | "contract";
+  balance: WalletBalance;
+  status: "active" | "inactive" | "frozen" | "compromised" | "archived";
+  createdAt: string;
+  lastActivityAt?: string;
+  isMonitored: boolean;
+  metadata: WalletMetadata;
+}
+
+export interface TokenInfo {
+  address: string;
+  symbol: string;
+  name: string;
+  decimals: number;
+  verified: boolean;
+}
+
+export interface TradeMetadata {
+  exchange: string;
+  route: Array<{
+    protocol: string;
+    pair: string;
+    poolAddress: string;
+    fee: number;
+  }>;
+  actualSlippage: number;
+  mevProtection: boolean;
+  strategy: string;
+  marketConditions: {
+    gasPrice: number;
+    congestion: "low" | "medium" | "high";
+    volatility: number;
+    liquidity: number;
+  };
+}
+
+export interface Trade {
+  id: string;
+  botConfigId: string;
+  botType: "ARBITRAGE" | "COPY_TRADER" | "SANDWICH" | "GRID" | "DCA";
+  txHash: string;
+  chain: Chain;
+  tokenIn: TokenInfo;
+  tokenOut: TokenInfo;
+  amountIn: string;
+  amountOut: string;
+  gasUsed: string;
+  gasPrice: string;
+  profit?: string;
+  status: "pending" | "submitted" | "confirmed" | "success" | "failed" | "cancelled" | "expired";
+  metadata: TradeMetadata;
+  createdAt: string;
+  completedAt?: string;
+  error?: any;
+}
+
+export interface BotConfig {
+  id?: string;
+  userId: string;
+  walletId: string;
+  name: string;
+  type: "arbitrage" | "copy-trader" | "mev-sandwich";
+  enabled: boolean;
+  chain: Chain;
+  createdAt?: string;
+  updatedAt?: string;
+  description?: string;
+  version?: string;
+}
+
+const dbPath = path.join(process.cwd(), 'trading_bot.db');
+const db = new Database(dbPath);
 
 // Enable WAL mode for better performance and concurrency
 db.exec('PRAGMA journal_mode = WAL;');
@@ -1447,6 +1588,4 @@ function mapDbTradeToTrade(t: DbTrade): Trade {
 }
 
 // Initialize database on import
-initializeDatabase();
-
-export default db; 
+initializeDatabase(); 

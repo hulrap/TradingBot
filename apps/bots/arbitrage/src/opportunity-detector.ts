@@ -1,26 +1,11 @@
 import { EventEmitter } from 'events';
 import { ethers } from 'ethers';
 import { 
-  MempoolMonitor, 
-  PriceOracle
+  MempoolMonitor,
+  type MempoolConfig,
+  ZeroLatencyOracle
 } from '@trading-bot/chain-client';
 import winston from 'winston';
-
-// Local type definitions to avoid import issues
-interface MempoolConfig {
-  enableRealtimeSubscription: boolean;
-  subscriptionFilters: {
-    minTradeValue: string;
-    maxGasPrice: string;
-    whitelistedDexes: string[];
-    blacklistedTokens: string[];
-  };
-  batchSize: number;
-  processingDelayMs: number;
-  heartbeatIntervalMs: number;
-  reconnectDelayMs: number;
-  maxReconnectAttempts: number;
-}
 
 interface PendingTransaction {
   hash: string;
@@ -101,7 +86,7 @@ export class ArbitrageDetector extends EventEmitter {
   private mempoolMonitor!: any; // MempoolMonitor instance
   private providers = new Map<string, ethers.Provider>();
   private logger: winston.Logger;
-  private priceOracle: any; // PriceOracle instance
+  private priceOracle: ZeroLatencyOracle;
   
   private isScanning = false;
   private priceCache = new Map<string, Map<string, PriceData>>(); // token -> exchange -> price
@@ -126,26 +111,8 @@ export class ArbitrageDetector extends EventEmitter {
       ]
     });
     
-    // Initialize price oracle
-    this.priceOracle = new PriceOracle({
-      sources: [
-        {
-          id: 'coingecko',
-          name: 'CoinGecko',
-          priority: 1,
-          isActive: true,
-          rateLimit: 50,
-          timeout: 10000,
-          supportedChains: config.enabledChains,
-          baseUrl: 'https://api.coingecko.com/api/v3',
-        }
-      ],
-      cacheTimeout: 30,
-      maxRetries: 3,
-      retryDelay: 1000,
-      enableBackupSources: true,
-      priceDeviationThreshold: 5,
-    }, this.logger);
+    // Initialize price oracle - will be injected later
+    this.priceOracle = {} as ZeroLatencyOracle;
     
     // Initialize exchanges
     this.initializeExchanges();
@@ -155,18 +122,61 @@ export class ArbitrageDetector extends EventEmitter {
   private initializeMempoolMonitor(): void {
     // Create mempool monitor with arbitrage-specific config
     const mempoolConfig: MempoolConfig = {
-      enableRealtimeSubscription: true,
+      performance: {
+        maxLatencyMs: 50,
+        processingDelayMs: 100,
+        maxBatchSize: 5,
+        connectionPoolSize: 3,
+        priorityProcessingEnabled: true,
+        mevDetectionLatency: 20
+      },
       subscriptionFilters: {
-        minTradeValue: '1000', // $1k minimum for arbitrage
+        minTradeValue: '1000',
         maxGasPrice: this.config.maxGasPrice,
         whitelistedDexes: this.config.enabledExchanges,
-        blacklistedTokens: []
+        blacklistedTokens: [],
+        minLiquidity: '10000',
+        mevOpportunityThreshold: '50',
+        priorityAddresses: [],
+        flashloanDetection: true
       },
-      batchSize: 5,
-      processingDelayMs: 100, // Fast processing for arbitrage
-      heartbeatIntervalMs: 30000,
-      reconnectDelayMs: 5000,
-      maxReconnectAttempts: 5
+      chains: {
+        ethereum: {
+          enabled: true,
+          wsEndpoints: [process.env['ETH_WS_URL'] || 'wss://mainnet.infura.io/ws/v3/your-key'],
+          rpcEndpoints: [process.env['ETH_RPC_URL'] || 'https://mainnet.infura.io/v3/your-key'],
+          mempoolProviders: ['infura'],
+          priorityFeeThreshold: '2000000000',
+          blockTime: 12000,
+          finalizationDepth: 12
+        }
+      },
+      monitoring: {
+        heartbeatIntervalMs: 30000,
+        reconnectDelayMs: 5000,
+        maxReconnectAttempts: 5,
+        healthCheckTimeout: 10000,
+        alertingThresholds: {
+          missedTransactionsPercent: 5,
+          latencyThresholdMs: 100,
+          connectionFailuresPerHour: 10
+        }
+      },
+      mevDetection: {
+        enabled: true,
+        sandwichDetection: false,
+        arbitrageDetection: true,
+        liquidationDetection: false,
+        frontRunDetection: false,
+        confidenceThreshold: 70,
+        profitabilityThreshold: '50'
+      },
+      rateLimiting: {
+        requestsPerSecond: 100,
+        burstLimit: 200,
+        chainSpecificLimits: { ethereum: 100 },
+        backoffMultiplier: 1.5
+      }
     };
     
     // Initialize mempool monitor with proper dependencies

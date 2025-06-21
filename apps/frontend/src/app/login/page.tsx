@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Button } from '@trading-bot/ui';
+import { Button } from '@/components/ui/button';
 import { useAuth } from '../../context/AuthContext';
 
 export default function LoginPage() {

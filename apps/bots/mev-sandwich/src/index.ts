@@ -5,23 +5,7 @@ import { Connection } from '@solana/web3.js';
 import { FlashbotsClient, type FlashbotsConfig } from './flashbots-client';
 import { JitoClient, type JitoConfig } from './jito-client';
 import { BscMevClient, type BscMevConfig } from './bsc-mev-client';
-import { MempoolMonitor } from '@trading-bot/chain-client';
-
-// Local type definitions to avoid import issues
-interface MempoolConfig {
-  enableRealtimeSubscription: boolean;
-  subscriptionFilters: {
-    minTradeValue: string;
-    maxGasPrice: string;
-    whitelistedDexes: string[];
-    blacklistedTokens: string[];
-  };
-  batchSize: number;
-  processingDelayMs: number;
-  heartbeatIntervalMs: number;
-  reconnectDelayMs: number;
-  maxReconnectAttempts: number;
-}
+import { MempoolMonitor, type MempoolConfig } from '@trading-bot/chain-client';
 
 interface PendingTransaction {
   hash: string;
@@ -355,18 +339,61 @@ class AdvancedMevSandwichBot {
   private async initializeSandwichDetector(): Promise<void> {
     // Initialize shared mempool monitor
     const mempoolConfig: MempoolConfig = {
-      enableRealtimeSubscription: true,
+      performance: {
+        maxLatencyMs: 30,
+        processingDelayMs: 100,
+        maxBatchSize: 10,
+        connectionPoolSize: 5,
+        priorityProcessingEnabled: true,
+        mevDetectionLatency: 15
+      },
       subscriptionFilters: {
         minTradeValue: process.env['MIN_TRADE_VALUE'] || '1000',
         maxGasPrice: process.env['MAX_GAS_PRICE'] || '100',
         whitelistedDexes: process.env['WHITELISTED_DEXES']?.split(',') || [],
-        blacklistedTokens: process.env['BLACKLISTED_TOKENS']?.split(',') || []
+        blacklistedTokens: process.env['BLACKLISTED_TOKENS']?.split(',') || [],
+        minLiquidity: '50000',
+        mevOpportunityThreshold: '100',
+        priorityAddresses: [],
+        flashloanDetection: true
       },
-      batchSize: 10,
-      processingDelayMs: 100,
-      heartbeatIntervalMs: 30000,
-      reconnectDelayMs: 5000,
-      maxReconnectAttempts: 5
+      chains: {
+        ethereum: {
+          enabled: true,
+          wsEndpoints: [process.env['ETH_WS_URL'] || 'wss://mainnet.infura.io/ws/v3/your-key'],
+          rpcEndpoints: [process.env['ETH_RPC_URL'] || 'https://mainnet.infura.io/v3/your-key'],
+          mempoolProviders: ['infura', 'flashbots'],
+          priorityFeeThreshold: '2000000000',
+          blockTime: 12000,
+          finalizationDepth: 12
+        }
+      },
+      monitoring: {
+        heartbeatIntervalMs: 30000,
+        reconnectDelayMs: 5000,
+        maxReconnectAttempts: 5,
+        healthCheckTimeout: 10000,
+        alertingThresholds: {
+          missedTransactionsPercent: 2,
+          latencyThresholdMs: 50,
+          connectionFailuresPerHour: 20
+        }
+      },
+      mevDetection: {
+        enabled: true,
+        sandwichDetection: true,
+        arbitrageDetection: false,
+        liquidationDetection: true,
+        frontRunDetection: true,
+        confidenceThreshold: 80,
+        profitabilityThreshold: '100'
+      },
+      rateLimiting: {
+        requestsPerSecond: 200,
+        burstLimit: 500,
+        chainSpecificLimits: { ethereum: 200 },
+        backoffMultiplier: 1.2
+      }
     };
 
     // Initialize price oracle for mempool monitor

@@ -3,9 +3,23 @@ import winston from 'winston';
 import { ethers } from 'ethers';
 import { z } from 'zod';
 import Database from 'better-sqlite3';
-import Bottleneck from 'bottleneck';
 import cron from 'node-cron';
 import { v4 as uuidv4 } from 'uuid';
+
+// Bottleneck rate limiter interface
+interface RateLimiter {
+  schedule<T>(fn: () => Promise<T>): Promise<T>;
+}
+
+interface BottleneckConstructor {
+  new (options: {
+    minTime?: number;
+    maxConcurrent?: number;
+  }): RateLimiter;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const Bottleneck = require('bottleneck') as BottleneckConstructor;
 
 import { MempoolMonitor, type MonitorConfig } from './mempool-monitor';
 import { CopyExecutionEngine, type CopyConfig, type PriceOracle, type TokenApprovalManager } from './copy-execution-engine';
@@ -105,7 +119,7 @@ function createLogger(config: Config): winston.Logger {
 // Enhanced price oracle with real API integration
 class ProductionPriceOracle implements PriceOracle {
   private logger: winston.Logger;
-  private limiter: Bottleneck;
+  private limiter: RateLimiter;
   private priceCache = new Map<string, { price: number; timestamp: number }>();
   private readonly CACHE_TTL = 30000; // 30 seconds
 
@@ -189,7 +203,7 @@ class ProductionPriceOracle implements PriceOracle {
 class ProductionTokenApprovalManager implements TokenApprovalManager {
   private wallet: ethers.Wallet;
   private logger: winston.Logger;
-  private limiter: Bottleneck;
+  private limiter: RateLimiter;
 
   constructor(wallet: ethers.Wallet, logger: winston.Logger) {
     this.wallet = wallet;
