@@ -336,7 +336,7 @@ class RenderMCPServer {
           case "list_custom_domains":
             return await this.listCustomDomains(args);
           case "get_owner_info":
-            return await this.getOwnerInfo(args);
+            return await this.getOwnerInfo();
           default:
             throw new Error(`Unknown tool: ${name}`);
         }
@@ -585,7 +585,7 @@ class RenderMCPServer {
     };
   }
 
-  private async getOwnerInfo(args: any) {
+  private async getOwnerInfo() {
     const ownerId = this.config.ownerId || "me";
     const data = await this.makeRenderRequest(`/owners/${ownerId}`);
 

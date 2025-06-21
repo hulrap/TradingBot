@@ -32,12 +32,12 @@ interface TransactionData {
  */
 
 /**
- * Securely decrypts wallet private key for signing operations
+ * Securely retrieves encrypted private key from database for wallet operations
  * @param walletId The wallet ID
  * @param userId The user ID (for authorization)
- * @returns Promise resolving to decrypted private key or null
+ * @returns Promise resolving to encrypted private key or null
  */
-async function getDecryptedPrivateKey(walletId: string, userId: string): Promise<string | null> {
+async function getEncryptedPrivateKey(walletId: string, userId: string): Promise<string | null> {
   try {
     const wallet = walletDb.findById(walletId);
     if (!wallet || wallet.userId !== userId) {
@@ -45,14 +45,40 @@ async function getDecryptedPrivateKey(walletId: string, userId: string): Promise
       return null;
     }
 
-    // Decrypt the encrypted private key using the crypto library
-    if (wallet.encryptedPrivateKey) {
-      const decryptedKey = await decrypt(wallet.encryptedPrivateKey);
-      return decryptedKey;
+    // Access encrypted private key directly from database
+    const dbResult = walletDb.getEncryptedPrivateKey(walletId, userId);
+    if (!dbResult) {
+      console.warn('No encrypted private key found for wallet:', { walletId });
+      return null;
     }
 
-    console.warn('No encrypted private key found for wallet:', { walletId });
+    return dbResult;
+  } catch (error) {
+    console.error('Failed to retrieve encrypted private key:', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      walletId,
+      userId
+    });
     return null;
+  }
+}
+
+/**
+ * Securely decrypts wallet private key for signing operations
+ * @param walletId The wallet ID
+ * @param userId The user ID (for authorization)
+ * @returns Promise resolving to decrypted private key or null
+ */
+async function getDecryptedPrivateKey(walletId: string, userId: string): Promise<string | null> {
+  try {
+    const encryptedKey = await getEncryptedPrivateKey(walletId, userId);
+    if (!encryptedKey) {
+      return null;
+    }
+
+    // Decrypt the encrypted private key using the crypto library
+    const decryptedKey = await decrypt(encryptedKey);
+    return decryptedKey;
   } catch (error) {
     console.error('Failed to decrypt private key:', {
       error: error instanceof Error ? error.message : 'Unknown error',
@@ -114,7 +140,7 @@ export async function signWalletTransaction(
     });
 
     // TODO: Implement actual transaction signing with the private key
-    // This would typically use a library like ethers.js or web3.js
+    // This would typically integrate with @trading-bot/chain-client for chain-specific signing
     console.warn('Transaction signing implementation needed - private key available but signing logic not implemented');
     
     // For now, return a mock signed transaction structure
@@ -213,7 +239,7 @@ export async function verifyWalletAddress(walletId: string, userId: string): Pro
     }
 
     // For now, return the stored address
-    // TODO: Implement address derivation verification when secure crypto service is available
+    // TODO: Implement address derivation verification using @trading-bot/chain-client
     return wallet.address;
   } catch (error) {
     console.error('Error verifying wallet address:', error);

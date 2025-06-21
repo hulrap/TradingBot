@@ -255,13 +255,13 @@ class SupabaseMCPServer {
           case "get_auth_users":
             return await this.getAuthUsers(args);
           case "get_realtime_stats":
-            return await this.getRealtimeStats(args);
+            return await this.getRealtimeStats();
           case "get_database_stats":
             return await this.getDatabaseStats(args);
           case "execute_rpc":
             return await this.executeRPC(args);
           case "get_edge_functions":
-            return await this.getEdgeFunctions(args);
+            return await this.getEdgeFunctions();
           case "invoke_edge_function":
             return await this.invokeEdgeFunction(args);
           default:
@@ -451,7 +451,7 @@ class SupabaseMCPServer {
     };
   }
 
-  private async getRealtimeStats(args: any) {
+  private async getRealtimeStats() {
     const data = await this.makeManagementRequest(
       `/projects/${this.config.projectRef}/realtime/stats`
     );
@@ -504,7 +504,7 @@ class SupabaseMCPServer {
     };
   }
 
-  private async getEdgeFunctions(args: any) {
+  private async getEdgeFunctions() {
     const data = await this.makeManagementRequest(
       `/projects/${this.config.projectRef}/functions`
     );
