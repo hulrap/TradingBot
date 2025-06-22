@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useCallback } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -20,79 +20,76 @@ import {
   TrendingUp,
   Activity,
   ExternalLink,
-  BarChart3
+  BarChart3,
+  Users,
+  Zap
 } from 'lucide-react';
-import { BotConfiguration, CopyTradingConfiguration, TradeFilter } from '../BotConfigurationDashboard';
+
+// Import proper types from packages folder
+import { CopyTradingBotConfig, TRADE_SIZE_TYPES } from '@trading-bot/types/src/bot';
+import { isValidEthereumAddress } from '@trading-bot/types';
 
 interface CopyTradingConfigProps {
-  config: BotConfiguration;
-  onChange: (config: BotConfiguration) => void;
+  config: CopyTradingBotConfig;
+  onChange: (config: CopyTradingBotConfig) => void;
 }
 
-// Enhanced wallet validation
+// Enhanced wallet validation using the packages validation
 const validateWalletAddress = (address: string): { isValid: boolean; error?: string } => {
   if (!address) return { isValid: false, error: 'Address is required' };
   
-  // Basic Ethereum address validation
-  const ethAddressRegex = /^0x[a-fA-F0-9]{40}$/;
-  if (!ethAddressRegex.test(address)) {
+  if (!isValidEthereumAddress(address)) {
     return { isValid: false, error: 'Invalid Ethereum address format' };
-  }
-  
-  // Basic checksum validation (simplified)
-  if (address !== address.toLowerCase() && address !== address.toUpperCase()) {
-    // Mixed case - should validate checksum in production
-    console.warn('Mixed case address detected - checksum validation needed');
   }
   
   return { isValid: true };
 };
 
-// Enhanced risk assessment with more sophisticated modeling
-const calculateAdvancedRisk = (config: CopyTradingConfiguration): {
+// Enhanced risk assessment aligned with CopyTradingBotConfig schema
+const calculateAdvancedRisk = (config: CopyTradingBotConfig): {
   level: 'low' | 'medium' | 'high' | 'extreme';
   color: string;
   factors: Record<string, boolean>;
   score: number;
 } => {
   const riskFactors = {
-    // Financial risk factors
-    highCopyAmount: getEstimatedCopyAmount(config) > 500,
-    veryHighCopyAmount: getEstimatedCopyAmount(config) > 2000,
-    noStopLoss: !config.stopLoss || config.stopLoss > 15,
-    extremeStopLoss: !config.stopLoss || config.stopLoss > 25,
+    // Financial risk factors based on actual schema
+    highTradeSize: config.copySettings.tradeSize.value > 500,
+    veryHighTradeSize: config.copySettings.tradeSize.value > 2000,
+    noStopLoss: !config.riskManagement.stopLoss.enabled,
+    highStopLoss: config.riskManagement.stopLoss.percentage > 20,
     
     // Timing and execution risks
-    shortDelay: config.delayMs < 1000,
-    veryShortDelay: config.delayMs < 500,
+    shortDelay: config.copySettings.copyDelay < 1000,
+    veryShortDelay: config.copySettings.copyDelay < 500,
     
     // Filter and protection risks
-    noFilters: config.tradeFilters.filter(f => f.enabled).length === 0,
-    fewFilters: config.tradeFilters.filter(f => f.enabled).length < 2,
+    noTokenFilters: !config.filters.tokenWhitelist?.length && !config.filters.tokenBlacklist?.length,
+    noGasLimit: !config.filters.maxGasPrice || config.filters.maxGasPrice > 100,
     
-    // MEV and competition risks
-    noTakeProfit: !config.takeProfit,
-    aggressiveTakeProfit: Boolean(config.takeProfit && config.takeProfit > 50),
+    // Take profit risks
+    noTakeProfit: !config.riskManagement.takeProfit.enabled,
+    aggressiveTakeProfit: config.riskManagement.takeProfit.enabled && config.riskManagement.takeProfit.percentage > 100,
     
-    // Token list risks
-    noTokenLimits: config.whitelistedTokens.length === 0 && config.blacklistedTokens.length === 0,
-    largeBlacklist: config.blacklistedTokens.length > 10
+    // Size and exposure risks
+    highMaxTrades: config.riskManagement.maxConcurrentTrades > 10,
+    highDailyLoss: config.riskManagement.maxDailyLoss > 1000
   };
 
   // Calculate weighted risk score
   const weights = {
-    veryHighCopyAmount: 3,
-    extremeStopLoss: 3,
+    veryHighTradeSize: 3,
+    highStopLoss: 3,
     veryShortDelay: 2,
-    highCopyAmount: 2,
+    highTradeSize: 2,
     noStopLoss: 2,
     shortDelay: 1.5,
-    noFilters: 1.5,
+    noTokenFilters: 1.5,
     noTakeProfit: 1,
-    fewFilters: 1,
-    noTokenLimits: 1,
-    aggressiveTakeProfit: 0.5,
-    largeBlacklist: 0.5
+    noGasLimit: 1,
+    aggressiveTakeProfit: 1,
+    highMaxTrades: 0.5,
+    highDailyLoss: 1
   };
 
   const score = Object.entries(riskFactors)
@@ -105,163 +102,142 @@ const calculateAdvancedRisk = (config: CopyTradingConfiguration): {
   return { level: 'low', color: 'text-green-600', factors: riskFactors, score };
 };
 
-const getEstimatedCopyAmount = (config: CopyTradingConfiguration): number => {
-  const sampleTradeSize = 1000; // USD
-  switch (config.copyMode) {
-    case 'fixed_amount':
-      return config.fixedAmount || 0;
-    case 'percentage':
-      return sampleTradeSize * (config.copyPercentage || 0) / 100;
-    case 'proportional':
-      return sampleTradeSize * 0.1; // Assume 10% of portfolio
-    default:
-      return 0;
-  }
-};
-
-// Sample wallets with enhanced data structure
-const POPULAR_WALLETS = [
+// Sample verified wallets with enhanced data structure
+const VERIFIED_TRADERS = [
   {
     address: '0x8ba1f109551bD432803012645Hac136c22C08',
-    name: 'DeFi Whale #1',
+    label: 'DeFi Whale #1',
     description: 'Large DeFi positions, conservative strategy',
     winRate: 89.2,
     avgReturn: 12.4,
-    trades: 342,
+    totalTrades: 342,
     verified: true,
     riskLevel: 'low' as const,
     avgTradeSize: 2500,
     lastActive: '2 hours ago',
-    tags: ['defi', 'conservative', 'large-cap']
+    tags: ['defi', 'conservative', 'large-cap'],
+    followers: 1247,
+    aum: 2500000
   },
   {
     address: '0x742d35Cc6634C0532925a3b8D62103Ae4E168681',
-    name: 'Arbitrage Expert',
-    description: 'Focused on arbitrage opportunities',
+    label: 'Arbitrage Expert',
+    description: 'Focused on arbitrage opportunities across DEXes',
     winRate: 94.1,
     avgReturn: 8.7,
-    trades: 1247,
+    totalTrades: 1247,
     verified: true,
     riskLevel: 'medium' as const,
     avgTradeSize: 1200,
     lastActive: '30 minutes ago',
-    tags: ['arbitrage', 'mev', 'high-frequency']
+    tags: ['arbitrage', 'mev', 'high-frequency'],
+    followers: 892,
+    aum: 850000
   },
   {
     address: '0x45f783CCE6B7FF23B2ab2D70e416cdb7D6055f51',
-    name: 'MEV Bot Alpha',
-    description: 'Advanced MEV strategies',
+    label: 'Yield Farmer Pro',
+    description: 'Advanced yield farming and liquidity strategies',
     winRate: 76.8,
     avgReturn: 24.6,
-    trades: 892,
+    totalTrades: 892,
     verified: false,
     riskLevel: 'high' as const,
     avgTradeSize: 5000,
     lastActive: '1 hour ago',
-    tags: ['mev', 'sandwich', 'high-risk']
+    tags: ['yield-farming', 'defi', 'high-return'],
+    followers: 534,
+    aum: 1200000
   }
-];
-
-// Available filter types with enhanced options
-const FILTER_TYPES = [
-  { value: 'token', label: 'Token', description: 'Filter by specific token symbol' },
-  { value: 'amount', label: 'Amount', description: 'Filter by trade amount (USD)' },
-  { value: 'gas', label: 'Gas Price', description: 'Filter by gas price (Gwei)' },
-  { value: 'time', label: 'Time', description: 'Filter by time of day' },
-  { value: 'volatility', label: 'Volatility', description: 'Filter by token volatility' },
-  { value: 'market_cap', label: 'Market Cap', description: 'Filter by token market cap' }
-];
-
-const FILTER_CONDITIONS = [
-  { value: 'equals', label: 'Equals', types: ['token', 'amount', 'gas', 'time'] },
-  { value: 'greater_than', label: 'Greater than', types: ['amount', 'gas', 'time', 'volatility', 'market_cap'] },
-  { value: 'less_than', label: 'Less than', types: ['amount', 'gas', 'time', 'volatility', 'market_cap'] },
-  { value: 'contains', label: 'Contains', types: ['token'] },
-  { value: 'between', label: 'Between', types: ['amount', 'gas', 'volatility', 'market_cap'] }
 ];
 
 export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) {
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [showWalletSelector, setShowWalletSelector] = useState(false);
+  const [showTraderSelector, setShowTraderSelector] = useState(false);
   const [walletValidation, setWalletValidation] = useState<{ isValid: boolean; error?: string }>({ isValid: true });
   
-  const copyConfig = config.configuration as CopyTradingConfiguration;
-
   // Memoized calculations for performance
-  const riskAssessment = useMemo(() => calculateAdvancedRisk(copyConfig), [copyConfig]);
-  const estimatedCopyAmount = useMemo(() => getEstimatedCopyAmount(copyConfig), [copyConfig]);
+  const riskAssessment = useMemo(() => calculateAdvancedRisk(config), [config]);
+  
+  const estimatedTradeSize = useMemo(() => {
+    const baseAmount = 1000; // Sample base trade amount
+    switch (config.copySettings.tradeSize.type) {
+      case 'FIXED':
+        return config.copySettings.tradeSize.value;
+      case 'PERCENTAGE':
+        return baseAmount * (config.copySettings.tradeSize.value / 100);
+      case 'RATIO':
+        return baseAmount * config.copySettings.tradeSize.value;
+      default:
+        return 0;
+    }
+  }, [config.copySettings.tradeSize]);
 
-  const updateConfig = (updates: Partial<CopyTradingConfiguration>) => {
+  const updateConfig = useCallback((updates: Partial<CopyTradingBotConfig>) => {
     onChange({
       ...config,
-      configuration: { ...copyConfig, ...updates }
+      ...updates
     });
-  };
+  }, [config, onChange]);
 
   // Enhanced wallet validation with real-time feedback
-  const handleWalletChange = (address: string) => {
+  const handleWalletChange = useCallback((address: string) => {
     const validation = validateWalletAddress(address);
     setWalletValidation(validation);
-    updateConfig({ targetWallet: address });
-  };
-
-  const addFilter = () => {
-    const newFilter: TradeFilter = {
-      type: 'amount',
-      condition: 'greater_than',
-      value: 100,
-      enabled: true
-    };
-    updateConfig({
-      tradeFilters: [...copyConfig.tradeFilters, newFilter]
+    updateConfig({ 
+      targetWallet: { 
+        ...config.targetWallet, 
+        address: address,
+        verified: VERIFIED_TRADERS.some(t => t.address === address)
+      }
     });
-  };
+  }, [config.targetWallet, updateConfig]);
 
-  const updateFilter = (index: number, updates: Partial<TradeFilter>) => {
-    const updatedFilters = copyConfig.tradeFilters.map((filter, i) => 
-      i === index ? { ...filter, ...updates } : filter
-    );
-    updateConfig({ tradeFilters: updatedFilters });
-  };
-
-  const removeFilter = (index: number) => {
-    const updatedFilters = copyConfig.tradeFilters.filter((_, i) => i !== index);
-    updateConfig({ tradeFilters: updatedFilters });
-  };
-
-  const addBlacklistedToken = (token: string) => {
-    if (token && !copyConfig.blacklistedTokens.includes(token)) {
+  const addTokenToWhitelist = useCallback((token: string) => {
+    if (token && !config.filters.tokenWhitelist?.includes(token)) {
       updateConfig({
-        blacklistedTokens: [...copyConfig.blacklistedTokens, token.toUpperCase()]
+        filters: {
+          ...config.filters,
+          tokenWhitelist: [...(config.filters.tokenWhitelist || []), token.toUpperCase()]
+        }
       });
     }
-  };
+  }, [config.filters, updateConfig]);
 
-  const removeBlacklistedToken = (token: string) => {
+  const removeTokenFromWhitelist = useCallback((token: string) => {
     updateConfig({
-      blacklistedTokens: copyConfig.blacklistedTokens.filter(t => t !== token)
+      filters: {
+        ...config.filters,
+        tokenWhitelist: config.filters.tokenWhitelist?.filter(t => t !== token) || []
+      }
     });
-  };
+  }, [config.filters, updateConfig]);
 
-  const addWhitelistedToken = (token: string) => {
-    if (token && !copyConfig.whitelistedTokens.includes(token)) {
+  const addTokenToBlacklist = useCallback((token: string) => {
+    if (token && !config.filters.tokenBlacklist?.includes(token)) {
       updateConfig({
-        whitelistedTokens: [...copyConfig.whitelistedTokens, token.toUpperCase()]
+        filters: {
+          ...config.filters,
+          tokenBlacklist: [...(config.filters.tokenBlacklist || []), token.toUpperCase()]
+        }
       });
     }
-  };
+  }, [config.filters, updateConfig]);
 
-  const removeWhitelistedToken = (token: string) => {
+  const removeTokenFromBlacklist = useCallback((token: string) => {
     updateConfig({
-      whitelistedTokens: copyConfig.whitelistedTokens.filter(t => t !== token)
+      filters: {
+        ...config.filters,
+        tokenBlacklist: config.filters.tokenBlacklist?.filter(t => t !== token) || []
+      }
     });
-  };
+  }, [config.filters, updateConfig]);
 
-  const selectedWallet = POPULAR_WALLETS.find(w => w.address === copyConfig.targetWallet);
+  const selectedTrader = VERIFIED_TRADERS.find(t => t.address === config.targetWallet.address);
 
   return (
     <div className="space-y-6">
-      {/* MEV Protection Warning */}
+      {/* Risk Warning */}
       {riskAssessment.level === 'high' || riskAssessment.level === 'extreme' ? (
         <Card className="border-red-200 bg-red-50">
           <CardContent className="p-4">
@@ -270,12 +246,13 @@ export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) 
               <div>
                 <div className="font-medium text-red-800 mb-1">High Risk Configuration Detected</div>
                 <div className="text-sm text-red-700 space-y-1">
-                  <p>Your copy trading configuration has a high risk level (Score: {riskAssessment.score}). Consider:</p>
+                  <p>Risk Score: {riskAssessment.score}/10 - Consider the following improvements:</p>
                   <ul className="list-disc list-inside space-y-1 ml-4">
-                    <li>Implementing MEV protection to avoid front-running</li>
-                    <li>Using longer delays to reduce competition</li>
-                    <li>Adding more trade filters for safety</li>
-                    <li>Setting appropriate stop-loss limits</li>
+                    {riskAssessment.factors['veryShortDelay'] && <li>Increase copy delay to avoid MEV front-running</li>}
+                    {riskAssessment.factors['noStopLoss'] && <li>Enable stop-loss protection for downside risk</li>}
+                    {riskAssessment.factors['noTokenFilters'] && <li>Add token filters to avoid risky assets</li>}
+                    {riskAssessment.factors['veryHighTradeSize'] && <li>Reduce trade size to manage exposure</li>}
+                    {riskAssessment.factors['noGasLimit'] && <li>Set gas price limits to control costs</li>}
                   </ul>
                 </div>
               </div>
@@ -288,7 +265,7 @@ export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) 
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
-            <Copy className="h-5 w-5 text-green-500" />
+            <Copy className="h-5 w-5 text-blue-500" />
             Copy Trading Configuration Overview
           </CardTitle>
         </CardHeader>
@@ -297,15 +274,15 @@ export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) 
             <div className="text-center p-4 border rounded-lg">
               <div className="text-2xl font-bold text-green-600 flex items-center justify-center gap-1">
                 <DollarSign className="h-6 w-6" />
-                {estimatedCopyAmount.toFixed(0)}
+                {estimatedTradeSize.toFixed(0)}
               </div>
-              <div className="text-sm text-muted-foreground">Est. Copy Amount (USD)</div>
+              <div className="text-sm text-muted-foreground">Est. Trade Size (USD)</div>
             </div>
             <div className="text-center p-4 border rounded-lg">
               <div className="text-2xl font-bold text-blue-600">
-                {copyConfig.tradeFilters.filter(f => f.enabled).length}
+                {config.copySettings.copyDelay / 1000}s
               </div>
-              <div className="text-sm text-muted-foreground">Active Filters</div>
+              <div className="text-sm text-muted-foreground">Copy Delay</div>
             </div>
             <div className="text-center p-4 border rounded-lg">
               <div className={`text-2xl font-bold ${riskAssessment.color} flex items-center justify-center gap-1`}>
@@ -319,37 +296,38 @@ export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) 
             </div>
             <div className="text-center p-4 border rounded-lg">
               <div className="text-2xl font-bold text-purple-600">
-                {copyConfig.delayMs / 1000}s
+                {config.riskManagement.maxConcurrentTrades}
               </div>
-              <div className="text-sm text-muted-foreground">Copy Delay</div>
+              <div className="text-sm text-muted-foreground">Max Concurrent</div>
             </div>
           </div>
         </CardContent>
       </Card>
 
-      {/* Target Wallet Selection */}
+      {/* Target Trader Selection */}
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
             <CardTitle className="flex items-center gap-2">
               <Target className="h-5 w-5" />
-              Target Wallet
+              Target Trader
             </CardTitle>
             <Button 
               variant="outline" 
               size="sm"
-              onClick={() => setShowWalletSelector(!showWalletSelector)}
+              onClick={() => setShowTraderSelector(!showTraderSelector)}
             >
-              {showWalletSelector ? 'Hide' : 'Browse'} Wallets
+              <Users className="h-4 w-4 mr-2" />
+              {showTraderSelector ? 'Hide' : 'Browse'} Verified Traders
             </Button>
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
-            <label className="text-sm font-medium">Wallet Address</label>
+            <label className="text-sm font-medium">Trader Wallet Address</label>
             <input
               type="text"
-              value={copyConfig.targetWallet}
+              value={config.targetWallet.address}
               onChange={(e) => handleWalletChange(e.target.value)}
               className={`w-full p-3 border rounded-md font-mono text-sm ${
                 !walletValidation.isValid ? 'border-red-500 bg-red-50' : 'border-border'
@@ -362,7 +340,7 @@ export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) 
                 {walletValidation.error}
               </p>
             )}
-            {walletValidation.isValid && copyConfig.targetWallet && (
+            {walletValidation.isValid && config.targetWallet.address && (
               <div className="flex items-center justify-between">
                 <p className="text-sm text-green-600 flex items-center gap-1">
                   <CheckCircle className="h-4 w-4" />
@@ -371,7 +349,7 @@ export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) 
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => window.open(`https://etherscan.io/address/${copyConfig.targetWallet}`, '_blank')}
+                  onClick={() => window.open(`https://etherscan.io/address/${config.targetWallet.address}`, '_blank')}
                   className="text-xs"
                 >
                   <ExternalLink className="h-3 w-3 mr-1" />
@@ -379,155 +357,138 @@ export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) 
                 </Button>
               </div>
             )}
+
+            {/* Trader Label */}
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Trader Label (Optional)</label>
+              <input
+                type="text"
+                value={config.targetWallet.label || ''}
+                onChange={(e) => updateConfig({ 
+                  targetWallet: { ...config.targetWallet, label: e.target.value }
+                })}
+                className="w-full p-3 border rounded-md"
+                placeholder="e.g., DeFi Whale #1"
+              />
+            </div>
             
-            {selectedWallet && (
-              <div className="p-3 bg-green-50 border border-green-200 rounded-md">
-                <div className="flex items-center justify-between mb-2">
+            {selectedTrader && (
+              <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                <div className="flex items-center justify-between mb-3">
                   <div>
                     <div className="font-medium flex items-center gap-2">
-                      {selectedWallet.name}
+                      {selectedTrader.label}
                       <Badge variant="outline" className={`text-xs ${
-                        selectedWallet.riskLevel === 'low' ? 'bg-green-100 text-green-800' :
-                        selectedWallet.riskLevel === 'medium' ? 'bg-yellow-100 text-yellow-800' :
+                        selectedTrader.riskLevel === 'low' ? 'bg-green-100 text-green-800' :
+                        selectedTrader.riskLevel === 'medium' ? 'bg-yellow-100 text-yellow-800' :
                         'bg-red-100 text-red-800'
                       }`}>
-                        {selectedWallet.riskLevel} risk
+                        {selectedTrader.riskLevel} risk
                       </Badge>
+                      {selectedTrader.verified && (
+                        <Badge variant="outline" className="bg-blue-100 text-blue-800">
+                          <CheckCircle className="h-3 w-3 mr-1" />
+                          Verified
+                        </Badge>
+                      )}
                     </div>
-                    <div className="text-sm text-muted-foreground">{selectedWallet.description}</div>
-                    <div className="flex flex-wrap gap-1 mt-1">
-                      {selectedWallet.tags.map((tag) => (
+                    <div className="text-sm text-muted-foreground">{selectedTrader.description}</div>
+                    <div className="flex flex-wrap gap-1 mt-2">
+                      {selectedTrader.tags.map((tag) => (
                         <Badge key={tag} variant="outline" className="text-xs">
                           {tag}
                         </Badge>
                       ))}
                     </div>
                   </div>
-                  {selectedWallet.verified && (
-                    <Badge variant="outline" className="bg-green-100 text-green-800">
-                      <CheckCircle className="h-3 w-3 mr-1" />
-                      Verified
-                    </Badge>
-                  )}
                 </div>
-                <div className="grid grid-cols-4 gap-4 mt-3 text-sm">
-                  <div>
-                    <div className="text-muted-foreground flex items-center gap-1">
-                      <CheckCircle className="h-3 w-3" />
-                      Win Rate
-                    </div>
-                    <div className="font-medium">{selectedWallet.winRate}%</div>
-                  </div>
+                <div className="grid grid-cols-4 gap-4 text-sm">
                   <div>
                     <div className="text-muted-foreground flex items-center gap-1">
                       <TrendingUp className="h-3 w-3" />
-                      Avg Return
+                      Win Rate
                     </div>
-                    <div className="font-medium text-green-600">{selectedWallet.avgReturn}%</div>
+                    <div className="font-medium text-green-600">{selectedTrader.winRate}%</div>
                   </div>
                   <div>
                     <div className="text-muted-foreground flex items-center gap-1">
                       <BarChart3 className="h-3 w-3" />
-                      Trades
+                      Avg Return
                     </div>
-                    <div className="font-medium">{selectedWallet.trades}</div>
+                    <div className="font-medium text-blue-600">{selectedTrader.avgReturn}%</div>
                   </div>
                   <div>
                     <div className="text-muted-foreground flex items-center gap-1">
-                      <Clock className="h-3 w-3" />
-                      Last Active
+                      <Activity className="h-3 w-3" />
+                      Total Trades
                     </div>
-                    <div className="font-medium text-green-600">{selectedWallet.lastActive}</div>
+                    <div className="font-medium">{selectedTrader.totalTrades}</div>
                   </div>
-                </div>
-                
-                {/* Wallet verification and external links */}
-                <div className="flex items-center justify-between mt-3 pt-3 border-t">
-                  <div className="text-xs text-muted-foreground">
-                    Wallet Verification & Analysis
-                  </div>
-                  <div className="flex gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => window.open(`https://etherscan.io/address/${selectedWallet.address}`, '_blank')}
-                      className="text-xs"
-                    >
-                      <ExternalLink className="h-3 w-3 mr-1" />
-                      Etherscan
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => window.open(`https://debank.com/profile/${selectedWallet.address}`, '_blank')}
-                      className="text-xs"
-                    >
-                      <ExternalLink className="h-3 w-3 mr-1" />
-                      DeBank
-                    </Button>
+                  <div>
+                    <div className="text-muted-foreground flex items-center gap-1">
+                      <Users className="h-3 w-3" />
+                      Followers
+                    </div>
+                    <div className="font-medium">{selectedTrader.followers}</div>
                   </div>
                 </div>
               </div>
             )}
           </div>
 
-          {showWalletSelector && (
+          {showTraderSelector && (
             <div className="space-y-3">
-              <h4 className="text-sm font-medium">Popular Wallets</h4>
-              <div className="space-y-2">
-                {POPULAR_WALLETS.map((wallet) => (
+              <h4 className="text-sm font-medium flex items-center gap-2">
+                <Zap className="h-4 w-4" />
+                Verified Traders
+              </h4>
+              <div className="space-y-3">
+                {VERIFIED_TRADERS.map((trader) => (
                   <div
-                    key={wallet.address}
+                    key={trader.address}
                     className={`p-4 border rounded-lg cursor-pointer transition-colors hover:bg-accent ${
-                      copyConfig.targetWallet === wallet.address ? 'border-primary bg-primary/5' : ''
+                      config.targetWallet.address === trader.address ? 'border-primary bg-primary/5' : ''
                     }`}
-                    onClick={() => handleWalletChange(wallet.address)}
+                    onClick={() => handleWalletChange(trader.address)}
                   >
                     <div className="flex items-center justify-between mb-2">
                       <div className="flex items-center gap-2">
-                        <div className="font-medium">{wallet.name}</div>
+                        <div className="font-medium">{trader.label}</div>
                         <Badge variant="outline" className={`text-xs ${
-                          wallet.riskLevel === 'low' ? 'bg-green-100 text-green-800' :
-                          wallet.riskLevel === 'medium' ? 'bg-yellow-100 text-yellow-800' :
+                          trader.riskLevel === 'low' ? 'bg-green-100 text-green-800' :
+                          trader.riskLevel === 'medium' ? 'bg-yellow-100 text-yellow-800' :
                           'bg-red-100 text-red-800'
                         }`}>
-                          {wallet.riskLevel} risk
+                          {trader.riskLevel} risk
                         </Badge>
-                        {wallet.verified && (
-                          <Badge variant="outline" className="bg-green-100 text-green-800 text-xs">
+                        {trader.verified && (
+                          <Badge variant="outline" className="bg-blue-100 text-blue-800 text-xs">
                             <CheckCircle className="h-3 w-3 mr-1" />
                             Verified
                           </Badge>
                         )}
                       </div>
                       <div className="text-xs text-muted-foreground font-mono">
-                        {wallet.address.slice(0, 6)}...{wallet.address.slice(-4)}
+                        {trader.address.slice(0, 6)}...{trader.address.slice(-4)}
                       </div>
                     </div>
-                    <div className="text-sm text-muted-foreground mb-2">{wallet.description}</div>
-                    <div className="flex flex-wrap gap-1 mb-3">
-                      {wallet.tags.map((tag) => (
-                        <Badge key={tag} variant="outline" className="text-xs">
-                          {tag}
-                        </Badge>
-                      ))}
-                    </div>
+                    <div className="text-sm text-muted-foreground mb-2">{trader.description}</div>
                     <div className="grid grid-cols-4 gap-4 text-sm">
                       <div>
                         <div className="text-muted-foreground">Win Rate</div>
-                        <div className="font-medium text-green-600">{wallet.winRate}%</div>
+                        <div className="font-medium text-green-600">{trader.winRate}%</div>
                       </div>
                       <div>
                         <div className="text-muted-foreground">Avg Return</div>
-                        <div className="font-medium text-blue-600">{wallet.avgReturn}%</div>
+                        <div className="font-medium text-blue-600">{trader.avgReturn}%</div>
                       </div>
                       <div>
-                        <div className="text-muted-foreground">Trades</div>
-                        <div className="font-medium">{wallet.trades}</div>
+                        <div className="text-muted-foreground">AUM</div>
+                        <div className="font-medium">${(trader.aum / 1000000).toFixed(1)}M</div>
                       </div>
                       <div>
-                        <div className="text-muted-foreground">Avg Size</div>
-                        <div className="font-medium">${wallet.avgTradeSize}</div>
+                        <div className="text-muted-foreground">Followers</div>
+                        <div className="font-medium">{trader.followers}</div>
                       </div>
                     </div>
                   </div>
@@ -547,321 +508,291 @@ export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) 
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          {/* Copy Mode */}
-          <div className="space-y-2">
-            <label className="text-sm font-medium">Copy Mode</label>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              {[
-                { value: 'fixed_amount', label: 'Fixed Amount', desc: 'Copy exact USD amount' },
-                { value: 'percentage', label: 'Percentage', desc: 'Copy % of target trade' },
-                { value: 'proportional', label: 'Proportional', desc: 'Copy based on portfolio size' }
-              ].map((mode) => (
-                <div
-                  key={mode.value}
-                  className={`p-3 border rounded-lg cursor-pointer transition-colors ${
-                    copyConfig.copyMode === mode.value
-                      ? 'border-primary bg-primary/5'
-                      : 'border-border hover:border-primary/50'
-                  }`}
-                  onClick={() => updateConfig({ copyMode: mode.value as any })}
-                >
-                  <div className="font-medium">{mode.label}</div>
-                  <div className="text-xs text-muted-foreground">{mode.desc}</div>
-                </div>
-              ))}
+          {/* Trade Size Configuration */}
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Trade Size Type</label>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                {[
+                  { value: 'FIXED', label: 'Fixed Amount', desc: 'Copy exact USD amount' },
+                  { value: 'PERCENTAGE', label: 'Percentage', desc: 'Copy % of target trade' },
+                  { value: 'RATIO', label: 'Ratio', desc: 'Copy based on ratio' }
+                ].map((sizeType) => (
+                  <div
+                    key={sizeType.value}
+                    className={`p-3 border rounded-lg cursor-pointer transition-colors ${
+                      config.copySettings.tradeSize.type === sizeType.value
+                        ? 'border-primary bg-primary/5'
+                        : 'border-border hover:border-primary/50'
+                    }`}
+                    onClick={() => updateConfig({ 
+                      copySettings: { 
+                        ...config.copySettings, 
+                        tradeSize: { 
+                          ...config.copySettings.tradeSize, 
+                          type: sizeType.value as any 
+                        }
+                      }
+                    })}
+                  >
+                    <div className="font-medium">{sizeType.label}</div>
+                    <div className="text-xs text-muted-foreground">{sizeType.desc}</div>
+                  </div>
+                ))}
+              </div>
             </div>
-          </div>
 
-          {/* Copy Amount Configuration */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {copyConfig.copyMode === 'fixed_amount' && (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="space-y-2">
                 <label className="text-sm font-medium flex items-center gap-2">
                   <DollarSign className="h-4 w-4 text-green-500" />
-                  Fixed Amount (USD)
+                  {config.copySettings.tradeSize.type === 'FIXED' ? 'Fixed Amount (USD)' : 
+                   config.copySettings.tradeSize.type === 'PERCENTAGE' ? 'Percentage (%)' : 'Ratio'}
                 </label>
                 <input
                   type="number"
-                  value={copyConfig.fixedAmount || 0}
-                  onChange={(e) => updateConfig({ fixedAmount: Number(e.target.value) })}
+                  step={config.copySettings.tradeSize.type === 'PERCENTAGE' ? '0.1' : '1'}
+                  value={config.copySettings.tradeSize.value}
+                  onChange={(e) => updateConfig({ 
+                    copySettings: { 
+                      ...config.copySettings, 
+                      tradeSize: { 
+                        ...config.copySettings.tradeSize, 
+                        value: Number(e.target.value) 
+                      }
+                    }
+                  })}
                   className="w-full p-3 border rounded-md"
-                  placeholder="100"
+                  placeholder={config.copySettings.tradeSize.type === 'FIXED' ? '100' : '5'}
                 />
               </div>
-            )}
-            
-            {copyConfig.copyMode === 'percentage' && (
+
               <div className="space-y-2">
-                <label className="text-sm font-medium">Copy Percentage (%)</label>
+                <label className="text-sm font-medium">Min Trade Value (USD)</label>
+                <input
+                  type="number"
+                  value={config.copySettings.minTradeValue}
+                  onChange={(e) => updateConfig({ 
+                    copySettings: { 
+                      ...config.copySettings, 
+                      minTradeValue: Number(e.target.value) 
+                    }
+                  })}
+                  className="w-full p-3 border rounded-md"
+                  placeholder="10"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Max Trade Value (USD)</label>
+                <input
+                  type="number"
+                  value={config.copySettings.maxTradeValue}
+                  onChange={(e) => updateConfig({ 
+                    copySettings: { 
+                      ...config.copySettings, 
+                      maxTradeValue: Number(e.target.value) 
+                    }
+                  })}
+                  className="w-full p-3 border rounded-md"
+                  placeholder="1000"
+                />
+              </div>
+            </div>
+
+            {/* Timing and Risk Controls */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <label className="text-sm font-medium flex items-center gap-2">
+                  <Clock className="h-4 w-4 text-blue-500" />
+                  Copy Delay (ms)
+                </label>
+                <input
+                  type="number"
+                  value={config.copySettings.copyDelay}
+                  onChange={(e) => updateConfig({ 
+                    copySettings: { 
+                      ...config.copySettings, 
+                      copyDelay: Number(e.target.value) 
+                    }
+                  })}
+                  className="w-full p-3 border rounded-md"
+                  placeholder="1000"
+                />
+                <p className="text-xs text-muted-foreground">Delay before copying trade (min 100ms)</p>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Slippage Tolerance (%)</label>
                 <input
                   type="number"
                   step="0.1"
-                  value={copyConfig.copyPercentage || 0}
-                  onChange={(e) => updateConfig({ copyPercentage: Number(e.target.value) })}
+                  value={config.copySettings.slippageTolerance}
+                  onChange={(e) => updateConfig({ 
+                    copySettings: { 
+                      ...config.copySettings, 
+                      slippageTolerance: Number(e.target.value) 
+                    }
+                  })}
                   className="w-full p-3 border rounded-md"
-                  placeholder="5"
+                  placeholder="0.5"
                 />
               </div>
-            )}
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Min Copy Amount (USD)</label>
-              <input
-                type="number"
-                value={copyConfig.minCopyAmount}
-                onChange={(e) => updateConfig({ minCopyAmount: Number(e.target.value) })}
-                className="w-full p-3 border rounded-md"
-                placeholder="25"
-              />
+      {/* Risk Management */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Shield className="h-5 w-5" />
+            Risk Management
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Stop Loss */}
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={config.riskManagement.stopLoss.enabled}
+                  onChange={(e) => updateConfig({
+                    riskManagement: {
+                      ...config.riskManagement,
+                      stopLoss: {
+                        ...config.riskManagement.stopLoss,
+                        enabled: e.target.checked
+                      }
+                    }
+                  })}
+                  className="rounded"
+                />
+                <label className="text-sm font-medium">Enable Stop Loss</label>
+              </div>
+              {config.riskManagement.stopLoss.enabled && (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Stop Loss Percentage (%)</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={config.riskManagement.stopLoss.percentage}
+                    onChange={(e) => updateConfig({
+                      riskManagement: {
+                        ...config.riskManagement,
+                        stopLoss: {
+                          ...config.riskManagement.stopLoss,
+                          percentage: Number(e.target.value)
+                        }
+                      }
+                    })}
+                    className="w-full p-3 border rounded-md"
+                    placeholder="5"
+                  />
+                </div>
+              )}
             </div>
 
+            {/* Take Profit */}
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={config.riskManagement.takeProfit.enabled}
+                  onChange={(e) => updateConfig({
+                    riskManagement: {
+                      ...config.riskManagement,
+                      takeProfit: {
+                        ...config.riskManagement.takeProfit,
+                        enabled: e.target.checked
+                      }
+                    }
+                  })}
+                  className="rounded"
+                />
+                <label className="text-sm font-medium">Enable Take Profit</label>
+              </div>
+              {config.riskManagement.takeProfit.enabled && (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Take Profit Percentage (%)</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={config.riskManagement.takeProfit.percentage}
+                    onChange={(e) => updateConfig({
+                      riskManagement: {
+                        ...config.riskManagement,
+                        takeProfit: {
+                          ...config.riskManagement.takeProfit,
+                          percentage: Number(e.target.value)
+                        }
+                      }
+                    })}
+                    className="w-full p-3 border rounded-md"
+                    placeholder="20"
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="space-y-2">
-              <label className="text-sm font-medium">Max Copy Amount (USD)</label>
+              <label className="text-sm font-medium">Max Daily Loss (USD)</label>
               <input
                 type="number"
-                value={copyConfig.maxCopyAmount}
-                onChange={(e) => updateConfig({ maxCopyAmount: Number(e.target.value) })}
+                value={config.riskManagement.maxDailyLoss}
+                onChange={(e) => updateConfig({
+                  riskManagement: {
+                    ...config.riskManagement,
+                    maxDailyLoss: Number(e.target.value)
+                  }
+                })}
                 className="w-full p-3 border rounded-md"
                 placeholder="500"
               />
             </div>
-          </div>
-
-          {/* Timing and Risk */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="space-y-2">
-              <label className="text-sm font-medium flex items-center gap-2">
-                <Clock className="h-4 w-4 text-blue-500" />
-                Copy Delay (ms)
-              </label>
-              <input
-                type="number"
-                value={copyConfig.delayMs}
-                onChange={(e) => updateConfig({ delayMs: Number(e.target.value) })}
-                className="w-full p-3 border rounded-md"
-                placeholder="1000"
-              />
-              <p className="text-xs text-muted-foreground">Delay before copying trade</p>
-            </div>
 
             <div className="space-y-2">
-              <label className="text-sm font-medium">Stop Loss (%)</label>
+              <label className="text-sm font-medium">Max Concurrent Trades</label>
               <input
                 type="number"
-                step="0.1"
-                value={copyConfig.stopLoss || ''}
-                onChange={(e) => {
-                  const value = e.target.value;
-                  if (value === '') {
-                    const { stopLoss, ...rest } = copyConfig;
-                    updateConfig(rest);
-                  } else {
-                    updateConfig({ stopLoss: Number(value) });
+                min="1"
+                max="20"
+                value={config.riskManagement.maxConcurrentTrades}
+                onChange={(e) => updateConfig({
+                  riskManagement: {
+                    ...config.riskManagement,
+                    maxConcurrentTrades: Number(e.target.value)
                   }
-                }}
+                })}
                 className="w-full p-3 border rounded-md"
                 placeholder="5"
               />
             </div>
-
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Take Profit (%)</label>
-              <input
-                type="number"
-                step="0.1"
-                value={copyConfig.takeProfit || ''}
-                onChange={(e) => {
-                  const value = e.target.value;
-                  if (value === '') {
-                    const { takeProfit, ...rest } = copyConfig;
-                    updateConfig(rest);
-                  } else {
-                    updateConfig({ takeProfit: Number(value) });
-                  }
-                }}
-                className="w-full p-3 border rounded-md"
-                placeholder="15"
-              />
-            </div>
           </div>
-
-          {/* Advanced Settings Toggle */}
-          <div className="flex items-center justify-between pt-4 border-t">
-            <div className="flex items-center gap-2">
-              <Eye className="h-4 w-4 text-gray-500" />
-              <span className="text-sm font-medium">Advanced Settings</span>
-            </div>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setShowAdvanced(!showAdvanced)}
-            >
-              {showAdvanced ? 'Hide' : 'Show'} Advanced
-            </Button>
-          </div>
-
-          {/* Advanced Settings Panel */}
-          {showAdvanced && (
-            <div className="bg-gray-50 p-4 rounded-lg space-y-4">
-              <h4 className="text-sm font-medium text-gray-700">Advanced Configuration</h4>
-              
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Max Trades per Hour</label>
-                  <input
-                    type="number"
-                    defaultValue={10}
-                    className="w-full p-2 border rounded-md text-sm"
-                    placeholder="10"
-                  />
-                  <p className="text-xs text-muted-foreground">Limit copy frequency</p>
-                </div>
-                
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Slippage Tolerance (%)</label>
-                  <input
-                    type="number"
-                    step="0.1"
-                    defaultValue={1.0}
-                    className="w-full p-2 border rounded-md text-sm"
-                    placeholder="1.0"
-                  />
-                  <p className="text-xs text-muted-foreground">Max acceptable slippage</p>
-                </div>
-                
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Gas Price Limit (Gwei)</label>
-                  <input
-                    type="number"
-                    defaultValue={50}
-                    className="w-full p-2 border rounded-md text-sm"
-                    placeholder="50"
-                  />
-                  <p className="text-xs text-muted-foreground">Skip trades with high gas</p>
-                </div>
-                
-                <div className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    defaultChecked={true}
-                    className="rounded"
-                  />
-                  <label className="text-sm">Enable MEV Protection</label>
-                </div>
-              </div>
-            </div>
-          )}
         </CardContent>
       </Card>
 
-      {/* Trade Filters */}
+      {/* Token Filters */}
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
-            <CardTitle className="flex items-center gap-2">
-              <Filter className="h-5 w-5" />
-              Trade Filters
-            </CardTitle>
-            <Button onClick={addFilter} size="sm">
-              <Plus className="h-4 w-4 mr-2" />
-              Add Filter
-            </Button>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-3">
-            {copyConfig.tradeFilters.map((filter, index) => (
-              <div key={index} className="p-4 border rounded-lg">
-                <div className="grid grid-cols-1 md:grid-cols-5 gap-3 items-center">
-                  <div className="space-y-1">
-                    <label className="text-xs text-muted-foreground">Filter Type</label>
-                    <select
-                      value={filter.type}
-                      onChange={(e) => updateFilter(index, { type: e.target.value as any })}
-                      className="w-full p-2 border rounded text-sm"
-                    >
-                      {FILTER_TYPES.map(type => (
-                        <option key={type.value} value={type.value}>{type.label}</option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div className="space-y-1">
-                    <label className="text-xs text-muted-foreground">Condition</label>
-                    <select
-                      value={filter.condition}
-                      onChange={(e) => updateFilter(index, { condition: e.target.value as any })}
-                      className="w-full p-2 border rounded text-sm"
-                    >
-                      {FILTER_CONDITIONS.filter(cond => cond.types.includes(filter.type)).map(condition => (
-                        <option key={condition.value} value={condition.value}>{condition.label}</option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div className="space-y-1">
-                    <label className="text-xs text-muted-foreground">Value</label>
-                    <input
-                      type={filter.type === 'amount' || filter.type === 'gas' ? 'number' : 'text'}
-                      value={filter.value}
-                      onChange={(e) => updateFilter(index, { 
-                        value: filter.type === 'amount' || filter.type === 'gas' 
-                          ? Number(e.target.value) 
-                          : e.target.value 
-                      })}
-                      className="w-full p-2 border rounded text-sm"
-                      placeholder={filter.type === 'token' ? 'ETH' : '100'}
-                    />
-                  </div>
-
-                  <div className="flex items-center justify-center">
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="checkbox"
-                        checked={filter.enabled}
-                        onChange={(e) => updateFilter(index, { enabled: e.target.checked })}
-                        className="rounded"
-                      />
-                      <span className="text-xs">Enabled</span>
-                    </div>
-                  </div>
-
-                  <div className="flex justify-center">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => removeFilter(index)}
-                    >
-                      <Trash2 className="h-3 w-3" />
-                    </Button>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-
-          {copyConfig.tradeFilters.length === 0 && (
-            <div className="text-center py-8 text-muted-foreground">
-              <Filter className="h-12 w-12 mx-auto mb-4 opacity-50" />
-              <p>No filters configured</p>
-              <p className="text-sm">Add filters to control which trades to copy</p>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Token Lists */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Token Allow/Block Lists</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            <Filter className="h-5 w-5" />
+            Token Filters
+          </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           {/* Whitelisted Tokens */}
-          <div className="space-y-2">
-            <label className="text-sm font-medium">Whitelisted Tokens (Optional)</label>
-            <p className="text-xs text-muted-foreground">Only copy trades for these tokens. Leave empty to allow all tokens.</p>
+          <div className="space-y-3">
+            <div>
+              <label className="text-sm font-medium">Token Whitelist (Optional)</label>
+              <p className="text-xs text-muted-foreground">Only copy trades for these tokens. Leave empty to allow all tokens.</p>
+            </div>
             <div className="flex flex-wrap gap-2 mb-2">
-              {copyConfig.whitelistedTokens.map((token, index) => (
+              {config.filters.tokenWhitelist?.map((token, index) => (
                 <Badge
                   key={index}
                   variant="outline"
@@ -869,13 +800,13 @@ export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) 
                 >
                   {token}
                   <button
-                    onClick={() => removeWhitelistedToken(token)}
+                    onClick={() => removeTokenFromWhitelist(token)}
                     className="ml-1 text-green-600 hover:text-green-800"
                   >
                     ×
                   </button>
                 </Badge>
-              ))}
+              )) || []}
             </div>
             <div className="flex gap-2">
               <input
@@ -884,7 +815,7 @@ export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) 
                 className="flex-1 p-2 border rounded text-sm"
                 onKeyPress={(e) => {
                   if (e.key === 'Enter') {
-                    addWhitelistedToken((e.target as HTMLInputElement).value);
+                    addTokenToWhitelist((e.target as HTMLInputElement).value);
                     (e.target as HTMLInputElement).value = '';
                   }
                 }}
@@ -894,7 +825,7 @@ export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) 
                 onClick={(e) => {
                   const input = (e.target as HTMLElement).parentElement?.querySelector('input');
                   if (input) {
-                    addWhitelistedToken(input.value);
+                    addTokenToWhitelist(input.value);
                     input.value = '';
                   }
                 }}
@@ -905,11 +836,13 @@ export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) 
           </div>
 
           {/* Blacklisted Tokens */}
-          <div className="space-y-2">
-            <label className="text-sm font-medium">Blacklisted Tokens</label>
-            <p className="text-xs text-muted-foreground">Never copy trades for these tokens.</p>
+          <div className="space-y-3">
+            <div>
+              <label className="text-sm font-medium">Token Blacklist</label>
+              <p className="text-xs text-muted-foreground">Never copy trades for these tokens.</p>
+            </div>
             <div className="flex flex-wrap gap-2 mb-2">
-              {copyConfig.blacklistedTokens.map((token, index) => (
+              {config.filters.tokenBlacklist?.map((token, index) => (
                 <Badge
                   key={index}
                   variant="outline"
@@ -917,13 +850,13 @@ export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) 
                 >
                   {token}
                   <button
-                    onClick={() => removeBlacklistedToken(token)}
+                    onClick={() => removeTokenFromBlacklist(token)}
                     className="ml-1 text-red-600 hover:text-red-800"
                   >
                     ×
                   </button>
                 </Badge>
-              ))}
+              )) || []}
             </div>
             <div className="flex gap-2">
               <input
@@ -932,7 +865,7 @@ export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) 
                 className="flex-1 p-2 border rounded text-sm"
                 onKeyPress={(e) => {
                   if (e.key === 'Enter') {
-                    addBlacklistedToken((e.target as HTMLInputElement).value);
+                    addTokenToBlacklist((e.target as HTMLInputElement).value);
                     (e.target as HTMLInputElement).value = '';
                   }
                 }}
@@ -942,13 +875,48 @@ export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) 
                 onClick={(e) => {
                   const input = (e.target as HTMLElement).parentElement?.querySelector('input');
                   if (input) {
-                    addBlacklistedToken(input.value);
+                    addTokenToBlacklist(input.value);
                     input.value = '';
                   }
                 }}
               >
                 Add
               </Button>
+            </div>
+          </div>
+
+          {/* Other Filters */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Min Liquidity (USD)</label>
+              <input
+                type="number"
+                value={config.filters.minLiquidity}
+                onChange={(e) => updateConfig({
+                  filters: {
+                    ...config.filters,
+                    minLiquidity: Number(e.target.value)
+                  }
+                })}
+                className="w-full p-3 border rounded-md"
+                placeholder="10000"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Max Gas Price (Gwei)</label>
+              <input
+                type="number"
+                value={config.filters.maxGasPrice}
+                onChange={(e) => updateConfig({
+                  filters: {
+                    ...config.filters,
+                    maxGasPrice: Number(e.target.value)
+                  }
+                })}
+                className="w-full p-3 border rounded-md"
+                placeholder="50"
+              />
             </div>
           </div>
         </CardContent>
@@ -965,33 +933,33 @@ export function CopyTradingConfig({ config, onChange }: CopyTradingConfigProps) 
         <CardContent>
           <div className="space-y-2">
             <div className="flex items-center gap-2">
-              {copyConfig.targetWallet ? (
+              {config.targetWallet.address && walletValidation.isValid ? (
                 <CheckCircle className="h-4 w-4 text-green-500" />
               ) : (
                 <AlertCircle className="h-4 w-4 text-red-500" />
               )}
               <span className="text-sm">
-                Target wallet: {copyConfig.targetWallet ? 'Configured' : 'Required'}
+                Target trader: {config.targetWallet.address && walletValidation.isValid ? 'Valid address' : 'Required'}
               </span>
             </div>
             <div className="flex items-center gap-2">
-              {copyConfig.maxCopyAmount > copyConfig.minCopyAmount ? (
+              {config.copySettings.maxTradeValue > config.copySettings.minTradeValue ? (
                 <CheckCircle className="h-4 w-4 text-green-500" />
               ) : (
                 <AlertCircle className="h-4 w-4 text-red-500" />
               )}
               <span className="text-sm">
-                Copy amounts: {copyConfig.maxCopyAmount > copyConfig.minCopyAmount ? 'Valid' : 'Max must be greater than min'}
+                Trade limits: {config.copySettings.maxTradeValue > config.copySettings.minTradeValue ? 'Valid range' : 'Max must be greater than min'}
               </span>
             </div>
             <div className="flex items-center gap-2">
-              {config.wallet ? (
+              {config.walletId ? (
                 <CheckCircle className="h-4 w-4 text-green-500" />
               ) : (
                 <AlertCircle className="h-4 w-4 text-yellow-500" />
               )}
               <span className="text-sm">
-                Your wallet: {config.wallet ? 'Configured' : 'Recommended'}
+                Your wallet: {config.walletId ? 'Configured' : 'Recommended'}
               </span>
             </div>
           </div>

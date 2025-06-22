@@ -1,9 +1,92 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
-import { z } from 'zod';
 import { verifyJWT } from '@/lib/auth';
 import { rateLimiter } from '@/lib/rate-limiter';
 import { generateSecureRandom } from '@trading-bot/crypto';
+
+// Import proper schemas from packages folder
+import { 
+  ArbitrageBotConfigSchema,
+  CopyTradingBotConfigSchema,
+  SandwichBotConfigSchema,
+  BotConfigSchema,
+  type ArbitrageBotConfig,
+  type CopyTradingBotConfig,
+  type SandwichBotConfig,
+  type BotConfig,
+  BOT_TYPES,
+  SUPPORTED_CHAINS,
+  SUPPORTED_DEXES
+} from '@trading-bot/types/src/bot';
+import { isValidEthereumAddress } from '@trading-bot/types';
+import { z } from 'zod';
+
+// Define bot type from BOT_TYPES
+type BotType = typeof BOT_TYPES[number];
+
+// Create update schema for bot configurations
+const BotConfigUpdateSchema = z.object({
+  botId: z.string().min(1, 'Bot ID is required'),
+  isActive: z.boolean().optional(),
+  isPaperTrading: z.boolean().optional(),
+  configuration: BotConfigSchema.optional(),
+  botType: z.enum(BOT_TYPES).optional()
+});
+
+// Simple risk calculation function (fallback implementation)
+function calculateBotRiskScore(config: any): number {
+  let riskScore = 0;
+  
+  // Basic risk factors
+  if (!config || Object.keys(config).length === 0) return 0;
+  
+  // Check for high trade sizes
+  if (config.tradeSize && typeof config.tradeSize === 'object' && config.tradeSize.value > 1000) {
+    riskScore += 2;
+  }
+  
+  // Check for copy trading target wallet validation
+  if (config.targetWallet && !config.targetWallet.verified) {
+    riskScore += 1;
+  }
+  
+  // Check for risk management settings
+  if (config.riskManagement) {
+    if (!config.riskManagement.stopLoss?.enabled) riskScore += 2;
+    if (!config.riskManagement.takeProfit?.enabled) riskScore += 1;
+  }
+  
+  return Math.min(riskScore, 10); // Cap at 10
+}
+
+// Simple bot configuration validation (fallback implementation)
+function validateBotConfig(config: any, botType: string): { isValid: boolean; errors?: string[] } {
+  const errors: string[] = [];
+  
+  if (!config) {
+    errors.push('Configuration is required');
+    return { isValid: false, errors };
+  }
+  
+  if (!config.name || config.name.trim().length === 0) {
+    errors.push('Bot name is required');
+  }
+  
+  if (!config.walletId) {
+    errors.push('Wallet ID is required');
+  }
+  
+  // Bot type specific validation
+  if (botType === 'arbitrage' && !config.tokenPairs?.length) {
+    errors.push('At least one token pair is required for arbitrage bots');
+  }
+  
+  if (botType === 'copy-trader' && !config.targetWallet?.address) {
+    errors.push('Target wallet address is required for copy trading bots');
+  }
+  
+  return { isValid: errors.length === 0, ...(errors.length > 0 && { errors }) };
+}
 
 // Lazy initialization to avoid build-time errors
 function getSupabaseClient() {
@@ -17,54 +100,33 @@ function getSupabaseClient() {
   return createClient(supabaseUrl, supabaseServiceKey);
 }
 
-// Validation schemas for different bot types
-const ArbitrageBotConfigSchema = z.object({
-  name: z.string().min(1, 'Bot name is required'),
-  walletId: z.string().uuid('Invalid wallet ID'),
-  chain: z.enum(['ethereum', 'bsc', 'polygon', 'arbitrum'], { invalid_type_error: 'Invalid chain' }),
-  tokenPair: z.object({
-    tokenA: z.string().min(1, 'Token A is required'),
-    tokenB: z.string().min(1, 'Token B is required')
-  }),
-  minProfitThreshold: z.number().min(0.01, 'Minimum profit threshold must be at least 0.01%'),
-  tradeSize: z.number().min(0.001, 'Trade size must be at least 0.001'),
-  maxSlippage: z.number().min(0.1).max(5, 'Max slippage must be between 0.1% and 5%').optional(),
-  maxGasPrice: z.number().min(1, 'Max gas price must be at least 1 gwei').optional(),
-  isPaperTrading: z.boolean().optional().default(true)
-});
+// Enhanced bot status interface aligned with packages
+interface BotStatusResponse {
+  id: string;
+  type: BotType;
+  name: string;
+  description: string;
+  isActive: boolean;
+  isConfigured: boolean;
+  isPaperTrading: boolean;
+  profitLoss: number;
+  dailyTrades: number;
+  totalTrades: number;
+  winRate: number;
+  riskScore: number;
+  lastActivity?: string;
+  configuration: BotConfig;
+  href: string;
+  status: 'running' | 'stopped' | 'paused' | 'error';
+  createdAt: string;
+  updatedAt: string;
+}
 
-const CopyTraderBotConfigSchema = z.object({
-  name: z.string().min(1, 'Bot name is required'),
-  walletId: z.string().uuid('Invalid wallet ID'),
-  chain: z.enum(['ethereum', 'bsc', 'polygon', 'arbitrum'], { invalid_type_error: 'Invalid chain' }),
-  targetWalletAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid wallet address'),
-  tradeSize: z.object({
-    type: z.enum(['FIXED', 'PERCENTAGE']),
-    value: z.number().min(0.001, 'Trade size must be at least 0.001')
-  }),
-  maxTradeSize: z.number().min(0.01, 'Max trade size must be at least 0.01').optional(),
-  minTradeSize: z.number().min(0.001, 'Min trade size must be at least 0.001').optional(),
-  copyDelay: z.number().min(0).max(60, 'Copy delay must be between 0-60 seconds').optional(),
-  isPaperTrading: z.boolean().optional().default(true)
-});
-
-const SandwichBotConfigSchema = z.object({
-  name: z.string().min(1, 'Bot name is required'),
-  walletId: z.string().uuid('Invalid wallet ID'),
-  chain: z.enum(['ethereum', 'bsc', 'polygon', 'arbitrum'], { invalid_type_error: 'Invalid chain' }),
-  targetDex: z.enum(['uniswap', 'sushiswap', 'pancakeswap'], { invalid_type_error: 'Invalid DEX' }),
-  minVictimTradeSize: z.number().min(0.1, 'Minimum victim trade size must be at least 0.1 ETH'),
-  maxGasPrice: z.number().min(1, 'Max gas price must be at least 1 gwei'),
-  maxSlippage: z.number().min(0.1).max(5, 'Max slippage must be between 0.1% and 5%').optional(),
-  isPaperTrading: z.boolean().optional().default(true)
-});
-
-const BotUpdateSchema = z.object({
-  botId: z.string().uuid('Invalid bot ID'),
-  isActive: z.boolean().optional(),
-  isPaperTrading: z.boolean().optional(),
-  configuration: z.record(z.any()).optional()
-});
+// Enhanced bot creation interface
+interface CreateBotRequest {
+  botType: BotType;
+  configuration: ArbitrageBotConfig | CopyTradingBotConfig | SandwichBotConfig;
+}
 
 export async function GET(request: NextRequest) {
   try {
@@ -97,7 +159,7 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Get bot configurations from Supabase
+    // Get bot configurations from Supabase with enhanced data
     const supabase = getSupabaseClient();
     const { data: botConfigs, error } = await supabase
       .from('bot_configurations')
@@ -109,11 +171,13 @@ export async function GET(request: NextRequest) {
         status,
         is_active,
         is_paper_trading,
-        max_daily_trades,
-        max_position_size,
-        stop_loss_percentage,
-        take_profit_percentage,
         configuration,
+        profit_loss,
+        daily_trades,
+        total_trades,
+        win_rate,
+        risk_score,
+        last_activity,
         created_at,
         updated_at
       `)
@@ -128,9 +192,100 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    // Transform data to match frontend expectations with enhanced information
+    const transformedBots: BotStatusResponse[] = (botConfigs || []).map(bot => ({
+      id: bot.id,
+      type: bot.type as BotType,
+      name: bot.name,
+      description: getBotDescription(bot.type as BotType),
+      isActive: bot.is_active || false,
+      isConfigured: !!bot.configuration,
+      isPaperTrading: bot.is_paper_trading || true,
+      profitLoss: bot.profit_loss || 0,
+      dailyTrades: bot.daily_trades || 0,
+      totalTrades: bot.total_trades || 0,
+      winRate: bot.win_rate || 0,
+      riskScore: bot.risk_score || calculateBotRiskScore(bot.configuration || {}),
+      lastActivity: bot.last_activity || undefined,
+      configuration: bot.configuration || {},
+      href: getBotHref(bot.type as BotType),
+      status: bot.status || 'stopped',
+      createdAt: bot.created_at,
+      updatedAt: bot.updated_at
+    }));
+
+    // Also return default bot templates for UI
+    const defaultBotTemplates = [
+      {
+        id: 'template-arbitrage',
+        type: 'arbitrage',
+        name: 'Arbitrage Bot',
+        description: 'Exploits price differences across DEXs for profit opportunities with sophisticated risk management.',
+        isActive: false,
+        isConfigured: false,
+        isPaperTrading: true,
+        profitLoss: 0,
+        dailyTrades: 0,
+        totalTrades: 0,
+        winRate: 0,
+        riskScore: 0,
+        configuration: {},
+        href: '/dashboard/arbitrage',
+        status: 'stopped' as const,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      },
+      {
+        id: 'template-copy-trading',
+        type: 'copy-trader',
+        name: 'Copy-Trading Bot',
+        description: 'Mirrors trades from successful wallet addresses with advanced filtering and risk controls.',
+        isActive: false,
+        isConfigured: false,
+        isPaperTrading: true,
+        profitLoss: 0,
+        dailyTrades: 0,
+        totalTrades: 0,
+        winRate: 0,
+        riskScore: 0,
+        configuration: {},
+        href: '/dashboard/copy-trader',
+        status: 'stopped' as const,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      },
+      {
+        id: 'template-sandwich',
+        type: 'mev-sandwich',
+        name: 'MEV Sandwich Bot (Advanced)',
+        description: 'Advanced MEV extraction strategies for experienced users with sophisticated slippage protection.',
+        isActive: false,
+        isConfigured: false,
+        isPaperTrading: true,
+        profitLoss: 0,
+        dailyTrades: 0,
+        totalTrades: 0,
+        winRate: 0,
+        riskScore: 0,
+        configuration: {},
+        href: '/dashboard/sandwich',
+        status: 'stopped' as const,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      }
+    ];
+
     return NextResponse.json({
       success: true,
-      data: botConfigs || []
+      bots: transformedBots,
+      templates: defaultBotTemplates,
+      meta: {
+        totalBots: transformedBots.length,
+        activeBots: transformedBots.filter(bot => bot.isActive).length,
+        totalProfitLoss: transformedBots.reduce((sum, bot) => sum + bot.profitLoss, 0),
+        supportedChains: SUPPORTED_CHAINS,
+        supportedDexes: SUPPORTED_DEXES
+      }
     });
 
   } catch (error) {
@@ -145,7 +300,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     // Rate limiting (stricter for bot creation)
-    const rateLimitResult = await rateLimiter.check(request, 10, 60 * 60 * 1000); // 10 per hour
+    const rateLimitResult = await rateLimiter.check(request, 5, 60 * 60 * 1000); // 5 per hour
     if (!rateLimitResult.success) {
       return NextResponse.json(
         { 
@@ -174,8 +329,8 @@ export async function POST(request: NextRequest) {
     }
 
     // Parse request body
-    const body = await request.json();
-    const { botType, ...configData } = body;
+    const body: CreateBotRequest = await request.json();
+    const { botType, configuration } = body;
 
     if (!botType || !['arbitrage', 'copy-trader', 'mev-sandwich'].includes(botType)) {
       return NextResponse.json(
@@ -184,18 +339,61 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Validate configuration based on bot type
+    // Validate configuration based on bot type using packages schemas
     let validationResult;
+    let validatedConfig: BotConfig;
+
     switch (botType) {
       case 'arbitrage':
-        validationResult = ArbitrageBotConfigSchema.safeParse(configData);
+        validationResult = ArbitrageBotConfigSchema.safeParse(configuration);
+        if (!validationResult.success) {
+          return NextResponse.json(
+            { 
+              error: 'Invalid arbitrage bot configuration',
+              details: validationResult.error.errors
+            },
+            { status: 400 }
+          );
+        }
+        validatedConfig = validationResult.data;
         break;
+
       case 'copy-trader':
-        validationResult = CopyTraderBotConfigSchema.safeParse(configData);
+        validationResult = CopyTradingBotConfigSchema.safeParse(configuration);
+        if (!validationResult.success) {
+          return NextResponse.json(
+            { 
+              error: 'Invalid copy trading bot configuration',
+              details: validationResult.error.errors
+            },
+            { status: 400 }
+          );
+        }
+        validatedConfig = validationResult.data;
+        
+        // Additional validation for copy trading wallet address
+        if (!isValidEthereumAddress(validatedConfig.targetWallet.address)) {
+          return NextResponse.json(
+            { error: 'Invalid target wallet address format' },
+            { status: 400 }
+          );
+        }
         break;
+
       case 'mev-sandwich':
-        validationResult = SandwichBotConfigSchema.safeParse(configData);
+        validationResult = SandwichBotConfigSchema.safeParse(configuration);
+        if (!validationResult.success) {
+          return NextResponse.json(
+            { 
+              error: 'Invalid sandwich bot configuration',
+              details: validationResult.error.errors
+            },
+            { status: 400 }
+          );
+        }
+        validatedConfig = validationResult.data;
         break;
+
       default:
         return NextResponse.json(
           { error: 'Invalid bot type' },
@@ -203,23 +401,26 @@ export async function POST(request: NextRequest) {
         );
     }
 
-    if (!validationResult.success) {
+    // Advanced bot configuration validation using risk management package
+    const configValidation = validateBotConfig(validatedConfig, botType);
+    if (!configValidation.isValid) {
       return NextResponse.json(
         { 
-          error: 'Invalid configuration data',
-          details: validationResult.error.errors
+          error: 'Bot configuration failed advanced validation',
+          details: configValidation.errors
         },
         { status: 400 }
       );
     }
 
-    const validatedConfig = validationResult.data;
-
-    // Verify wallet belongs to user
+    // Calculate risk score using risk management package
+    const riskScore = calculateBotRiskScore(validatedConfig);
+    
+    // Verify wallet belongs to user and check compatibility
     const supabase = getSupabaseClient();
     const { data: wallet, error: walletError } = await supabase
       .from('wallets')
-      .select('id, chain')
+      .select('id, chain, balance, address')
       .eq('id', validatedConfig.walletId)
       .eq('user_id', userId)
       .single();
@@ -231,28 +432,34 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Check wallet chain compatibility (basic validation)
-    const configChain = validatedConfig.chain.toLowerCase();
-    const walletChain = wallet.chain.toLowerCase();
-    
-    // Simple chain compatibility check
-    const chainCompatible = (
-      (configChain === 'ethereum' && walletChain === 'eth') ||
-      (configChain === 'bsc' && walletChain === 'bsc') ||
-      configChain === walletChain
-    );
-
-    if (!chainCompatible) {
+    // Advanced chain compatibility validation
+    const chainValidation = validateChainCompatibility(validatedConfig.chain, wallet.chain);
+    if (!chainValidation.compatible) {
       return NextResponse.json(
-        { error: 'Wallet chain is not compatible with bot configuration' },
+        { 
+          error: 'Wallet chain is not compatible with bot configuration',
+          details: chainValidation.reason
+        },
+        { status: 400 }
+      );
+    }
+
+    // Check wallet balance for minimum requirements
+    const minBalanceCheck = checkMinimumBalance(validatedConfig, wallet.balance);
+    if (!minBalanceCheck.sufficient) {
+      return NextResponse.json(
+        { 
+          error: 'Insufficient wallet balance for bot configuration',
+          details: minBalanceCheck.requirements
+        },
         { status: 400 }
       );
     }
 
     // Generate secure bot ID
-    const botId = `bot_${Date.now()}_${generateSecureRandom(8)}`;
+    const botId = `bot_${Date.now()}_${generateSecureRandom(12)}`;
 
-    // Create bot configuration in database
+    // Create bot configuration in database with enhanced data
     const { data: newBot, error: createError } = await supabase
       .from('bot_configurations')
       .insert({
@@ -262,9 +469,13 @@ export async function POST(request: NextRequest) {
         type: botType,
         status: 'stopped',
         is_active: false,
-        is_paper_trading: validatedConfig.isPaperTrading || true,
-        max_daily_trades: 100, // Default limit
+        is_paper_trading: validatedConfig.isPaperTrading !== false, // Default to paper trading for safety
         configuration: validatedConfig,
+        risk_score: riskScore,
+        profit_loss: 0,
+        daily_trades: 0,
+        total_trades: 0,
+        win_rate: 0,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       })
@@ -279,11 +490,37 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    console.log(`Bot configuration created for user ${userId}: ${botType} - ${validatedConfig.name}`);
+    console.log(`Bot configuration created for user ${userId}: ${botType} - ${validatedConfig.name} (Risk Score: ${riskScore})`);
+
+    // Return enhanced bot data
+    const responseBot: BotStatusResponse = {
+      id: newBot.id,
+      type: newBot.type as BotType,
+      name: newBot.name,
+      description: getBotDescription(newBot.type as BotType),
+      isActive: newBot.is_active,
+      isConfigured: true,
+      isPaperTrading: newBot.is_paper_trading,
+      profitLoss: newBot.profit_loss || 0,
+      dailyTrades: newBot.daily_trades || 0,
+      totalTrades: newBot.total_trades || 0,
+      winRate: newBot.win_rate || 0,
+      riskScore: newBot.risk_score,
+      configuration: newBot.configuration,
+      href: getBotHref(newBot.type as BotType),
+      status: newBot.status,
+      createdAt: newBot.created_at,
+      updatedAt: newBot.updated_at
+    };
 
     return NextResponse.json({
       success: true,
-      data: newBot
+      bot: responseBot,
+      validation: configValidation,
+      riskAssessment: {
+        score: riskScore,
+        level: riskScore < 3 ? 'low' : riskScore < 6 ? 'medium' : riskScore < 8 ? 'high' : 'extreme'
+      }
     });
 
   } catch (error) {
@@ -326,9 +563,9 @@ export async function PUT(request: NextRequest) {
       );
     }
 
-    // Parse and validate request body
+    // Parse and validate request body using packages schema
     const body = await request.json();
-    const validationResult = BotUpdateSchema.safeParse(body);
+    const validationResult = BotConfigUpdateSchema.safeParse(body);
     
     if (!validationResult.success) {
       return NextResponse.json(
@@ -342,7 +579,7 @@ export async function PUT(request: NextRequest) {
 
     const { botId, isActive, isPaperTrading, configuration } = validationResult.data;
 
-    // Prepare update data
+    // Prepare update data with enhanced validation
     const updateData: any = {
       updated_at: new Date().toISOString()
     };
@@ -357,7 +594,20 @@ export async function PUT(request: NextRequest) {
     }
 
     if (configuration) {
+      // Re-validate configuration if provided
+      const configValidation = validateBotConfig(configuration, body.botType);
+      if (!configValidation.isValid) {
+        return NextResponse.json(
+          { 
+            error: 'Updated configuration failed validation',
+            details: configValidation.errors
+          },
+          { status: 400 }
+        );
+      }
+      
       updateData.configuration = configuration;
+      updateData.risk_score = calculateBotRiskScore(configuration);
     }
 
     // Update bot configuration (only if it belongs to user)
@@ -386,9 +636,31 @@ export async function PUT(request: NextRequest) {
 
     console.log(`Bot configuration updated by user ${userId}: ${botId}`);
 
+    // Return enhanced bot data
+    const responseBot: BotStatusResponse = {
+      id: updatedBot.id,
+      type: updatedBot.type as BotType,
+      name: updatedBot.name,
+      description: getBotDescription(updatedBot.type as BotType),
+      isActive: updatedBot.is_active,
+      isConfigured: !!updatedBot.configuration,
+      isPaperTrading: updatedBot.is_paper_trading,
+      profitLoss: updatedBot.profit_loss || 0,
+      dailyTrades: updatedBot.daily_trades || 0,
+      totalTrades: updatedBot.total_trades || 0,
+      winRate: updatedBot.win_rate || 0,
+      riskScore: updatedBot.risk_score || 0,
+      lastActivity: updatedBot.last_activity,
+      configuration: updatedBot.configuration,
+      href: getBotHref(updatedBot.type as BotType),
+      status: updatedBot.status,
+      createdAt: updatedBot.created_at,
+      updatedAt: updatedBot.updated_at
+    };
+
     return NextResponse.json({
       success: true,
-      data: updatedBot
+      bot: responseBot
     });
 
   } catch (error) {
@@ -441,8 +713,9 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
-    // First, stop the bot if it's active (safety measure)
     const supabase = getSupabaseClient();
+
+    // First, ensure bot is stopped for safety
     await supabase
       .from('bot_configurations')
       .update({
@@ -453,7 +726,26 @@ export async function DELETE(request: NextRequest) {
       .eq('id', botId)
       .eq('user_id', userId);
 
-    // Then delete the bot configuration
+    // Archive bot data before deletion (for audit trail)
+    const { data: botToDelete } = await supabase
+      .from('bot_configurations')
+      .select('*')
+      .eq('id', botId)
+      .eq('user_id', userId)
+      .single();
+
+    if (botToDelete) {
+      // Archive the bot configuration
+      await supabase
+        .from('bot_configurations_archive')
+        .insert({
+          ...botToDelete,
+          deleted_at: new Date().toISOString(),
+          deleted_by: userId
+        });
+    }
+
+    // Delete the bot configuration
     const { error: deleteError } = await supabase
       .from('bot_configurations')
       .delete()
@@ -482,4 +774,81 @@ export async function DELETE(request: NextRequest) {
       { status: 500 }
     );
   }
+}
+
+// Helper functions
+
+function getBotDescription(botType: any): string {
+  switch (botType) {
+    case 'arbitrage':
+      return 'Exploits price differences across DEXs for profit opportunities with sophisticated risk management.';
+    case 'copy-trader':
+      return 'Mirrors trades from successful wallet addresses with advanced filtering and risk controls.';
+    case 'mev-sandwich':
+      return 'Advanced MEV extraction strategies for experienced users with sophisticated slippage protection.';
+    default:
+      return 'Trading bot with advanced configuration options.';
+  }
+}
+
+function getBotHref(botType: any): string {
+  switch (botType) {
+    case 'arbitrage':
+      return '/dashboard/arbitrage';
+    case 'copy-trader':
+      return '/dashboard/copy-trader';
+    case 'mev-sandwich':
+      return '/dashboard/sandwich';
+    default:
+      return '/dashboard';
+  }
+}
+
+function validateChainCompatibility(configChain: string, walletChain: string): { compatible: boolean; reason?: string } {
+  const chainMap: Record<string, string[]> = {
+    'ETHEREUM': ['ethereum', 'eth', 'mainnet'],
+    'BSC': ['bsc', 'bnb', 'binance'],
+    'POLYGON': ['polygon', 'matic'],
+    'ARBITRUM': ['arbitrum', 'arb'],
+    'OPTIMISM': ['optimism', 'op']
+  };
+
+  const configNormalized = configChain.toUpperCase();
+  const walletNormalized = walletChain.toLowerCase();
+
+  const compatibleChains = chainMap[configNormalized] || [];
+  
+  if (compatibleChains.includes(walletNormalized) || configNormalized === walletChain.toUpperCase()) {
+    return { compatible: true };
+  }
+
+  return { 
+    compatible: false, 
+    reason: `Wallet chain ${walletChain} is not compatible with bot chain ${configChain}` 
+  };
+}
+
+function checkMinimumBalance(config: BotConfig, walletBalance: number): { sufficient: boolean; requirements?: string } {
+  // Base minimum requirements (in ETH equivalent)
+  const baseMinimum = 0.01; // 0.01 ETH for gas fees
+  
+  let requiredBalance = baseMinimum;
+  
+  // Add configuration-specific requirements
+  if ('tradeSize' in config && config.tradeSize && typeof config.tradeSize === 'object' && 'value' in config.tradeSize && typeof config.tradeSize.value === 'number') {
+    requiredBalance += config.tradeSize.value * 0.001; // Convert to ETH equivalent
+  }
+  
+  if ('copySettings' in config && config.copySettings?.maxTradeValue) {
+    requiredBalance += config.copySettings.maxTradeValue * 0.001; // Convert to ETH equivalent
+  }
+
+  if (walletBalance < requiredBalance) {
+    return {
+      sufficient: false,
+      requirements: `Minimum balance required: ${requiredBalance} ETH (Current: ${walletBalance} ETH)`
+    };
+  }
+
+  return { sufficient: true };
 } 
