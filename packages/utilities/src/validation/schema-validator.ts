@@ -11,7 +11,7 @@ import type {
   JSONSchema,
   SchemaValidationError,
   SchemaValidationOptions
-} from '../../../types/src/utilities/validation';
+} from '@trading-bot/types/src/utilities/validation/validation';
 
 /**
  * Validate JSON data against schema

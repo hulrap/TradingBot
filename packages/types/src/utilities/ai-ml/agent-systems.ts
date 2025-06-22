@@ -18,9 +18,9 @@
  * @package @trading-bot/types
  */
 
-import type { SupportedChain } from '../blockchain/chain';
-import type { Address, TokenInfo } from '../blockchain/addresses';
-import type { TechnicalIndicatorType, SignalDirection, SignalStrength } from '../analysis/technical-indicators';
+import type { SupportedChain } from '../../blockchain/chain';
+import type { Address, TokenInfo } from '../../blockchain/addresses';
+import type { TechnicalIndicatorType, SignalDirection, SignalStrength } from '../../analysis/technical-indicators';
 
 // ========================================
 // CORE AI/ML TYPES
@@ -872,6 +872,192 @@ interface ModelLifecycle {
 }
 
 // ========================================
+// MODEL MANAGER TYPES
+// ========================================
+
+/**
+ * Model metadata for lifecycle management.
+ */
+interface ModelMetadata {
+  readonly id: string;
+  readonly name: string;
+  readonly version: string;
+  readonly type: ModelType;
+  readonly filePath: string;
+  readonly size: number;
+  readonly createdAt: number;
+  lastUsed: number;
+  usageCount: number;
+  readonly checksum: string;
+  readonly tags: readonly string[];
+}
+
+/**
+ * Model instance with runtime information.
+ */
+interface ModelInstance {
+  readonly id: string;
+  readonly metadata: ModelMetadata;
+  readonly model: ModelWrapper;
+  status: ModelStatus;
+  readonly memoryUsage: number;
+  readonly loadTime: number;
+  lastAccessed: number;
+  errorCount: number;
+  readonly performance: ModelPerformanceMetrics;
+}
+
+/**
+ * Model lifecycle status.
+ */
+type ModelStatus = 'loading' | 'ready' | 'unloading' | 'error';
+
+/**
+ * Model performance monitoring metrics.
+ */
+interface ModelPerformanceMetrics {
+  readonly inferenceTime: {
+    average: number;
+    readonly p95: number;
+    readonly p99: number;
+    min: number;
+    max: number;
+  };
+  accuracy: number;
+  throughput: number;
+  errorRate: number;
+  memoryEfficiency: number;
+  cpuUtilization: number;
+  driftScore: number;
+}
+
+/**
+ * Model loading configuration options.
+ */
+interface ModelLoadOptions {
+  readonly warmup?: boolean;
+  readonly precompile?: boolean;
+  readonly memoryLimit?: number;
+  readonly priority?: ModelPriority;
+  readonly timeout?: number;
+  readonly retries?: number;
+}
+
+/**
+ * Model loading priority levels.
+ */
+type ModelPriority = 'low' | 'normal' | 'high';
+
+/**
+ * Model manager system configuration.
+ */
+interface ModelManagerConfig {
+  readonly maxConcurrentModels: number;
+  readonly maxMemoryUsage: number;
+  readonly defaultTimeout: number;
+  readonly enableMonitoring: boolean;
+  readonly enableCaching: boolean;
+  readonly cleanupInterval: number;
+  readonly performanceThresholds: ModelPerformanceThresholds;
+  readonly autoUnload: ModelAutoUnloadConfig;
+}
+
+/**
+ * Performance threshold configuration.
+ */
+interface ModelPerformanceThresholds {
+  readonly maxInferenceTime: number;
+  readonly minAccuracy: number;
+  readonly maxErrorRate: number;
+  readonly maxDriftScore: number;
+}
+
+/**
+ * Auto-unload configuration for memory management.
+ */
+interface ModelAutoUnloadConfig {
+  readonly enabled: boolean;
+  readonly idleTime: number;
+  readonly memoryThreshold: number;
+}
+
+/**
+ * Model wrapper interface for different frameworks.
+ */
+interface ModelWrapper {
+  readonly type: ModelType;
+  readonly loadTime: number;
+  readonly modelPath: string;
+  readonly size: number;
+  readonly config: Record<string, unknown>;
+  readonly predict: (input: unknown) => Promise<ModelPredictionResult>;
+  readonly dispose: () => Promise<void>;
+}
+
+/**
+ * Model prediction result structure.
+ */
+interface ModelPredictionResult {
+  readonly predictions: unknown;
+  readonly confidence: number;
+}
+
+/**
+ * Comprehensive prediction result with metadata.
+ */
+interface PredictionResult<T = unknown> {
+  readonly predictions: T;
+  readonly confidence: number;
+  readonly modelId: string;
+  readonly timestamp: number;
+  readonly processingTime: number;
+}
+
+/**
+ * Model resource usage metrics.
+ */
+interface ModelResourceUsage {
+  readonly totalMemory: number;
+  readonly modelCount: number;
+  readonly cpuUsage: number;
+  readonly loadedModels: readonly string[];
+  readonly averageInferenceTime: number;
+}
+
+/**
+ * Model health check result.
+ */
+interface ModelHealthCheck {
+  readonly healthy: readonly string[];
+  readonly unhealthy: readonly string[];
+  readonly issues: readonly ModelHealthIssue[];
+}
+
+/**
+ * Model health issue details.
+ */
+interface ModelHealthIssue {
+  readonly modelId: string;
+  readonly issue: string;
+  readonly severity: HealthIssueSeverity;
+}
+
+/**
+ * Health issue severity levels.
+ */
+type HealthIssueSeverity = 'low' | 'medium' | 'high';
+
+/**
+ * Model validation configuration.
+ */
+interface ModelValidationConfig {
+  readonly validateChecksum: boolean;
+  readonly enforceVersioning: boolean;
+  readonly requireMetadata: boolean;
+  readonly maxFileSize: number;
+}
+
+// ========================================
 // EXPORTS
 // ========================================
 
@@ -886,5 +1072,22 @@ export type {
   LLMConfig,
   LLMQuery,
   LLMResponse,
-  ModelLifecycle
+  ModelLifecycle,
+  ModelMetadata,
+  ModelInstance,
+  ModelStatus,
+  ModelPerformanceMetrics,
+  ModelLoadOptions,
+  ModelPriority,
+  ModelManagerConfig,
+  ModelPerformanceThresholds,
+  ModelAutoUnloadConfig,
+  ModelWrapper,
+  ModelPredictionResult,
+  PredictionResult,
+  ModelResourceUsage,
+  ModelHealthCheck,
+  ModelHealthIssue,
+  HealthIssueSeverity,
+  ModelValidationConfig
 }; 

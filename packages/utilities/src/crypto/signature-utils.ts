@@ -23,7 +23,7 @@ import type {
   ExtendedSignatureResult,
   SignatureVerificationResult,
   KeyDerivationOptions
-} from '../../../types/src/utilities/crypto';
+} from '@trading-bot/types/src/utilities/crypto/crypto';
 
 // ==========================================
 // CORE SIGNATURE FUNCTIONS

@@ -73,4 +73,4 @@ export type {
   FieldValidationResult,
   TypeValidationResult,
   RuleValidationResult
-} from '../../../types/src/utilities/validation'; 
+} from '@trading-bot/types/src/utilities/validation/validation'; 

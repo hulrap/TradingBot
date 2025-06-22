@@ -36,4 +36,4 @@ export type {
   RateLimiterState,
   TokenBucketState,
   SlidingWindowState
-} from '../../../types/src/utilities/rate-limiting'; 
+} from '@trading-bot/types/src/utilities/rate-limiting/rate-limiting'; 

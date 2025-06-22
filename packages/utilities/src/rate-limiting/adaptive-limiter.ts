@@ -6,7 +6,7 @@
  * based on system performance, error rates, latency, and load conditions.
 . */
 
-import type { RateLimitResult, AdaptiveLimiterConfig, RequestMetrics, AdaptiveMetrics, RateLimiterState } from '../../../types/src/utilities/rate-limiting';
+import type { RateLimitResult, AdaptiveLimiterConfig, RequestMetrics, AdaptiveMetrics, RateLimiterState } from '@trading-bot/types/src/utilities/rate-limiting/rate-limiting';
 
 /**
  * Adaptive rate limiter with dynamic limit adjustment

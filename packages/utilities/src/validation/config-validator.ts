@@ -15,7 +15,7 @@ import type {
   FieldValidationResult,
   TypeValidationResult,
   RuleValidationResult
-} from '../../../types/src/utilities/validation';
+} from '@trading-bot/types/src/utilities/validation/validation';
 
 /**
  * Validate configuration object against schema

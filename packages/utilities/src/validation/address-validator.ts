@@ -12,7 +12,7 @@ import type {
   UtilitySupportedChain as SupportedChain, 
   UtilityAddressValidationResult as AddressValidationResult,
   BatchAddressValidationResult
-} from '../../../types/src/utilities/validation';
+} from '@trading-bot/types/src/utilities/validation/validation';
 
 /**
  * Address validation patterns with comprehensive regex patterns

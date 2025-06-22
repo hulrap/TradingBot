@@ -6,7 +6,7 @@
  * burst capacity, high-precision timing, and comprehensive validation.
 . *////
 
-import type { TokenBucketConfig, RateLimitResult, TokenBucketState } from '../../../types/src/utilities/rate-limiting';
+import type { TokenBucketConfig, RateLimitResult, TokenBucketState } from '@trading-bot/types/src/utilities/rate-limiting/rate-limiting';
 
 /**
  * Token bucket rate limiter with production-grade features

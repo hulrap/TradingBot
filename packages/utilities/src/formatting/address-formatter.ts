@@ -12,7 +12,7 @@ import type {
   AddressFormatContext,
   AddressValidationResult,
   AddressType
-} from '../../../types/src/utilities/formatting';
+} from '@trading-bot/types/src/utilities/formatting/formatting';
 
 /**
  * Format blockchain address with options

@@ -562,12 +562,12 @@ export type {
   ConditionalValidation,
   CustomValidation,
   ValidationContext
-} from './utilities/validation';
+} from './utilities/validation/validation';
 
 export {
   VALIDATION_MESSAGES,
   COMMON_VALIDATORS
-} from './utilities/validation';
+} from './utilities/validation/validation';
 
 // Retry types
 export type {
@@ -592,12 +592,12 @@ export type {
   RateLimitResult,
   ResiliencePattern,
   ResilienceConfig
-} from './utilities/retry';
+} from './utilities/retry/retry';
 
 export {
   DEFAULT_RETRY_CONFIGS,
   CIRCUIT_BREAKER_DEFAULTS
-} from './utilities/retry';
+} from './utilities/retry/retry';
 
 // Rate limiting types
 export type {
@@ -611,12 +611,12 @@ export type {
   RateLimitState,
   RateLimitQuota,
   QuotaType
-} from './utilities/rate-limiting';
+} from './utilities/rate-limiting/rate-limiting';
 
 export {
   DEFAULT_RATE_LIMITS,
   BURST_ALLOWANCES
-} from './utilities/rate-limiting';
+} from './utilities/rate-limiting/rate-limiting';
 
 // Formatting types
 export type {
@@ -645,13 +645,13 @@ export type {
   DisplayConfig,
   FormatMetadata,
   FormattingError
-} from './utilities/formatting';
+} from './utilities/formatting/formatting';
 
 export {
   DEFAULT_FORMATS,
   LOCALE_CONFIGS,
   FORMAT_PRESETS
-} from './utilities/formatting';
+} from './utilities/formatting/formatting';
 
 // Cache types
 export type {
@@ -682,12 +682,12 @@ export type {
   CacheConsistency,
   CacheSynchronization,
   CacheBackup
-} from './utilities/cache';
+} from './utilities/cache/cache';
 
 export {
   DEFAULT_CACHE_CONFIGS,
   CACHE_SIZE_LIMITS
-} from './utilities/cache';
+} from './utilities/cache/cache';
 
 // Crypto types
 export type {
@@ -705,12 +705,12 @@ export type {
   SecureRandom,
   CryptoProvider,
   CryptoOperation
-} from './utilities/crypto';
+} from './utilities/crypto/crypto';
 
 export {
   SUPPORTED_ALGORITHMS,
   CRYPTO_STANDARDS
-} from './utilities/crypto';
+} from './utilities/crypto/crypto';
 
 // ========================================
 // CONNECTION MANAGEMENT TYPES
@@ -868,8 +868,25 @@ export type {
   LLMConfig,
   LLMQuery,
   LLMResponse,
-  ModelLifecycle
-} from './ai-ml/agent-systems';
+  ModelLifecycle,
+  ModelMetadata,
+  ModelInstance,
+  ModelStatus,
+  ModelPerformanceMetrics,
+  ModelLoadOptions,
+  ModelPriority,
+  ModelManagerConfig,
+  ModelPerformanceThresholds,
+  ModelAutoUnloadConfig,
+  ModelWrapper,
+  ModelPredictionResult,
+  PredictionResult,
+  ModelResourceUsage,
+  ModelHealthCheck,
+  ModelHealthIssue,
+  HealthIssueSeverity,
+  ModelValidationConfig
+} from './utilities/ai-ml/agent-systems';
 
 // ========================================
 // TECHNICAL ANALYSIS TYPES
@@ -1102,3 +1119,215 @@ export {
   calculatePercentageChange,
   validateConfig
 };
+
+// Tensor operations types
+export type {
+  TensorShape,
+  TensorData,
+  TensorDataType,
+  TensorOperationOptions,
+  TensorSliceOptions,
+  TensorConcatOptions,
+  TensorReshapeOptions,
+  TensorComputationResult,
+  TensorValidationConfig,
+  TensorPerformanceMetrics,
+  TensorFactoryConfig,
+  TensorBroadcastConfig
+} from './utilities/ai-ml/tensorflow-operations';
+
+// Reinforcement learning types
+export type {
+  ExperienceReplayConfig,
+  Experience,
+  ExperienceBatch,
+  EnvironmentState,
+  EnvironmentStepResult,
+  EnvironmentResetOptions,
+  EnvironmentStats,
+  TrainingEpisodeResult,
+  TrainingSessionConfig,
+  TrainingSessionState,
+  ModelCheckpoint,
+  ExplorationStrategy,
+  ExplorationDecaySchedule,
+  ActionSelectionResult,
+  PolicyNetworkConfig,
+  PolicyGradientParams,
+  PolicyEvaluationResult
+} from './utilities/ai-ml/reinforcement-learning';
+
+// Multi-agent coordination types
+export type {
+  AgentCommunicationMessage,
+  AgentMessageType,
+  MessagePriority,
+  CommunicationChannelConfig,
+  RetryPolicy as AgentRetryPolicy,
+  ConsensusAlgorithmConfig,
+  ConsensusAlgorithm,
+  ConsensusProposal,
+  ConsensusVote,
+  ConsensusResult,
+  AgentTask,
+  TaskPriority,
+  TaskRequirements,
+  ResourceRequirements,
+  TaskAllocationStrategy,
+  AllocationStrategy,
+  TaskAllocationResult,
+  CoordinationProtocolConfig,
+  CoordinationProtocol,
+  CoordinationState,
+  AgentCoordinationState,
+  AgentPerformanceMetrics,
+  ConflictResolutionConfig,
+  ConflictResolutionStrategy,
+  AgentConflict,
+  ConflictType,
+  ConflictSeverity,
+  ConflictResolutionResult,
+  ResolutionAction
+} from './utilities/ai-ml/multi-agent-coordination';
+
+// LLM integration types
+export type {
+  LLMProviderConfig,
+  RateLimitConfig as LLMRateLimitConfig,
+  LLMRetryConfig,
+  LLMRequestParams,
+  PromptTemplate,
+  PromptVariable,
+  VariableType,
+  VariableValidation,
+  PromptExample,
+  PromptMetadata,
+  CompiledPrompt,
+  ConversationMessage,
+  MessageRole,
+  FunctionCall,
+  MessageMetadata,
+  ConversationContext,
+  LLMResponse as LLMIntegrationResponse,
+  FinishReason,
+  TokenUsage,
+  ResponseMetadata,
+  ResponseExtractionConfig,
+  ExtractionType,
+  ExtractionPattern,
+  FallbackStrategy,
+  LLMFunction,
+  FunctionParameters,
+  ParameterProperty,
+  FunctionExecutionResult,
+  EmbeddingConfig,
+  EmbeddingRequest,
+  EmbeddingResponse,
+  SimilaritySearchConfig,
+  SimilarityMetric,
+  SimilaritySearchResult,
+  SimilarityMatch
+} from './utilities/ai-ml/llm-integration';
+
+// Feature engineering types
+export type {
+  PreprocessingPipelineConfig,
+  PreprocessingStep,
+  PreprocessingStepType,
+  ErrorHandlingStrategy,
+  ValidationConfig as FeatureValidationConfig,
+  FeatureExtractionConfig,
+  FeatureExtractorType,
+  FeatureExtractionParams,
+  TechnicalIndicatorConfig as FeatureTechnicalIndicatorConfig,
+  PriceColumns,
+  TechnicalIndicatorSpec,
+  CustomIndicatorConfig as FeatureCustomIndicatorConfig,
+  TransformationPipeline,
+  FeatureTransformation,
+  TransformationType,
+  TransformationParams,
+  TransformationMetadata,
+  TransformationStatistics,
+  FeatureSelectionConfig,
+  FeatureSelectionMethod,
+  FeatureSelectionCVConfig,
+  FeatureSelectionParams,
+  FeatureSelectionResult,
+  FeatureSelectionMetadata,
+  DataQualityConfig,
+  DataQualityThresholds,
+  DataQualityResult,
+  CompletenessResult,
+  ConsistencyResult,
+  ConsistencyIssue,
+  AccuracyResult,
+  AccuracyIssue,
+  ValidityResult,
+  ValidationRuleResult,
+  UniquenessResult,
+  TimelinessResult,
+  FeatureStoreConfig,
+  FeatureStoreBackend,
+  FeatureCacheConfig,
+  FeatureVersioningConfig,
+  RetentionPolicy,
+  FeatureMonitoringConfig,
+  FeatureDefinition,
+  FeatureDataType,
+  FeatureSchema,
+  FeatureConstraints,
+  FeatureMetadata
+} from './utilities/ai-ml/feature-engineering';
+
+// Model evaluation types
+export type {
+  ClassificationMetrics,
+  ClassificationReport,
+  ClassMetrics,
+  RegressionMetrics,
+  TimeSeriesMetrics,
+  SeasonalComponents,
+  TradingMetrics,
+  CrossValidationConfig,
+  CrossValidationMethod,
+  TimeSeriesCVConfig,
+  CrossValidationResult,
+  CrossValidationFoldResult,
+  ModelComparisonConfig,
+  ModelComparisonEntry,
+  ComparisonMethod,
+  ModelComparisonResult,
+  ModelRanking,
+  StatisticalTestResult,
+  ModelSignificanceTest,
+  ComparisonSummary,
+  ValidationFrameworkConfig,
+  ValidationStrategy,
+  EvaluationMetricConfig,
+  DataValidationConfig,
+  OutlierDetectionConfig,
+  ModelValidationConfig as MLModelValidationConfig,
+  PerformanceThresholds,
+  ValidationReportingConfig,
+  ReportFormat as MLReportFormat,
+  ValidationResult as MLValidationResult,
+  DataValidationResult,
+  DataQualityReport,
+  DistributionTestResult,
+  DataLeakageResult,
+  TemporalConsistencyResult,
+  TemporalIssue,
+  OutlierDetectionResult,
+  ModelValidationResult,
+  OverfittingTestResult,
+  UnderfittingTestResult,
+  BiasVarianceResult,
+  GeneralizationTestResult,
+  StabilityTestResult,
+  ConvergenceTestResult,
+  RobustnessTestResult,
+  AdversarialTestResult,
+  NoiseTestResult,
+  ThresholdTestResult
+} from './utilities/ai-ml/model-evaluation';

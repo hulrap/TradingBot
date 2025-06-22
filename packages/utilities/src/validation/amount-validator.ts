@@ -13,7 +13,7 @@ import type {
   BatchAmountValidationResult,
   DecimalAmountParseResult,
   AmountConversionResult
-} from '../../../types/src/utilities/validation';
+} from '@trading-bot/types/src/utilities/validation/validation';
 
 /**
  * Precision constants for decimal arithmetic

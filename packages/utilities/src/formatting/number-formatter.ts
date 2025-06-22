@@ -14,7 +14,7 @@ import type {
   TokenAmountFormatOptions,
   ScientificFormatOptions,
   NumberFormatContext
-} from '../../../types/src/utilities/formatting';
+} from '@trading-bot/types/src/utilities/formatting/formatting';
 
 /**
  * Format number with comprehensive options

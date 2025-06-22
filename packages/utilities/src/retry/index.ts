@@ -52,4 +52,4 @@ export type {
   RetryErrorCode,
   CircuitBreakerEvent,
   CircuitBreakerEventListener
-} from '../../../types/src/utilities/retry'; 
+} from '@trading-bot/types/src/utilities/retry/retry'; 

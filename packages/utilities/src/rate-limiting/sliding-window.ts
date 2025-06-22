@@ -6,7 +6,7 @@
  * memory-efficient tracking, accurate rate limiting, and comprehensive validation.
 . *///
 
-import type { SlidingWindowConfig, RateLimitResult, SlidingWindowState } from '../../../types/src/utilities/rate-limiting';
+import type { SlidingWindowConfig, RateLimitResult, SlidingWindowState } from '@trading-bot/types/src/utilities/rate-limiting/rate-limiting';
 
 /**
  * Sliding window rate limiter with sub-window precision and production-grade features

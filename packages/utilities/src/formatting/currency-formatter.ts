@@ -13,7 +13,7 @@ import type {
   SupportedCurrency,
   CryptoCurrency,
   FiatCurrency
-} from '../../../types/src/utilities/formatting';
+} from '@trading-bot/types/src/utilities/formatting/formatting';
 
 /**
  * Format currency with comprehensive options

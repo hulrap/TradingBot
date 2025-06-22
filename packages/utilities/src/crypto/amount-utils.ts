@@ -11,7 +11,7 @@ import type {
   AmountDisplayOptions,
   TradingCalculationOptions,
   AmountConversionResult
-} from '../../../types/src/utilities/crypto';
+} from '@trading-bot/types/src/utilities/crypto/crypto';
 
 // ==========================================
 // CORE AMOUNT CONVERSION FUNCTIONS

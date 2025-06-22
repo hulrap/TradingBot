@@ -20,8 +20,8 @@ import type {
   CircuitState,
   RetryOperationContext,
   RetryErrorCode
-} from '../../../types/src/utilities/retry';
-import type { UtilityError } from '../../../types/src/utilities/validation';
+} from '@trading-bot/types/src/utilities/retry/retry';
+import type { UtilityError } from '@trading-bot/types/src/utilities/validation/validation';
 
 /**
  * Production-grade circuit breaker implementation

@@ -98,4 +98,4 @@ export type {
   PriceChangeInfo,
   FormattedPriceChangeInfo,
   FormattingPresets
-} from '../../../types/src/utilities/formatting'; 
+} from '@trading-bot/types/src/utilities/formatting/formatting'; 

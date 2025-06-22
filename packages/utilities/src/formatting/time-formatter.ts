@@ -12,7 +12,7 @@ import type {
   TimeFormatContext,
   TradingMarket,
   MarketSessionInfo
-} from '../../../types/src/utilities/formatting';
+} from '@trading-bot/types/src/utilities/formatting/formatting';
 
 /**
  * Format timestamp with comprehensive options

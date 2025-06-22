@@ -460,7 +460,7 @@ export type {
   CacheSerializationOptions,
   CacheClusterConfig,
   CacheMonitoringConfig
-} from '../../types/src/utilities/cache';
+} from '@trading-bot/types/src/utilities/cache/cache';
 
 // Type exports for TypeScript users - Crypto types
 export type {
@@ -478,7 +478,7 @@ export type {
   ExtendedSignatureOptions,
   ExtendedSignatureResult,
   SignatureVerificationResult
-} from '../../types/src/utilities/crypto';
+} from '@trading-bot/types/src/utilities/crypto/crypto';
 
 // Type exports for TypeScript users - Formatting types
 export type {
@@ -508,7 +508,7 @@ export type {
   PriceChangeInfo,
   FormattedPriceChangeInfo,
   FormattingPresets
-} from '../../types/src/utilities/formatting';
+} from '@trading-bot/types/src/utilities/formatting/formatting';
 
 // Type exports for TypeScript users - Rate Limiting types
 export type {
@@ -522,7 +522,7 @@ export type {
   RateLimiterState,
   TokenBucketState,
   SlidingWindowState
-} from '../../types/src/utilities/rate-limiting';
+} from '@trading-bot/types/src/utilities/rate-limiting/rate-limiting';
 
 // Type exports for TypeScript users - Retry types
 export type {
@@ -547,7 +547,7 @@ export type {
   RetryErrorCode,
   CircuitBreakerEvent,
   CircuitBreakerEventListener
-} from '../../types/src/utilities/retry';
+} from '@trading-bot/types/src/utilities/retry/retry';
 
 // Type exports for TypeScript users - Validation types
 export type {
@@ -570,7 +570,7 @@ export type {
   TypeValidationResult,
   RuleValidationResult,
   SchemaValidationError
-} from '../../types/src/utilities/validation';
+} from '@trading-bot/types/src/utilities/validation/validation';
 
 /**
  * Usage examples:

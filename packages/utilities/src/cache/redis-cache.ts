@@ -20,7 +20,7 @@ import type {
   CacheInvalidationOptions,
   CacheWarmingOptions,
   CacheHealthStatus
-} from '../../../types/src/utilities/cache';
+} from '@trading-bot/types/src/utilities/cache/cache';
 
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);

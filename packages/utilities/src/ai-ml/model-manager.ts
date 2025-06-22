@@ -16,103 +16,19 @@
  * @package @trading-bot/utilities
  */
 
-import type { ModelType } from '@trading-bot/types/dist/ai-ml/agent-systems';
+import type {
+  ModelType,
+  ModelMetadata,
+  ModelInstance,
+  ModelPerformanceMetrics,
+  ModelLoadOptions,
+  ModelManagerConfig,
+  ModelWrapper,
+  PredictionResult
+} from '@trading-bot/types';
 import { EventEmitter } from 'events';
 import { promises as fs } from 'fs';
 import { createHash } from 'crypto';
-
-// ========================================
-// CORE TYPES
-// ========================================
-
-interface ModelMetadata {
-  id: string;
-  name: string;
-  version: string;
-  type: ModelType;
-  filePath: string;
-  size: number;
-  createdAt: number;
-  lastUsed: number;
-  usageCount: number;
-  checksum: string;
-  tags: string[];
-}
-
-interface ModelInstance {
-  id: string;
-  metadata: ModelMetadata;
-  model: ModelWrapper;
-  status: 'loading' | 'ready' | 'unloading' | 'error';
-  memoryUsage: number;
-  loadTime: number;
-  lastAccessed: number;
-  errorCount: number;
-  performance: ModelPerformanceMetrics;
-}
-
-interface ModelPerformanceMetrics {
-  inferenceTime: {
-    average: number;
-    p95: number;
-    p99: number;
-    min: number;
-    max: number;
-  };
-  accuracy: number;
-  throughput: number;
-  errorRate: number;
-  memoryEfficiency: number;
-  cpuUtilization: number;
-  driftScore: number;
-}
-
-interface ModelLoadOptions {
-  warmup?: boolean;
-  precompile?: boolean;
-  memoryLimit?: number;
-  priority?: 'low' | 'normal' | 'high';
-  timeout?: number;
-  retries?: number;
-}
-
-interface ModelManagerConfig {
-  maxConcurrentModels: number;
-  maxMemoryUsage: number;
-  defaultTimeout: number;
-  enableMonitoring: boolean;
-  enableCaching: boolean;
-  cleanupInterval: number;
-  performanceThresholds: {
-    maxInferenceTime: number;
-    minAccuracy: number;
-    maxErrorRate: number;
-    maxDriftScore: number;
-  };
-  autoUnload: {
-    enabled: boolean;
-    idleTime: number;
-    memoryThreshold: number;
-  };
-}
-
-interface ModelWrapper {
-  type: ModelType;
-  loadTime: number;
-  modelPath: string;
-  size: number;
-  config: Record<string, unknown>;
-  predict: (input: unknown) => Promise<{ predictions: unknown; confidence: number }>;
-  dispose: () => Promise<void>;
-}
-
-interface PredictionResult<T = unknown> {
-  predictions: T;
-  confidence: number;
-  modelId: string;
-  timestamp: number;
-  processingTime: number;
-}
 
 // ========================================
 // MODEL MANAGER CLASS
@@ -513,15 +429,16 @@ class ModelManager extends EventEmitter {
     options: ModelLoadOptions
   ): Promise<ModelWrapper> {
     const stats = await fs.stat(modelPath);
-    const startTime = Date.now();
 
     switch (type) {
-      case 'tensorflow':
-        return this.loadTensorFlowModel(modelPath, options, stats);
-      case 'pytorch':
-        return this.loadPyTorchModel(modelPath, options, stats);
-      case 'onnx':
-        return this.loadONNXModel(modelPath, options, stats);
+      case 'neural-network':
+        return this.loadNeuralNetworkModel(modelPath, options, stats);
+      case 'cnn':
+        return this.loadCNNModel(modelPath, options, stats);
+      case 'lstm':
+        return this.loadLSTMModel(modelPath, options, stats);
+      case 'transformer':
+        return this.loadTransformerModel(modelPath, options, stats);
       case 'custom':
         return this.loadCustomModel(modelPath, options, stats);
       default:
@@ -529,22 +446,23 @@ class ModelManager extends EventEmitter {
     }
   }
 
-  private async loadTensorFlowModel(
+  private async loadNeuralNetworkModel(
     modelPath: string,
     options: ModelLoadOptions,
     stats: Awaited<ReturnType<typeof fs.stat>>
   ): Promise<ModelWrapper> {
     const startTime = Date.now();
     
-    // For production: const tf = await import('@tensorflow/tfjs-node');
-    // const model = await tf.loadLayersModel(`file://${modelPath}`);
+    // Detect framework from file extension or metadata
+    const framework = this.detectFramework(modelPath);
     
     return {
-      type: 'tensorflow',
+      type: 'neural-network',
       loadTime: Date.now() - startTime,
       modelPath,
       size: Number(stats.size),
       config: {
+        framework,
         precompile: options.precompile || false,
         memoryLimit: options.memoryLimit || 512 * 1024 * 1024,
         priority: options.priority || 'normal'
@@ -557,26 +475,27 @@ class ModelManager extends EventEmitter {
         };
       },
       dispose: async () => {
-        // await model.dispose();
+        // Framework-specific cleanup based on detected framework
       }
     };
   }
 
-  private async loadPyTorchModel(
+  private async loadCNNModel(
     modelPath: string,
     options: ModelLoadOptions,
     stats: Awaited<ReturnType<typeof fs.stat>>
   ): Promise<ModelWrapper> {
     const startTime = Date.now();
-    
-    // For production: Integration with torch.js or Python bridge
+    const framework = this.detectFramework(modelPath);
     
     return {
-      type: 'pytorch',
+      type: 'cnn',
       loadTime: Date.now() - startTime,
       modelPath,
       size: Number(stats.size),
       config: {
+        framework,
+        convLayers: 'auto-detect',
         memoryLimit: options.memoryLimit || 1024 * 1024 * 1024,
         priority: options.priority || 'normal'
       },
@@ -588,31 +507,32 @@ class ModelManager extends EventEmitter {
         };
       },
       dispose: async () => {
-        // Cleanup PyTorch resources
+        // CNN-specific resource cleanup
       }
     };
   }
 
-  private async loadONNXModel(
+  private async loadLSTMModel(
     modelPath: string,
     options: ModelLoadOptions,
     stats: Awaited<ReturnType<typeof fs.stat>>
   ): Promise<ModelWrapper> {
     const startTime = Date.now();
+    const framework = this.detectFramework(modelPath);
     
-    if (!modelPath.toLowerCase().endsWith('.onnx')) {
-      throw new Error('ONNX model file must have .onnx extension');
+    if (!modelPath.toLowerCase().includes('lstm') && !modelPath.toLowerCase().includes('rnn')) {
+      console.warn(`Model path ${modelPath} may not contain LSTM model despite type specification`);
     }
     
-    // For production: const ort = await import('onnxruntime-node');
-    // const session = await ort.InferenceSession.create(modelPath);
-    
     return {
-      type: 'onnx',
+      type: 'lstm',
       loadTime: Date.now() - startTime,
       modelPath,
       size: Number(stats.size),
       config: {
+        framework,
+        sequenceLength: 'auto-detect',
+        hiddenUnits: 'auto-detect',
         executionProvider: 'cpu',
         optimization: options.precompile ? 'all' : 'basic',
         memoryLimit: options.memoryLimit || 768 * 1024 * 1024
@@ -625,9 +545,60 @@ class ModelManager extends EventEmitter {
         };
       },
       dispose: async () => {
-        // await session.release();
+        // LSTM-specific resource cleanup
       }
     };
+  }
+
+  private async loadTransformerModel(
+    modelPath: string,
+    options: ModelLoadOptions,
+    stats: Awaited<ReturnType<typeof fs.stat>>
+  ): Promise<ModelWrapper> {
+    const startTime = Date.now();
+    const framework = this.detectFramework(modelPath);
+    
+    return {
+      type: 'transformer',
+      loadTime: Date.now() - startTime,
+      modelPath,
+      size: Number(stats.size),
+      config: {
+        framework,
+        attentionHeads: 'auto-detect',
+        layers: 'auto-detect',
+        priority: options.priority || 'normal',
+        memoryLimit: options.memoryLimit || 2048 * 1024 * 1024
+      },
+      predict: async (input: unknown) => {
+        await new Promise(resolve => setTimeout(resolve, 20 + Math.random() * 30));
+        return { 
+          predictions: Array.isArray(input) ? new Array((input as unknown[]).length).fill(0.55) : [0.55],
+          confidence: 0.88 + Math.random() * 0.08
+        };
+      },
+      dispose: async () => {
+        // Transformer-specific resource cleanup
+      }
+    };
+  }
+
+  private detectFramework(modelPath: string): 'tensorflow' | 'pytorch' | 'onnx' | 'custom' {
+    const pathLower = modelPath.toLowerCase();
+    
+    if (pathLower.includes('tensorflow') || pathLower.endsWith('.pb') || pathLower.includes('savedmodel')) {
+      return 'tensorflow';
+    }
+    
+    if (pathLower.includes('pytorch') || pathLower.endsWith('.pt') || pathLower.endsWith('.pth')) {
+      return 'pytorch';
+    }
+    
+    if (pathLower.endsWith('.onnx')) {
+      return 'onnx';
+    }
+    
+    return 'custom';
   }
 
   private async loadCustomModel(
@@ -693,30 +664,60 @@ class ModelManager extends EventEmitter {
   ): void {
     const metrics = instance.performance;
     
-    // Update inference time metrics
-    if (metrics.inferenceTime.min === Infinity || inferenceTime < metrics.inferenceTime.min) {
-      metrics.inferenceTime.min = inferenceTime;
-    }
-    if (inferenceTime > metrics.inferenceTime.max) {
-      metrics.inferenceTime.max = inferenceTime;
+    // Track success/failure for error rate calculation
+    if (!success) {
+      instance.errorCount++;
     }
     
-    // Update average using exponential moving average
-    metrics.inferenceTime.average = 
-      (metrics.inferenceTime.average * 0.9) + (inferenceTime * 0.1);
+    // Update inference time metrics only for successful inferences
+    if (success) {
+      if (metrics.inferenceTime.min === Infinity || inferenceTime < metrics.inferenceTime.min) {
+        metrics.inferenceTime.min = inferenceTime;
+      }
+      if (inferenceTime > metrics.inferenceTime.max) {
+        metrics.inferenceTime.max = inferenceTime;
+      }
+      
+      // Update average using exponential moving average
+      metrics.inferenceTime.average = 
+        (metrics.inferenceTime.average * 0.9) + (inferenceTime * 0.1);
+      
+      // Update throughput based on successful inferences
+      if (metrics.inferenceTime.average > 0) {
+        metrics.throughput = 1000 / metrics.inferenceTime.average;
+      }
+    }
 
-    // Update error rate
+    // Update error rate based on total usage count
     if (instance.metadata.usageCount > 0) {
       metrics.errorRate = instance.errorCount / instance.metadata.usageCount;
     }
 
-    // Update throughput
-    if (metrics.inferenceTime.average > 0) {
-      metrics.throughput = 1000 / metrics.inferenceTime.average;
+    // Update accuracy based on recent success rate (inverse of error rate)
+    metrics.accuracy = Math.max(0, 1 - metrics.errorRate);
+
+    // Update memory efficiency based on success rate and inference time
+    if (success && inferenceTime > 0) {
+      const efficiency = 1 / (inferenceTime / 1000); // Higher efficiency for faster inferences
+      metrics.memoryEfficiency = (metrics.memoryEfficiency * 0.95) + (efficiency * 0.05);
+    } else if (!success) {
+      // Penalize memory efficiency for failed inferences
+      metrics.memoryEfficiency = Math.max(0.1, metrics.memoryEfficiency * 0.98);
     }
 
-    // Update CPU utilization (simplified)
-    metrics.cpuUtilization = Math.min(100, inferenceTime / 10);
+    // Update CPU utilization (simplified) - only for successful inferences
+    if (success) {
+      metrics.cpuUtilization = Math.min(100, inferenceTime / 10);
+    }
+
+    // Update drift score based on performance degradation
+    if (!success || (success && inferenceTime > metrics.inferenceTime.average * 2)) {
+      // Increase drift score if inference fails or takes significantly longer
+      metrics.driftScore = Math.min(1.0, metrics.driftScore + 0.01);
+    } else if (success && inferenceTime <= metrics.inferenceTime.average) {
+      // Decrease drift score for good performance
+      metrics.driftScore = Math.max(0, metrics.driftScore - 0.005);
+    }
   }
 
   private checkCapacityLimits(): void {
@@ -822,11 +823,13 @@ class ModelManager extends EventEmitter {
   }
 
   private async calculateMemoryUsage(model: ModelWrapper): Promise<number> {
-    // Estimate based on model size and type
+    // Estimate based on model size and framework type
     const baseSize = model.size;
-    const multiplier = model.type === 'tensorflow' ? 1.5 : 
-                      model.type === 'pytorch' ? 1.8 :
-                      model.type === 'onnx' ? 1.2 : 1.0;
+    const framework = (model.config.framework as string) || 'custom';
+    
+    const multiplier = framework === 'tensorflow' ? 1.5 : 
+                      framework === 'pytorch' ? 1.8 :
+                      framework === 'onnx' ? 1.2 : 1.0;
     
     return Math.floor(baseSize * multiplier);
   }

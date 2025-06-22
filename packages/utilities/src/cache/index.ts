@@ -44,4 +44,4 @@ export type {
   CacheSerializationOptions,
   CacheClusterConfig,
   CacheMonitoringConfig
-} from '../../../types/src/utilities/cache'; 
+} from '@trading-bot/types/src/utilities/cache/cache'; 

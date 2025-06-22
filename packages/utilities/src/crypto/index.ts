@@ -70,4 +70,4 @@ export type {
   ExtendedSignatureOptions,
   ExtendedSignatureResult,
   SignatureVerificationResult
-} from '../../../types/src/utilities/crypto'; 
+} from '@trading-bot/types/src/utilities/crypto/crypto'; 

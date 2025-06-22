@@ -17,47 +17,17 @@
  * @package @trading-bot/utilities
  */
 
-import type { ModelType } from '@trading-bot/types';
+import type { 
+  ModelType,
+  TensorShape,
+  TensorData,
+  TensorOperationOptions,
+  TensorSliceOptions,
+  TensorConcatOptions,
+  TensorReshapeOptions
+} from '@trading-bot/types';
 
-// ========================================
-// CORE TENSOR TYPES
-// ========================================
 
-interface TensorShape {
-  readonly dimensions: readonly number[];
-  readonly rank: number;
-  readonly size: number;
-}
-
-interface TensorData {
-  readonly values: Float64Array;
-  readonly shape: TensorShape;
-  readonly dtype: 'float32' | 'float64' | 'int32' | 'int64' | 'bool';
-  readonly strides: readonly number[];
-}
-
-interface TensorOperationOptions {
-  readonly axis?: number | readonly number[];
-  readonly keepDims?: boolean;
-  readonly dtype?: TensorData['dtype'];
-  readonly inPlace?: boolean;
-}
-
-interface TensorSliceOptions {
-  readonly start?: readonly number[];
-  readonly end?: readonly number[];
-  readonly step?: readonly number[];
-}
-
-interface TensorConcatOptions {
-  readonly axis: number;
-  readonly validateShapes?: boolean;
-}
-
-interface TensorReshapeOptions {
-  readonly shape: readonly number[];
-  readonly allowInference?: boolean;
-}
 
 // ========================================
 // TENSOR CLASS
@@ -128,7 +98,11 @@ class Tensor {
     }
 
     const flatIndex = this.indicesToFlatIndex(indices);
-    return this.data.values[flatIndex];
+    const value = this.data.values[flatIndex];
+    if (value === undefined) {
+      throw new Error(`Invalid access at indices [${indices.join(', ')}]`);
+    }
+    return value;
   }
 
   /**
@@ -140,6 +114,9 @@ class Tensor {
     }
 
     const flatIndex = this.indicesToFlatIndex(indices);
+    if (flatIndex < 0 || flatIndex >= this.data.values.length) {
+      throw new Error(`Invalid access at indices [${indices.join(', ')}]`);
+    }
     this.data.values[flatIndex] = value;
   }
 
@@ -199,8 +176,21 @@ class Tensor {
       throw new Error('Matrix multiplication requires 2D tensors');
     }
 
-    const [m, k] = this.shape.dimensions;
-    const [k2, n] = other.shape.dimensions;
+    const thisShape = this.shape.dimensions;
+    const otherShape = other.shape.dimensions;
+    
+    if (thisShape.length < 2 || otherShape.length < 2) {
+      throw new Error('Invalid tensor shapes for matrix multiplication');
+    }
+
+    const m = thisShape[0];
+    const k = thisShape[1];
+    const k2 = otherShape[0];
+    const n = otherShape[1];
+
+    if (m === undefined || k === undefined || k2 === undefined || n === undefined) {
+      throw new Error('Invalid tensor dimensions');
+    }
 
     if (k !== k2) {
       throw new Error(`Incompatible shapes: [${m}, ${k}] and [${k2}, ${n}]`);
@@ -214,7 +204,14 @@ class Tensor {
         for (let l = 0; l < k; l++) {
           const aIndex = i * k + l;
           const bIndex = l * n + j;
-          sum += this.values[aIndex] * other.values[bIndex];
+          const aValue = this.values[aIndex];
+          const bValue = other.values[bIndex];
+          
+          if (aValue === undefined || bValue === undefined) {
+            throw new Error(`Invalid matrix access during multiplication`);
+          }
+          
+          sum += aValue * bValue;
         }
         result[i * n + j] = sum;
       }
@@ -241,13 +238,32 @@ class Tensor {
       throw new Error(`Expected ${this.rank} axes, got ${targetAxes.length}`);
     }
 
-    const newShape = targetAxes.map(axis => this.shape.dimensions[axis]);
+    const newShape: number[] = [];
+    for (const axis of targetAxes) {
+      const dimension = this.shape.dimensions[axis];
+      if (dimension === undefined) {
+        throw new Error(`Invalid axis ${axis} for tensor with rank ${this.rank}`);
+      }
+      newShape.push(dimension);
+    }
+    
     const result = new Float64Array(this.size);
 
     this.forEachIndex((indices, flatIndex) => {
-      const newIndices = targetAxes.map(axis => indices[axis]);
+      const newIndices: number[] = [];
+      for (const axis of targetAxes) {
+        const indexValue = indices[axis];
+        if (indexValue === undefined) {
+          throw new Error(`Invalid index access during transpose`);
+        }
+        newIndices.push(indexValue);
+      }
       const newFlatIndex = this.indicesToFlatIndexWithShape(newIndices, newShape);
-      result[newFlatIndex] = this.values[flatIndex];
+      const value = this.values[flatIndex];
+      if (value === undefined) {
+        throw new Error(`Invalid value access during transpose`);
+      }
+      result[newFlatIndex] = value;
     });
 
     return new Tensor(result, newShape, this.dtype);
@@ -286,12 +302,27 @@ class Tensor {
     const { start = [], end = [], step = [] } = options;
     
     const finalStart = this.normalizeSliceParams(start, 0);
-    const finalEnd = this.normalizeSliceParams(end, (i) => this.shape.dimensions[i]);
+    const finalEnd = this.normalizeSliceParams(end, (i) => {
+      const dimension = this.shape.dimensions[i];
+      if (dimension === undefined) {
+        throw new Error(`Invalid dimension access at index ${i}`);
+      }
+      return dimension;
+    });
     const finalStep = this.normalizeSliceParams(step, 1);
 
-    const newShape = finalStart.map((s, i) => 
-      Math.ceil((finalEnd[i] - s) / finalStep[i])
-    );
+    const newShape: number[] = [];
+    for (let i = 0; i < finalStart.length; i++) {
+      const startVal = finalStart[i];
+      const endVal = finalEnd[i];
+      const stepVal = finalStep[i];
+      
+      if (startVal === undefined || endVal === undefined || stepVal === undefined) {
+        throw new Error(`Invalid slice parameters at dimension ${i}`);
+      }
+      
+      newShape.push(Math.ceil((endVal - startVal) / stepVal));
+    }
 
     const result: number[] = [];
     this.iterateSlice(finalStart, finalEnd, finalStep, (indices) => {
@@ -313,29 +344,58 @@ class Tensor {
     }
 
     const newShape = [...this.shape.dimensions];
-    newShape[axis] = allTensors.reduce((sum, tensor) => sum + tensor.shape.dimensions[axis], 0);
+    const axisDimension = newShape[axis];
+    if (axisDimension === undefined) {
+      throw new Error(`Invalid concatenation axis ${axis}`);
+    }
+    
+    let totalAxisSize = 0;
+    for (const tensor of allTensors) {
+      const tensorAxisSize = tensor.shape.dimensions[axis];
+      if (tensorAxisSize === undefined) {
+        throw new Error(`Invalid tensor shape for concatenation`);
+      }
+      totalAxisSize += tensorAxisSize;
+    }
+    newShape[axis] = totalAxisSize;
 
     const result: number[] = [];
-    const axisStrides = this.calculateAxisStrides(newShape, axis);
+    const newSize = newShape.reduce((acc, dim) => acc * dim, 1);
 
-    for (let i = 0; i < newShape.reduce((acc, dim) => acc * dim, 1); i++) {
+    for (let i = 0; i < newSize; i++) {
       const indices = this.flatIndexToIndices(i, newShape);
       const axisIndex = indices[axis];
       
+      if (axisIndex === undefined) {
+        throw new Error(`Invalid axis index during concatenation`);
+      }
+      
       let currentOffset = 0;
-      const targetTensor = allTensors.find(tensor => {
+      let targetTensor: Tensor | undefined;
+      
+      for (const tensor of allTensors) {
         const tensorSize = tensor.shape.dimensions[axis];
+        if (tensorSize === undefined) {
+          throw new Error(`Invalid tensor dimension during concatenation`);
+        }
+        
         if (axisIndex >= currentOffset && axisIndex < currentOffset + tensorSize) {
-          return true;
+          targetTensor = tensor;
+          break;
         }
         currentOffset += tensorSize;
-        return false;
-      });
+      }
 
       if (targetTensor) {
         const localIndices = [...indices];
-        localIndices[axis] = axisIndex - (currentOffset - targetTensor.shape.dimensions[axis]);
+        const targetDimension = targetTensor.shape.dimensions[axis];
+        if (targetDimension === undefined) {
+          throw new Error(`Invalid target tensor dimension`);
+        }
+        localIndices[axis] = axisIndex - (currentOffset - targetDimension);
         result.push(targetTensor.at(...localIndices));
+      } else {
+        throw new Error(`Failed to find target tensor for concatenation`);
       }
     }
 
@@ -428,12 +488,27 @@ class Tensor {
     }
 
     if (this.rank === 2) {
-      const [rows, cols] = this.shape.dimensions;
+      const dimensions = this.shape.dimensions;
+      if (dimensions.length < 2) {
+        throw new Error('Invalid 2D tensor shape');
+      }
+      
+      const rows = dimensions[0];
+      const cols = dimensions[1];
+      
+      if (rows === undefined || cols === undefined) {
+        throw new Error('Invalid tensor dimensions for 2D conversion');
+      }
+      
       const result: number[][] = [];
       for (let i = 0; i < rows; i++) {
         const row: number[] = [];
         for (let j = 0; j < cols; j++) {
-          row.push(this.values[i * cols + j]);
+          const value = this.values[i * cols + j];
+          if (value === undefined) {
+            throw new Error(`Invalid access at position [${i}, ${j}]`);
+          }
+          row.push(value);
         }
         result.push(row);
       }
@@ -451,9 +526,11 @@ class Tensor {
   private flattenNestedArray(arr: number[] | number[][]): number[] {
     const result: number[] = [];
     
-    const flatten = (item: number | number[]): void => {
+    const flatten = (item: number | number[] | number[][]): void => {
       if (Array.isArray(item)) {
-        item.forEach(flatten);
+        for (const subItem of item) {
+          flatten(subItem);
+        }
       } else {
         result.push(item);
       }
@@ -503,8 +580,12 @@ class Tensor {
     let stride = 1;
     
     for (let i = shape.length - 1; i >= 0; i--) {
+      const dimension = shape[i];
+      if (dimension === undefined) {
+        throw new Error(`Invalid shape dimension at index ${i}`);
+      }
       strides[i] = stride;
-      stride *= shape[i];
+      stride *= dimension;
     }
     
     return strides;
@@ -513,7 +594,12 @@ class Tensor {
   private indicesToFlatIndex(indices: readonly number[]): number {
     let flatIndex = 0;
     for (let i = 0; i < indices.length; i++) {
-      flatIndex += indices[i] * this.data.strides[i];
+      const index = indices[i];
+      const stride = this.data.strides[i];
+      if (index === undefined || stride === undefined) {
+        throw new Error(`Invalid index or stride at position ${i}`);
+      }
+      flatIndex += index * stride;
     }
     return flatIndex;
   }
@@ -522,7 +608,12 @@ class Tensor {
     const strides = this.calculateStrides(shape);
     let flatIndex = 0;
     for (let i = 0; i < indices.length; i++) {
-      flatIndex += indices[i] * strides[i];
+      const index = indices[i];
+      const stride = strides[i];
+      if (index === undefined || stride === undefined) {
+        throw new Error(`Invalid index or stride at position ${i}`);
+      }
+      flatIndex += index * stride;
     }
     return flatIndex;
   }
@@ -532,7 +623,13 @@ class Tensor {
     let remaining = flatIndex;
     
     for (let i = 0; i < shape.length; i++) {
-      const stride = shape.slice(i + 1).reduce((acc, dim) => acc * dim, 1);
+      const currentShape = shape.slice(i + 1);
+      const stride = currentShape.reduce((acc, dim) => {
+        if (dim === undefined) {
+          throw new Error(`Invalid dimension in shape at calculation`);
+        }
+        return acc * dim;
+      }, 1);
       indices[i] = Math.floor(remaining / stride);
       remaining %= stride;
     }
@@ -543,7 +640,11 @@ class Tensor {
   private scalarOperation(scalar: number, operation: (a: number, b: number) => number): Tensor {
     const result = new Float64Array(this.size);
     for (let i = 0; i < this.size; i++) {
-      result[i] = operation(this.values[i], scalar);
+      const value = this.values[i];
+      if (value === undefined) {
+        throw new Error(`Invalid value access at index ${i}`);
+      }
+      result[i] = operation(value, scalar);
     }
     return new Tensor(result, this.shape.dimensions, this.dtype);
   }
@@ -558,7 +659,12 @@ class Tensor {
 
     const result = new Float64Array(this.size);
     for (let i = 0; i < this.size; i++) {
-      result[i] = operation(this.values[i], other.values[i]);
+      const thisValue = this.values[i];
+      const otherValue = other.values[i];
+      if (thisValue === undefined || otherValue === undefined) {
+        throw new Error(`Invalid value access at index ${i}`);
+      }
+      result[i] = operation(thisValue, otherValue);
     }
     return new Tensor(result, this.shape.dimensions, this.dtype);
   }
@@ -566,7 +672,11 @@ class Tensor {
   private elementWiseUnaryOperation(operation: (a: number) => number): Tensor {
     const result = new Float64Array(this.size);
     for (let i = 0; i < this.size; i++) {
-      result[i] = operation(this.values[i]);
+      const value = this.values[i];
+      if (value === undefined) {
+        throw new Error(`Invalid value access at index ${i}`);
+      }
+      result[i] = operation(value);
     }
     return new Tensor(result, this.shape.dimensions, this.dtype);
   }
@@ -582,7 +692,11 @@ class Tensor {
       // Reduce all dimensions
       let result = initialValue;
       for (let i = 0; i < this.size; i++) {
-        result = operation(result, this.values[i]);
+        const value = this.values[i];
+        if (value === undefined) {
+          throw new Error(`Invalid value access at index ${i}`);
+        }
+        result = operation(result, value);
       }
       return new Tensor([result], keepDims ? Array(this.rank).fill(1) : [1], this.dtype);
     }
@@ -611,7 +725,14 @@ class Tensor {
       if (result[resultFlatIndex] === 0) {
         result[resultFlatIndex] = initialValue;
       }
-      result[resultFlatIndex] = operation(result[resultFlatIndex], this.values[flatIndex]);
+      const value = this.values[flatIndex];
+      if (value === undefined) {
+        throw new Error(`Invalid value access during reduction at index ${flatIndex}`);
+      }
+      if (result[resultFlatIndex] === undefined) {
+        throw new Error(`Invalid result value access during reduction at index ${resultFlatIndex}`);
+      }
+      result[resultFlatIndex] = operation(result[resultFlatIndex], value);
     });
 
     return new Tensor(result, resultShape, this.dtype);
@@ -625,7 +746,13 @@ class Tensor {
     }
 
     const axisArray = Array.isArray(axis) ? axis : [axis];
-    return axisArray.reduce((count, axisIndex) => count * this.shape.dimensions[axisIndex], 1);
+    return axisArray.reduce((count, axisIndex) => {
+      const dimension = this.shape.dimensions[axisIndex];
+      if (dimension === undefined) {
+        throw new Error(`Invalid axis ${axisIndex} for reduction`);
+      }
+      return count * dimension;
+    }, 1);
   }
 
   private forEachIndex(callback: (indices: number[], flatIndex: number) => void): void {
@@ -648,8 +775,9 @@ class Tensor {
   ): number[] {
     const result: number[] = [];
     for (let i = 0; i < this.rank; i++) {
-      if (i < params.length) {
-        result[i] = params[i];
+      const param = params[i];
+      if (param !== undefined) {
+        result[i] = param;
       } else {
         result[i] = typeof defaultValue === 'function' ? defaultValue(i) : defaultValue;
       }
@@ -671,7 +799,15 @@ class Tensor {
         return;
       }
       
-      for (let i = start[dimension]; i < end[dimension]; i += step[dimension]) {
+      const startVal = start[dimension];
+      const endVal = end[dimension];
+      const stepVal = step[dimension];
+      
+      if (startVal === undefined || endVal === undefined || stepVal === undefined) {
+        throw new Error(`Invalid slice parameters at dimension ${dimension}`);
+      }
+      
+      for (let i = startVal; i < endVal; i += stepVal) {
         indices[dimension] = i;
         iterateRecursive(dimension + 1);
       }
@@ -681,10 +817,22 @@ class Tensor {
   }
 
   private validateConcatShapes(tensors: Tensor[], axis: number): void {
-    const referenceShape = tensors[0].shape.dimensions;
+    if (tensors.length === 0) {
+      throw new Error('Cannot concatenate empty tensor array');
+    }
+    
+    const referenceShape = tensors[0]?.shape.dimensions;
+    if (!referenceShape) {
+      throw new Error('Invalid reference tensor for concatenation');
+    }
     
     for (let i = 1; i < tensors.length; i++) {
-      const currentShape = tensors[i].shape.dimensions;
+      const currentTensor = tensors[i];
+      if (!currentTensor) {
+        throw new Error(`Invalid tensor at index ${i}`);
+      }
+      
+      const currentShape = currentTensor.shape.dimensions;
       
       if (currentShape.length !== referenceShape.length) {
         throw new Error(`All tensors must have the same rank for concatenation`);
@@ -696,18 +844,6 @@ class Tensor {
         }
       }
     }
-  }
-
-  private calculateAxisStrides(shape: readonly number[], axis: number): number[] {
-    const strides: number[] = [];
-    for (let i = 0; i < shape.length; i++) {
-      if (i === axis) {
-        strides[i] = 1;
-      } else {
-        strides[i] = shape.slice(i + 1).reduce((acc, dim) => acc * dim, 1);
-      }
-    }
-    return strides;
   }
 }
 
@@ -779,6 +915,9 @@ const tensorUtils = {
     
     return paddedShape1.every((dim1, i) => {
       const dim2 = paddedShape2[i];
+      if (dim1 === undefined || dim2 === undefined) {
+        return false;
+      }
       return dim1 === 1 || dim2 === 1 || dim1 === dim2;
     });
   },
@@ -820,7 +959,10 @@ const tensorUtils = {
     if (shape1.length !== shape2.length) {
       return false;
     }
-    return shape1.every((dim, i) => dim === shape2[i]);
+    return shape1.every((dim, i) => {
+      const otherDim = shape2[i];
+      return dim !== undefined && otherDim !== undefined && dim === otherDim;
+    });
   }
 };
 
