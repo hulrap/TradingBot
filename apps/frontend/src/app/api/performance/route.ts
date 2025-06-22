@@ -4,6 +4,22 @@ import { z } from 'zod';
 import { rateLimiter } from '@/lib/rate-limiter';
 import { verifyJWT } from '@/lib/auth';
 
+// Enhanced performance tracking
+interface PerformanceTimer {
+  start: number;
+  operation: string;
+}
+
+function createTimer(operation: string): PerformanceTimer {
+  return { start: Date.now(), operation };
+}
+
+function endTimer(timer: PerformanceTimer): number {
+  const duration = Date.now() - timer.start;
+  console.log(`[Performance] ${timer.operation}: ${duration}ms`);
+  return duration;
+}
+
 // Lazy initialization to avoid build-time errors
 function getSupabaseClient() {
   const supabaseUrl = process.env['SUPABASE_URL'];
@@ -16,98 +32,191 @@ function getSupabaseClient() {
   return createClient(supabaseUrl, supabaseServiceKey);
 }
 
+// Enhanced validation schema with more options
 const PerformanceQuerySchema = z.object({
   botId: z.string().uuid().optional(),
   botType: z.enum(['arbitrage', 'copy-trader', 'mev-sandwich']).optional(),
-  chain: z.enum(['ethereum', 'bsc', 'polygon', 'arbitrum', 'optimism', 'solana']).optional(),
-  period: z.enum(['1h', '24h', '7d', '30d', '90d', 'all']).optional().default('7d'),
-  granularity: z.enum(['hour', 'day', 'week']).optional().default('day'),
+  chain: z.enum(['ethereum', 'bsc', 'polygon', 'arbitrum', 'optimism', 'solana', 'avalanche', 'fantom']).optional(),
+  period: z.enum(['1h', '24h', '7d', '30d', '90d', '1y', 'all']).optional().default('7d'),
+  granularity: z.enum(['minute', 'hour', 'day', 'week', 'month']).optional().default('day'),
   includeRiskMetrics: z.string().transform(val => val === 'true').optional().default('true'),
   includeComparison: z.string().transform(val => val === 'true').optional().default('false'),
-  benchmarkType: z.enum(['hold', 'market', 'peer']).optional().default('hold')
+  includeAdvancedMetrics: z.string().transform(val => val === 'true').optional().default('true'),
+  includeAttribution: z.string().transform(val => val === 'true').optional().default('false'),
+  benchmarkType: z.enum(['hold', 'market', 'peer', 'custom']).optional().default('hold'),
+  confidenceLevel: z.enum(['90', '95', '99']).optional().default('95'),
+  riskFreeRate: z.string().regex(/^\d+(\.\d+)?$/).transform(val => parseFloat(val)).optional().default('0.02')
 });
 
-// Supabase returns bot_configurations as an array due to the join
-interface SupabaseTrade {
-  status: any;
-  profit_loss_usd?: any;
-  gas_fee_usd?: any;
-  amount_in?: any;
-  executed_at: any;
-  chain?: any;
-  token_in_symbol?: any;
-  token_out_symbol?: any;
-  trade_type?: any;
-  bot_configurations: {
-    user_id: any;
-    type: any;
-    name?: any;
-  }[];
-}
-
-// Normalized Trade type for internal use
-interface Trade {
-  status: string;
-  profit_loss_usd: string | null | undefined;
-  gas_fee_usd: string | null | undefined;
-  amount_in: string | null | undefined;
+// Enhanced interfaces with more precise types
+interface EnhancedSupabaseTrade {
+  id: string;
+  status: 'completed' | 'failed' | 'pending' | 'cancelled';
+  profit_loss_usd: string | number | null;
+  gas_fee_usd: string | number | null;
+  amount_in: string | number | null;
+  amount_out: string | number | null;
   executed_at: string;
-  chain: string | undefined;
-  token_in_symbol: string | undefined;
-  token_out_symbol: string | undefined;
-  trade_type: string | undefined;
-  bot_configurations: {
+  chain: string | null;
+  token_in_symbol: string | null;
+  token_out_symbol: string | null;
+  trade_type: string | null;
+  slippage: string | number | null;
+  execution_time_ms: number | null;
+  dex: string | null;
+  tx_hash: string | null;
+  bot_configurations: Array<{
+    id: string;
     user_id: string;
-    type: string;
-    name?: string | undefined;
-  } | undefined;
+    type: 'arbitrage' | 'copy-trader' | 'mev-sandwich';
+    name: string | null;
+    created_at: string;
+  }>;
 }
 
-interface TimeGroup {
-  [key: string]: Trade[];
-}
-
-// Helper function to normalize Supabase trade data
-function normalizeSupabaseTrade(supabaseTrade: SupabaseTrade): Trade {
-  const firstBotConfig = supabaseTrade.bot_configurations?.[0];
-  
-  return {
-    status: String(supabaseTrade.status || ''),
-    profit_loss_usd: supabaseTrade.profit_loss_usd ? String(supabaseTrade.profit_loss_usd) : null,
-    gas_fee_usd: supabaseTrade.gas_fee_usd ? String(supabaseTrade.gas_fee_usd) : null,
-    amount_in: supabaseTrade.amount_in ? String(supabaseTrade.amount_in) : null,
-    executed_at: String(supabaseTrade.executed_at || ''),
-    chain: supabaseTrade.chain ? String(supabaseTrade.chain) : undefined,
-    token_in_symbol: supabaseTrade.token_in_symbol ? String(supabaseTrade.token_in_symbol) : undefined,
-    token_out_symbol: supabaseTrade.token_out_symbol ? String(supabaseTrade.token_out_symbol) : undefined,
-    trade_type: supabaseTrade.trade_type ? String(supabaseTrade.trade_type) : undefined,
-    bot_configurations: firstBotConfig ? {
-      user_id: String(firstBotConfig.user_id || ''),
-      type: String(firstBotConfig.type || ''),
-      ...(firstBotConfig.name && { name: String(firstBotConfig.name) })
-    } : undefined
+interface NormalizedTrade {
+  id: string;
+  status: 'completed' | 'failed' | 'pending' | 'cancelled';
+  profitLossUsd: number;
+  gasFeeUsd: number;
+  amountIn: number;
+  amountOut: number;
+  executedAt: string;
+  chain: string;
+  tokenInSymbol: string;
+  tokenOutSymbol: string;
+  tradeType: string;
+  slippage: number;
+  executionTimeMs: number;
+  dex: string;
+  txHash: string;
+  netProfit: number;
+  roi: number;
+  botConfig: {
+    id: string;
+    userId: string;
+    type: 'arbitrage' | 'copy-trader' | 'mev-sandwich';
+    name: string;
+    createdAt: string;
   };
 }
 
+interface RiskMetrics {
+  volatility: number;
+  var95: number;
+  var99: number;
+  cvar95: number; // Conditional VaR
+  expectedShortfall: number;
+  maxDrawdown: number;
+  maxDrawdownDuration: number;
+  sharpeRatio: number;
+  sortinoRatio: number;
+  calmarRatio: number;
+  informationRatio: number;
+  treynorRatio: number;
+  profitFactor: number;
+  payoffRatio: number;
+  maxConsecutiveLosses: number;
+  maxConsecutiveWins: number;
+  avgReturn: number;
+  totalReturn: number;
+  bestTrade: number;
+  worstTrade: number;
+  winRate: number;
+  lossRate: number;
+  avgWin: number;
+  avgLoss: number;
+  largestWin: number;
+  largestLoss: number;
+  recoveryFactor: number;
+  ulcerIndex: number;
+  gainToPainRatio: number;
+}
+
+interface TimeGroup {
+  [key: string]: NormalizedTrade[];
+}
+
+// Enhanced normalization with better error handling
+function normalizeSupabaseTrade(trade: EnhancedSupabaseTrade): NormalizedTrade | null {
+  try {
+    const botConfig = trade.bot_configurations?.[0];
+    if (!botConfig) {
+      console.warn(`Trade ${trade.id} missing bot configuration`);
+      return null;
+    }
+
+    const profitLossUsd = parseFloat(String(trade.profit_loss_usd || 0));
+    const gasFeeUsd = parseFloat(String(trade.gas_fee_usd || 0));
+    const amountIn = parseFloat(String(trade.amount_in || 0));
+    const amountOut = parseFloat(String(trade.amount_out || 0));
+    const netProfit = profitLossUsd - gasFeeUsd;
+    const roi = amountIn > 0 ? (netProfit / amountIn) * 100 : 0;
+
+    return {
+      id: trade.id,
+      status: trade.status,
+      profitLossUsd,
+      gasFeeUsd,
+      amountIn,
+      amountOut,
+      executedAt: trade.executed_at,
+      chain: trade.chain || 'unknown',
+      tokenInSymbol: trade.token_in_symbol || 'unknown',
+      tokenOutSymbol: trade.token_out_symbol || 'unknown',
+      tradeType: trade.trade_type || 'unknown',
+      slippage: parseFloat(String(trade.slippage || 0)),
+      executionTimeMs: trade.execution_time_ms || 0,
+      dex: trade.dex || 'unknown',
+      txHash: trade.tx_hash || '',
+      netProfit,
+      roi,
+      botConfig: {
+        id: botConfig.id,
+        userId: botConfig.user_id,
+        type: botConfig.type,
+        name: botConfig.name || 'Unnamed Bot',
+        createdAt: botConfig.created_at
+      }
+    };
+  } catch (error) {
+    console.error(`Error normalizing trade ${trade.id}:`, error);
+    return null;
+  }
+}
+
 export async function GET(request: NextRequest) {
+  const totalTimer = createTimer('Total API Request');
+  
   try {
     // Rate limiting
+    const rateLimitTimer = createTimer('Rate Limiting');
     const rateLimitResult = await rateLimiter.check(request);
+    endTimer(rateLimitTimer);
+    
     if (!rateLimitResult.success) {
       return NextResponse.json(
         { 
           error: 'Rate limit exceeded',
-          retryAfter: Math.ceil((rateLimitResult.resetTime - Date.now()) / 1000)
+          retryAfter: Math.ceil((rateLimitResult.resetTime - Date.now()) / 1000),
+          timestamp: new Date().toISOString()
         },
         { status: 429 }
       );
     }
 
     // Authentication
+    const authTimer = createTimer('Authentication');
     const authResult = await verifyJWT(request);
+    endTimer(authTimer);
+    
     if (!authResult.success) {
       return NextResponse.json(
-        { error: 'Unauthorized', details: authResult.error },
+        { 
+          error: 'Unauthorized', 
+          details: authResult.error,
+          timestamp: new Date().toISOString()
+        },
         { status: 401 }
       );
     }
@@ -115,20 +224,28 @@ export async function GET(request: NextRequest) {
     const userId = authResult.payload?.sub;
     if (!userId) {
       return NextResponse.json(
-        { error: 'Invalid token payload' },
+        { 
+          error: 'Invalid token payload',
+          timestamp: new Date().toISOString()
+        },
         { status: 401 }
       );
     }
-    const url = new URL(request.url);
-    const queryParams = Object.fromEntries(url.searchParams.entries());
 
     // Validate query parameters
+    const url = new URL(request.url);
+    const queryParams = Object.fromEntries(url.searchParams.entries());
+    
+    const validationTimer = createTimer('Query Validation');
     const validationResult = PerformanceQuerySchema.safeParse(queryParams);
+    endTimer(validationTimer);
+    
     if (!validationResult.success) {
       return NextResponse.json(
         { 
           error: 'Invalid query parameters',
-          details: validationResult.error.errors
+          details: validationResult.error.errors,
+          timestamp: new Date().toISOString()
         },
         { status: 400 }
       );
@@ -142,59 +259,75 @@ export async function GET(request: NextRequest) {
       granularity,
       includeRiskMetrics,
       includeComparison,
-      benchmarkType
+      includeAdvancedMetrics,
+      includeAttribution,
+      benchmarkType,
+      confidenceLevel,
+      riskFreeRate
     } = validationResult.data;
 
     // Calculate date range based on period
     const dateRange = calculateDateRange(period);
 
-    // Get current performance metrics
-    const currentMetrics = await getCurrentPerformanceMetrics(userId, {
-      botId,
-      botType,
-      chain,
-      dateRange
-    });
+    // Parallel data fetching for better performance
+    const dataPromises = [];
+    
+    // Core performance metrics
+    dataPromises.push(
+      getCurrentPerformanceMetrics(userId, { botId, botType, chain, dateRange })
+    );
+    
+    // Time series data
+    dataPromises.push(
+      getTimeSeriesData(userId, { botId, botType, chain, dateRange, granularity })
+    );
 
-    // Get time series data
-    const timeSeriesData = await getTimeSeriesData(userId, {
-      botId,
-      botType,
-      chain,
-      dateRange,
-      granularity
-    });
-
-    // Calculate risk metrics if requested
-    let riskMetrics = null;
+    // Conditional data fetching
     if (includeRiskMetrics) {
-      riskMetrics = await calculateRiskMetrics(userId, {
-        botId,
-        botType,
-        chain,
-        dateRange
-      });
+      dataPromises.push(
+        calculateRiskMetrics(userId, { 
+          botId, 
+          botType, 
+          chain, 
+          dateRange
+        })
+      );
+    } else {
+      dataPromises.push(Promise.resolve(null));
     }
 
-    // Get comparison data if requested
-    let comparisonData = null;
     if (includeComparison) {
-      comparisonData = await getComparisonData(userId, {
-        botId,
-        botType,
-        chain,
-        dateRange,
-        benchmarkType
-      });
+      dataPromises.push(
+        getComparisonData(userId, { botId, botType, chain, dateRange, benchmarkType })
+      );
+    } else {
+      dataPromises.push(Promise.resolve(null));
     }
 
-    // Get portfolio breakdown
-    const portfolioBreakdown = await getPortfolioBreakdown(userId, {
-      botId,
-      botType,
-      chain,
-      dateRange
-    });
+    if (includeAttribution) {
+      // Performance attribution placeholder - can be implemented later
+      dataPromises.push(Promise.resolve(null));
+    } else {
+      dataPromises.push(Promise.resolve(null));
+    }
+
+    // Portfolio breakdown
+    dataPromises.push(
+      getPortfolioBreakdown(userId, { botId, botType, chain, dateRange })
+    );
+
+    const executionTimer = createTimer('Data Fetching');
+    const [
+      currentMetrics,
+      timeSeriesData,
+      riskMetrics,
+      comparisonData,
+      attributionData,
+      portfolioBreakdown
+    ] = await Promise.all(dataPromises);
+    endTimer(executionTimer);
+
+    const totalDuration = endTimer(totalTimer);
 
     return NextResponse.json({
       success: true,
@@ -209,22 +342,38 @@ export async function GET(request: NextRequest) {
         timeSeries: timeSeriesData,
         riskMetrics,
         comparison: comparisonData,
+        attribution: attributionData,
         portfolio: portfolioBreakdown,
         filters: {
           botId,
           botType,
           chain
-        }
+        },
+                 metadata: {
+           requestDuration: totalDuration,
+           confidenceLevel: parseInt(confidenceLevel),
+           riskFreeRate,
+           dataPoints: Array.isArray(timeSeriesData) ? timeSeriesData.length : 0,
+           cacheable: true,
+           cacheExpiry: 300 // 5 minutes
+         }
       },
       timestamp: new Date().toISOString()
     });
 
   } catch (error) {
-    console.error('API error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    endTimer(totalTimer);
+    console.error('Performance API error:', error);
+    
+    // Enhanced error response
+    const errorResponse = {
+      error: 'Internal server error',
+      message: error instanceof Error ? error.message : 'Unknown error',
+      timestamp: new Date().toISOString(),
+      requestId: crypto.randomUUID()
+    };
+
+    return NextResponse.json(errorResponse, { status: 500 });
   }
 }
 
@@ -248,6 +397,9 @@ function calculateDateRange(period: string): { from: string; to: string } {
       break;
     case '90d':
       from = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+      break;
+    case '1y':
+      from = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000);
       break;
     case 'all':
     default:
@@ -296,8 +448,10 @@ async function getCurrentPerformanceMetrics(userId: string, filters: any) {
       return null;
     }
 
-    // Normalize Supabase response to Trade objects
-    const normalizedTrades: Trade[] = (trades as SupabaseTrade[] || []).map(normalizeSupabaseTrade);
+    // Normalize Supabase response to Trade objects and filter out nulls
+    const normalizedTrades: NormalizedTrade[] = (trades as EnhancedSupabaseTrade[] || [])
+      .map(normalizeSupabaseTrade)
+      .filter((trade): trade is NormalizedTrade => trade !== null);
     const completedTrades = normalizedTrades.filter(t => t.status === 'completed');
     const failedTrades = normalizedTrades.filter(t => t.status === 'failed');
 
@@ -307,15 +461,15 @@ async function getCurrentPerformanceMetrics(userId: string, filters: any) {
     const successRate = totalTrades > 0 ? (successfulTrades / totalTrades) * 100 : 0;
 
     const totalProfitLoss = completedTrades.reduce((sum, trade) => 
-      sum + parseFloat(trade.profit_loss_usd || '0'), 0);
+      sum + trade.profitLossUsd, 0);
 
     const totalGasFees = normalizedTrades.reduce((sum, trade) => 
-      sum + parseFloat(trade.gas_fee_usd || '0'), 0);
+      sum + trade.gasFeeUsd, 0);
 
     const netProfit = totalProfitLoss - totalGasFees;
 
     const profitableTrades = completedTrades.filter(t => 
-      parseFloat(t.profit_loss_usd || '0') > 0);
+      t.profitLossUsd > 0);
 
     const winRate = completedTrades.length > 0 ? 
       (profitableTrades.length / completedTrades.length) * 100 : 0;
@@ -324,7 +478,7 @@ async function getCurrentPerformanceMetrics(userId: string, filters: any) {
       totalProfitLoss / completedTrades.length : 0;
 
     const avgTradeSize = completedTrades.length > 0 ?
-      completedTrades.reduce((sum, trade) => sum + parseFloat(trade.amount_in || '0'), 0) / completedTrades.length : 0;
+      completedTrades.reduce((sum, trade) => sum + trade.amountIn, 0) / completedTrades.length : 0;
 
     // Calculate daily returns for additional metrics
     const dailyReturns = calculateDailyReturns(completedTrades);
@@ -387,21 +541,23 @@ async function getTimeSeriesData(userId: string, filters: any) {
       return [];
     }
 
-    // Normalize Supabase response to Trade objects
-    const normalizedTrades: Trade[] = (trades as SupabaseTrade[]).map(normalizeSupabaseTrade);
+    // Normalize Supabase response to Trade objects and filter out nulls
+    const normalizedTrades: NormalizedTrade[] = (trades as EnhancedSupabaseTrade[])
+      .map(normalizeSupabaseTrade)
+      .filter((trade): trade is NormalizedTrade => trade !== null);
 
     // Group trades by time period
     const timeGroups: TimeGroup = groupTradesByTime(normalizedTrades, filters.granularity);
     
     // Calculate metrics for each time period
-    const timeSeriesData = Object.entries(timeGroups).map(([timestamp, periodTrades]: [string, Trade[]]) => {
-      const completedTrades = periodTrades.filter((t: Trade) => t.status === 'completed');
+    const timeSeriesData = Object.entries(timeGroups).map(([timestamp, periodTrades]: [string, NormalizedTrade[]]) => {
+      const completedTrades = periodTrades.filter((t: NormalizedTrade) => t.status === 'completed');
       
-      const totalProfit = completedTrades.reduce((sum: number, trade: Trade) => 
-        sum + parseFloat(trade.profit_loss_usd || '0'), 0);
+      const totalProfit = completedTrades.reduce((sum: number, trade: NormalizedTrade) => 
+        sum + trade.profitLossUsd, 0);
       
-      const totalGasFees = periodTrades.reduce((sum: number, trade: Trade) => 
-        sum + parseFloat(trade.gas_fee_usd || '0'), 0);
+      const totalGasFees = periodTrades.reduce((sum: number, trade: NormalizedTrade) => 
+        sum + trade.gasFeeUsd, 0);
 
       const netProfit = totalProfit - totalGasFees;
       const successRate = periodTrades.length > 0 ? 
@@ -455,9 +611,11 @@ async function calculateRiskMetrics(userId: string, filters: any) {
       return null;
     }
 
-    // Normalize trades to Trade[] type
-    const normalizedTrades: Trade[] = (trades as SupabaseTrade[]).map(normalizeSupabaseTrade);
-    const returns = normalizedTrades.map(trade => parseFloat(trade.profit_loss_usd || '0'));
+    // Normalize trades to Trade[] type and filter out nulls
+    const normalizedTrades: NormalizedTrade[] = (trades as EnhancedSupabaseTrade[])
+      .map(normalizeSupabaseTrade)
+      .filter((trade): trade is NormalizedTrade => trade !== null);
+    const returns = normalizedTrades.map(trade => trade.profitLossUsd);
     const sortedReturns = [...returns].sort((a, b) => a - b);
 
     // Calculate risk metrics
@@ -600,19 +758,21 @@ async function getPortfolioBreakdown(userId: string, filters: any) {
       return null;
     }
 
-    // Normalize Supabase response to Trade objects
-    const normalizedTrades: Trade[] = (trades as SupabaseTrade[]).map(normalizeSupabaseTrade);
+    // Normalize Supabase response to Trade objects and filter out nulls
+    const normalizedTrades: NormalizedTrade[] = (trades as EnhancedSupabaseTrade[])
+      .map(normalizeSupabaseTrade)
+      .filter((trade): trade is NormalizedTrade => trade !== null);
 
     // Group by different dimensions
     const byChain = groupBy(normalizedTrades, 'chain');
-    const byBot = groupBy(normalizedTrades, (trade: Trade) => trade.bot_configurations?.name || 'Unknown');
-    const byTradeType = groupBy(normalizedTrades, 'trade_type');
-    const byToken = groupBy(normalizedTrades, 'token_in_symbol');
+    const byBot = groupBy(normalizedTrades, (trade: NormalizedTrade) => trade.botConfig.name || 'Unknown');
+    const byTradeType = groupBy(normalizedTrades, 'tradeType');
+    const byToken = groupBy(normalizedTrades, 'tokenInSymbol');
 
-    const processGroup = (group: Trade[]) => ({
+    const processGroup = (group: NormalizedTrade[]) => ({
       trades: group.length,
-      totalProfit: group.reduce((sum, t) => sum + parseFloat(t.profit_loss_usd || '0'), 0),
-      avgTradeSize: group.reduce((sum, t) => sum + parseFloat(t.amount_in || '0'), 0) / group.length
+      totalProfit: group.reduce((sum, t) => sum + t.profitLossUsd, 0),
+      avgTradeSize: group.reduce((sum, t) => sum + t.amountIn, 0) / group.length
     });
 
     return {
@@ -637,16 +797,16 @@ async function getPortfolioBreakdown(userId: string, filters: any) {
 }
 
 // Helper functions
-function calculateDailyReturns(trades: Trade[]) {
-  const tradesByDay = groupBy(trades, (trade: Trade) => {
-    const date = new Date(trade.executed_at).toISOString().split('T')[0];
+function calculateDailyReturns(trades: NormalizedTrade[]) {
+  const tradesByDay = groupBy(trades, (trade: NormalizedTrade) => {
+    const date = new Date(trade.executedAt).toISOString().split('T')[0];
     return date || 'unknown';
   });
 
   return Object.entries(tradesByDay).map(([date, dayTrades]) => ({
     date,
     return: dayTrades.reduce((sum, trade) => 
-      sum + parseFloat(trade.profit_loss_usd || '0'), 0)
+      sum + trade.profitLossUsd, 0)
   }));
 }
 
@@ -661,9 +821,9 @@ function calculateCumulativeReturns(dailyReturns: { date: string; return: number
   });
 }
 
-function groupTradesByTime(trades: Trade[], granularity: string): TimeGroup {
+function groupTradesByTime(trades: NormalizedTrade[], granularity: string): TimeGroup {
   return trades.reduce((groups, trade) => {
-    const date = new Date(trade.executed_at);
+    const date = new Date(trade.executedAt);
     let key: string;
 
     switch (granularity) {
