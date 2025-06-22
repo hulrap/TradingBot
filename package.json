@@ -1,21 +1,32 @@
 {
   "name": "trading-bot-monorepo",
   "private": true,
+  "description": "Trading bot monorepo with comprehensive multi-chain support",
+  "version": "1.0.0",
   "scripts": {
     "build": "turbo build",
+    "build:types": "turbo build:types",
     "dev": "turbo dev",
+    "start": "turbo start",
     "lint": "turbo lint",
-    "format": "prettier --write \"**/*.{ts,tsx,md}\"",
+    "lint:fix": "turbo lint:fix",
+    "format": "turbo format",
+    "format:check": "turbo format:check",
+    "type-check": "turbo type-check",
     "test": "turbo test",
     "test:watch": "turbo test --watch",
-    "clean": "turbo clean",
-    "type-check": "turbo type-check",
+    "validate": "turbo validate",
+    "clean": "turbo clean && pnpm run clean:root",
+    "clean:root": "rimraf node_modules/.cache turbo/.cache",
+    "reset": "pnpm run clean && pnpm install",
     "audit": "pnpm audit --audit-level moderate",
     "update-deps": "pnpm update --recursive",
     "security-scan": "pnpm audit && pnpm outdated",
-    "start": "turbo start",
-    "check-types": "turbo type-check",
-    "lint-fix": "turbo lint --fix"
+    "workspace:list": "pnpm list --recursive --depth=0",
+    "workspace:graph": "pnpm list --recursive --depth=1",
+    "types:build": "pnpm --filter @trading-bot/types build",
+    "types:dev": "pnpm --filter @trading-bot/types dev",
+    "preinstall": "npx only-allow pnpm"
   },
   "devDependencies": {
     "turbo": "^2.5.4",
@@ -25,13 +36,30 @@
     "husky": "^8.0.3",
     "lint-staged": "^15.2.0",
     "@types/node": "^20.10.0",
-    "typescript": "^5.3.0"
+    "typescript": "^5.3.0",
+    "rimraf": "^5.0.5",
+    "only-allow": "^1.2.1"
   },
   "packageManager": "pnpm@10.0.0",
   "engines": {
     "node": ">=18.0.0",
     "pnpm": ">=10.0.0"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/trading-bot/trading-bot.git"
+  },
+  "keywords": [
+    "trading-bot",
+    "defi",
+    "mev",
+    "arbitrage",
+    "multi-chain",
+    "ethereum",
+    "bsc",
+    "polygon",
+    "solana"
+  ],
   "lint-staged": {
     "*.{ts,tsx,js,jsx}": [
       "eslint --fix",
@@ -40,5 +68,9 @@
     "*.{json,md,yaml,yml}": [
       "prettier --write"
     ]
-  }
+  },
+  "workspaces": [
+    "packages/*",
+    "mcp-servers"
+  ]
 } 

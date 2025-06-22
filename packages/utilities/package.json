@@ -1,0 +1,102 @@
+{
+  "name": "@trading-bot/utilities",
+  "version": "1.0.0",
+  "description": "Production-grade utility functions for trading bot platform",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc --project tsconfig.build.json",
+    "build:watch": "tsc --project tsconfig.build.json --watch",
+    "dev": "tsc --watch",
+    "clean": "rimraf dist .tsbuildinfo",
+    "typecheck": "tsc --noEmit",
+    "typecheck:watch": "tsc --noEmit --watch",
+
+    "lint": "eslint src --ext .ts --cache",
+    "lint:fix": "eslint src --ext .ts --fix --cache",
+    "lint:ci": "eslint src --ext .ts --format=unix",
+    "format": "prettier --write src/**/*.ts",
+    "format:check": "prettier --check src/**/*.ts",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "dependencies": {
+    "@noble/ed25519": "^2.3.0",
+    "@noble/hashes": "^1.8.0",
+    "@noble/secp256k1": "^2.3.0",
+    "@trading-bot/types": "workspace:*",
+    "bcryptjs": "^3.0.2",
+    "bip39": "^3.1.0",
+    "ethers": "^6.8.1",
+    "joi": "^17.11.0",
+    "jose": "^6.0.11",
+    "redis": "^4.6.12"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+
+    "@types/node": "^20.8.6",
+    "@typescript-eslint/eslint-plugin": "^6.15.0",
+    "@typescript-eslint/parser": "^6.15.0",
+    "eslint": "^8.56.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-import": "^2.29.1",
+    "eslint-plugin-jsdoc": "^46.9.0",
+    "eslint-plugin-prefer-arrow": "^1.2.3",
+    "prettier": "^3.1.1",
+    "rimraf": "^5.0.5",
+    "typescript": "^5.2.2"
+  },
+  "peerDependencies": {
+    "redis": "^4.6.0"
+  },
+  "peerDependenciesMeta": {
+    "redis": {
+      "optional": true
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "package.json"
+  ],
+  "publishConfig": {
+    "access": "restricted"
+  },
+  "keywords": [
+    "trading",
+    "bot",
+    "utilities",
+    "crypto",
+    "blockchain",
+    "validation",
+    "formatting",
+    "cache",
+    "rate-limiting",
+    "amount-calculation",
+    "address-utils",
+    "signature-utils",
+    "typescript"
+  ],
+  "author": "Trading Bot Development Team",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/trading-bot/trading-bot.git",
+    "directory": "bot/packages/utilities"
+  },
+  "homepage": "https://github.com/trading-bot/trading-bot#readme",
+  "bugs": {
+    "url": "https://github.com/trading-bot/trading-bot/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+
+}

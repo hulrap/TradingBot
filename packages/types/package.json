@@ -1,207 +1,103 @@
 {
   "name": "@trading-bot/types",
-  "version": "2.0.0",
-  "description": "Enterprise-grade TypeScript type definitions and validation schemas for trading bot platform with comprehensive Zod integration, multi-chain support, and institutional-grade type safety",
-  "keywords": [
-    "typescript",
-    "types",
-    "trading",
-    "blockchain",
-    "defi",
-    "arbitrage",
-    "mev",
-    "validation",
-    "zod",
-    "ethereum",
-    "solana",
-    "bsc",
-    "polygon"
-  ],
-  "author": {
-    "name": "Trading Bot Development Team",
-    "email": "dev@tradingbot.com",
-    "url": "https://tradingbot.com"
-  },
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/trading-bot/monorepo.git",
-    "directory": "packages/types"
-  },
-  "homepage": "https://github.com/trading-bot/monorepo/tree/main/packages/types",
-  "bugs": {
-    "url": "https://github.com/trading-bot/monorepo/issues"
-  },
-  "private": true,
-  "sideEffects": false,
-  "engines": {
-    "node": ">=18.0.0",
-    "npm": ">=9.0.0",
-    "pnpm": ">=8.0.0"
-  },
-  "main": "./dist/index.js",
-  "module": "./dist/index.mjs",
-  "types": "./dist/index.d.ts",
+  "version": "1.0.0",
+  "description": "Comprehensive type definitions for trading bot platform with multi-chain support",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.mjs",
-      "require": "./dist/index.js",
-      "default": "./dist/index.js"
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
     },
-    "./bot": {
-      "types": "./dist/bot.d.ts",
-      "import": "./dist/bot.mjs",
-      "require": "./dist/bot.js"
+    "./blockchain": {
+      "types": "./dist/blockchain/index.d.ts"
     },
-    "./schemas": {
-      "types": "./dist/schemas/index.d.ts",
-      "import": "./dist/schemas/index.mjs",
-      "require": "./dist/schemas/index.js"
+    "./trading": {
+      "types": "./dist/trading/index.d.ts"
     },
-    "./utils": {
-      "types": "./dist/utils/index.d.ts",
-      "import": "./dist/utils/index.mjs",
-      "require": "./dist/utils/index.js"
+    "./data": {
+      "types": "./dist/data/index.d.ts"
     },
-    "./package.json": "./package.json"
+    "./config": {
+      "types": "./dist/config/index.d.ts"
+    },
+    "./monitoring": {
+      "types": "./dist/monitoring/index.d.ts"
+    }
   },
   "files": [
     "dist",
     "src",
     "README.md",
-    "CHANGELOG.md",
-    "LICENSE"
+    "CHANGELOG.md"
   ],
   "scripts": {
-    "build": "pnpm run build:clean && pnpm run build:types && pnpm run build:esm && pnpm run build:cjs",
-    "build:clean": "rimraf dist",
-    "build:types": "tsc --project tsconfig.build.json",
-    "build:esm": "tsup --format esm --no-dts",
-    "build:cjs": "tsup --format cjs --no-dts",
-    "build:watch": "tsc --project tsconfig.build.json --watch",
-    "dev": "pnpm run build:watch",
-    "lint": "eslint . --ext .ts --cache --cache-location node_modules/.cache/eslint",
-    "lint:fix": "pnpm run lint --fix",
-    "format": "prettier --write \"**/*.{ts,json,md}\"",
-    "format:check": "prettier --check \"**/*.{ts,json,md}\"",
+    "build": "pnpm run clean && pnpm run build:types",
+    "build:types": "tsc -p tsconfig.build.json",
+    "dev": "tsc -w -p tsconfig.build.json",
+    "clean": "rimraf dist .tsbuildinfo",
     "type-check": "tsc --noEmit",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage",
-    "test:ui": "vitest --ui",
-    "validate": "pnpm run lint && pnpm run format:check && pnpm run type-check && pnpm run test",
-    "security:audit": "npm audit --audit-level=moderate",
-    "security:check": "pnpm audit --fix",
-    "deps:check": "depcheck",
-    "deps:update": "ncu -i",
-    "size": "size-limit",
-    "analyze": "pnpm run build && bundlesize",
-    "docs": "typedoc --out docs src/index.ts",
-    "docs:serve": "pnpm run docs && http-server docs -p 3001",
-    "clean": "rimraf dist node_modules/.cache coverage docs",
-    "prepare": "pnpm run build",
-    "prepublishOnly": "pnpm run validate && pnpm run build",
-    "prerelease": "pnpm run validate && pnpm run build && pnpm run docs",
-    "release": "changeset publish",
-    "version": "changeset version"
+    "lint": "eslint src --ext .ts --cache",
+    "lint:fix": "eslint src --ext .ts --fix --cache",
+    "lint:ci": "eslint src --ext .ts --format=unix",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\"",
+    "test": "echo \"No tests for types package\" && exit 0",
+    "validate": "pnpm run type-check && pnpm run lint && pnpm run format:check",
+    "prepublishOnly": "pnpm run validate && pnpm run build"
   },
-  "dependencies": {
-    "zod": "^3.22.4"
+  "keywords": [
+    "trading",
+    "bot",
+    "types",
+    "typescript",
+    "blockchain",
+    "defi",
+    "mev",
+    "arbitrage",
+    "multi-chain",
+    "ethereum",
+    "bsc",
+    "polygon",
+    "solana",
+    "trading-types",
+    "crypto-types",
+    "web3-types"
+  ],
+  "author": "Trading Bot Development Team",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/trading-bot/trading-bot.git",
+    "directory": "bot/packages/types"
+  },
+  "bugs": {
+    "url": "https://github.com/trading-bot/trading-bot/issues"
+  },
+  "homepage": "https://github.com/trading-bot/trading-bot/tree/main/bot/packages/types#readme",
+  "engines": {
+    "node": ">=16.0.0"
   },
   "devDependencies": {
-    "@changesets/cli": "^2.27.1",
-    "@size-limit/preset-small-lib": "^11.0.2",
-    "@trading-bot/config": "workspace:*",
-    "@types/node": "^20.11.24",
-    "@typescript-eslint/eslint-plugin": "^7.1.1",
-    "@typescript-eslint/parser": "^7.1.1",
-    "@vitest/coverage-v8": "^1.3.1",
-    "@vitest/ui": "^1.3.1",
-    "bundlesize": "^0.18.1",
-    "depcheck": "^1.4.7",
-    "eslint": "^8.57.0",
-    "http-server": "^14.1.1",
-    "npm-check-updates": "^16.14.15",
-    "prettier": "^3.2.5",
+    "@types/node": "^20.10.0",
+    "@typescript-eslint/eslint-plugin": "^6.15.0",
+    "@typescript-eslint/parser": "^6.15.0",
+    "eslint": "^8.56.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-import": "^2.29.1",
+    "eslint-plugin-jsdoc": "^46.9.0",
+    "prettier": "^3.1.1",
     "rimraf": "^5.0.5",
-    "size-limit": "^11.0.2",
-    "tsup": "^8.0.2",
-    "typedoc": "^0.25.12",
-    "typescript": "^5.3.3",
-    "vitest": "^1.3.1"
+    "typescript": "^5.3.3"
   },
   "peerDependencies": {
     "typescript": ">=5.0.0"
   },
   "publishConfig": {
-    "access": "restricted",
-    "registry": "https://npm.pkg.github.com"
+    "access": "public",
+    "provenance": true
   },
-  "bundlesize": [
-    {
-      "path": "./dist/index.js",
-      "maxSize": "10 kB"
-    },
-    {
-      "path": "./dist/index.mjs",
-      "maxSize": "10 kB"
-    }
-  ],
-  "size-limit": [
-    {
-      "path": "dist/index.js",
-      "limit": "10 KB"
-    },
-    {
-      "path": "dist/index.mjs",
-      "limit": "10 KB"
-    }
-  ],
-  "eslintConfig": {
-    "extends": "@trading-bot/config/eslint"
-  },
-  "prettier": "@trading-bot/config/prettier",
-  "tsup": {
-    "entry": {
-      "index": "index.ts",
-      "bot": "src/bot.ts"
-    },
-    "outDir": "dist",
-    "target": "es2022",
-    "clean": true,
-    "sourcemap": true,
-    "minify": false,
-    "splitting": false,
-    "treeshake": true,
-    "external": ["zod"]
-  },
-  "typedoc": {
-    "entryPoints": ["src/index.ts"],
-    "out": "docs",
-    "theme": "default",
-    "readme": "README.md",
-    "excludePrivate": true,
-    "excludeProtected": true,
-    "excludeExternals": true,
-    "includeVersion": true,
-    "sort": ["source-order"],
-    "categorizeByGroup": true,
-    "defaultCategory": "API",
-    "categoryOrder": [
-      "Types",
-      "Schemas", 
-      "Utilities",
-      "Validation",
-      "*"
-    ]
-  },
-  "funding": {
-    "type": "github",
-    "url": "https://github.com/sponsors/trading-bot"
-  },
-  "volta": {
-    "node": "20.11.1",
-    "pnpm": "8.15.4"
-  }
-} 
+  "sideEffects": false,
+  "typesPublisherContentHash": "auto"
+}

@@ -1,0 +1,88 @@
+{
+  "compilerOptions": {
+    // Language and Environment
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "node",
+    
+    // Path Mapping for Monorepo Packages
+    "baseUrl": ".",
+    "paths": {
+      "@trading-bot/types": ["packages/types/src/index.ts"],
+      "@trading-bot/types/*": ["packages/types/src/*"],
+      "@trading-bot/utilities": ["packages/utilities/src/index.ts"],
+      "@trading-bot/utilities/*": ["packages/utilities/src/*"],
+      "@trading-bot/connections": ["packages/connections/src/index.ts"],
+      "@trading-bot/connections/*": ["packages/connections/src/*"],
+      "@trading-bot/data-sources": ["packages/data-sources/src/index.ts"],
+      "@trading-bot/data-sources/*": ["packages/data-sources/src/*"],
+      "@trading-bot/dex-integration": ["packages/dex-integration/src/index.ts"],
+      "@trading-bot/dex-integration/*": ["packages/dex-integration/src/*"],
+      "@trading-bot/execution": ["packages/execution/src/index.ts"],
+      "@trading-bot/execution/*": ["packages/execution/src/*"],
+      "@trading-bot/monitoring": ["packages/monitoring/src/index.ts"],
+      "@trading-bot/monitoring/*": ["packages/monitoring/src/*"],
+      "@trading-bot/orchestrator": ["packages/orchestrator/src/index.ts"],
+      "@trading-bot/orchestrator/*": ["packages/orchestrator/src/*"],
+      "@trading-bot/processing": ["packages/processing/src/index.ts"],
+      "@trading-bot/processing/*": ["packages/processing/src/*"],
+      "@trading-bot/routing": ["packages/routing/src/index.ts"],
+      "@trading-bot/routing/*": ["packages/routing/src/*"]
+    },
+    
+    // Emit
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": false,
+    "removeComments": false,
+    "importHelpers": false,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": false,
+    
+    // Type Checking
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "strictBindCallApply": true,
+    "strictPropertyInitialization": true,
+    "noImplicitThis": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "exactOptionalPropertyTypes": true,
+    
+    // Modules
+    "allowUmdGlobalAccess": false,
+    "resolveJsonModule": true,
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    
+    // JavaScript Support
+    "allowJs": false,
+    "checkJs": false,
+    
+    // Advanced
+    "skipLibCheck": true,
+    "composite": true,
+    "incremental": true,
+    "tsBuildInfoFile": ".tsbuildinfo"
+  },
+  "files": [],
+  "references": [
+    { "path": "packages/types" },
+    { "path": "packages/utilities" },
+    { "path": "packages/connections" },
+    { "path": "packages/data-sources" },
+    { "path": "packages/dex-integration" },
+    { "path": "packages/execution" },
+    { "path": "packages/monitoring" },
+    { "path": "packages/orchestrator" },
+    { "path": "packages/processing" },
+    { "path": "packages/routing" },
+    { "path": "mcp-servers" }
+  ]
+} 

@@ -5,10 +5,11 @@
     "build": {
       "dependsOn": ["^build"],
       "inputs": ["$TURBO_DEFAULT$", ".env*"],
-      "outputs": [".next/**", "!.next/cache/**", "dist/**"]
+      "outputs": ["dist/**", "build/**", ".next/**", "!.next/cache/**"]
     },
-    "lint": {
-      "dependsOn": ["^lint"]
+    "build:types": {
+      "inputs": ["src/**/*.ts", "tsconfig*.json"],
+      "outputs": ["dist/**"]
     },
     "dev": {
       "cache": false,
@@ -19,8 +20,24 @@
       "cache": false
     },
     "type-check": {
-      "dependsOn": ["^type-check"],
-      "inputs": ["$TURBO_DEFAULT$", "**/*.ts", "**/*.tsx"]
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", "**/*.ts", "**/*.tsx", "tsconfig*.json"]
+    },
+    "lint": {
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", ".eslintrc*", "**/*.ts", "**/*.tsx"]
+    },
+    "lint:fix": {
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", ".eslintrc*", "**/*.ts", "**/*.tsx"],
+      "cache": false
+    },
+    "format": {
+      "inputs": ["**/*.ts", "**/*.tsx", "**/*.json", "**/*.md"],
+      "cache": false
+    },
+    "format:check": {
+      "inputs": ["**/*.ts", "**/*.tsx", "**/*.json", "**/*.md"]
     },
     "clean": {
       "cache": false
@@ -28,6 +45,9 @@
     "test": {
       "dependsOn": ["^build"],
       "inputs": ["$TURBO_DEFAULT$", "**/*.test.*", "**/*.spec.*"]
+    },
+    "validate": {
+      "dependsOn": ["type-check", "lint", "format:check"]
     }
   }
 } 

@@ -1,0 +1,83 @@
+{
+  "compilerOptions": {
+    // Language and Environment
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "node",
+    
+    // Path Mapping for Bot Packages
+    "baseUrl": "../..",
+    "paths": {
+      "@trading-bot/types": ["bot/packages/types/src/index.ts"],
+      "@trading-bot/types/*": ["bot/packages/types/src/*"]
+    },
+    
+    // Emit
+    "outDir": "dist",
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": false,
+    "removeComments": false,
+    "importHelpers": false,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": false,
+    
+    // Type Checking
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "strictBindCallApply": true,
+    "strictPropertyInitialization": true,
+    "noImplicitThis": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "exactOptionalPropertyTypes": true,
+    
+    // Unused Code Detection
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "allowUnusedLabels": false,
+    
+    // Modules
+    "allowUmdGlobalAccess": false,
+    "resolveJsonModule": true,
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    
+    // JavaScript Support
+    "allowJs": false,
+    "checkJs": false,
+    
+    // Advanced
+    "skipLibCheck": true,
+    "composite": false,
+    "incremental": true,
+    "tsBuildInfoFile": ".tsbuildinfo",
+    "allowImportingTsExtensions": false,
+  },
+  "include": [
+    "src/**/*.ts"
+  ],
+  "exclude": [
+    "dist/**/*",
+    "node_modules/**/*",
+    "**/*.test.ts",
+    "**/*.spec.ts",
+    "**/*.stories.ts",
+    "**/__tests__/**/*",
+    "**/__mocks__/**/*"
+  ],
+  "references": [
+    {
+      "path": "../types"
+    }
+  ],
+  "ts-node": {
+    "esm": true
+  }
+}

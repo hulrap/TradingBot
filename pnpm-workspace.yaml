@@ -1,5 +1,3 @@
 packages:
-  - 'apps/*'
-  - 'apps/bots/*'
   - 'packages/*'
   - 'mcp-servers' 
