@@ -5,6 +5,51 @@ import { verifyJWT } from '@/lib/auth';
 import { rateLimiter } from '@/lib/rate-limiter';
 import { generateSecureRandom } from '@trading-bot/crypto';
 
+// Enhanced performance tracking
+interface PerformanceTimer {
+  start: number;
+  operation: string;
+}
+
+function createTimer(operation: string): PerformanceTimer {
+  return { start: Date.now(), operation };
+}
+
+function endTimer(timer: PerformanceTimer): number {
+  const duration = Date.now() - timer.start;
+  console.log(`[Trades API] ${timer.operation}: ${duration}ms`);
+  return duration;
+}
+
+// Enhanced trade interfaces
+interface TradeMetrics {
+  totalTrades: number;
+  completedTrades: number;
+  failedTrades: number;
+  pendingTrades: number;
+  executingTrades: number;
+  cancelledTrades: number;
+  successRate: number;
+  avgExecutionTime: number;
+  totalProfitLoss: number;
+  totalGasFees: number;
+  netProfit: number;
+  avgSlippage: number;
+  avgProfitPerTrade: number;
+  winRate: number;
+  bestTrade: number;
+  worstTrade: number;
+  totalVolume: number;
+  uniqueTokenPairs: number;
+  chainsUsed: string[];
+  tradingPairs: Array<{
+    pair: string;
+    count: number;
+    volume: number;
+    profitLoss: number;
+  }>;
+}
+
 // Lazy initialization to avoid build-time errors
 function getSupabaseClient() {
   const supabaseUrl = process.env['SUPABASE_URL'];
@@ -17,64 +62,241 @@ function getSupabaseClient() {
   return createClient(supabaseUrl, supabaseServiceKey);
 }
 
-// Validation schemas
+// Enhanced validation schemas with more options
 const TradeQuerySchema = z.object({
   botId: z.string().uuid().optional(),
   status: z.enum(['pending', 'executing', 'completed', 'failed', 'cancelled']).optional(),
+  chain: z.enum(['ethereum', 'bsc', 'polygon', 'arbitrum', 'solana', 'avalanche', 'fantom', 'optimism']).optional(),
+  tradeType: z.enum(['arbitrage', 'copy', 'sandwich']).optional(),
+  tokenSymbol: z.string().optional(),
+  minProfitLoss: z.string().transform(val => parseFloat(val)).optional(),
+  maxProfitLoss: z.string().transform(val => parseFloat(val)).optional(),
+  minAmount: z.string().transform(val => parseFloat(val)).optional(),
+  maxAmount: z.string().transform(val => parseFloat(val)).optional(),
   limit: z.string().transform(val => parseInt(val, 10)).pipe(z.number().min(1).max(100)).optional().default('50'),
   offset: z.string().transform(val => parseInt(val, 10)).pipe(z.number().min(0)).optional().default('0'),
+  sortBy: z.enum(['created_at', 'executed_at', 'profit_loss_usd', 'amount_in', 'gas_fee_usd']).optional().default('created_at'),
+  sortOrder: z.enum(['asc', 'desc']).optional().default('desc'),
   startDate: z.string().datetime().optional(),
-  endDate: z.string().datetime().optional()
+  endDate: z.string().datetime().optional(),
+  includeMetrics: z.string().transform(val => val === 'true').optional().default('false'),
+  groupBy: z.enum(['day', 'week', 'month', 'bot', 'chain', 'token_pair']).optional()
 });
 
 const TradeCreateSchema = z.object({
   botId: z.string().uuid('Invalid bot ID'),
   tradeType: z.enum(['arbitrage', 'copy', 'sandwich'], { invalid_type_error: 'Invalid trade type' }),
-  chain: z.enum(['ethereum', 'bsc', 'polygon', 'arbitrum', 'solana'], { invalid_type_error: 'Invalid chain' }),
-  tokenInSymbol: z.string().min(1, 'Token in symbol is required'),
-  tokenOutSymbol: z.string().min(1, 'Token out symbol is required'),
-  tokenInAddress: z.string().optional(),
-  tokenOutAddress: z.string().optional(),
-  amountIn: z.string().min(1, 'Amount in is required'),
-  expectedAmountOut: z.string().optional(),
-  maxSlippage: z.number().min(0.1).max(10, 'Max slippage must be between 0.1% and 10%').optional(),
-  gasLimit: z.string().optional(),
-  gasPrice: z.string().optional(),
-  deadline: z.string().datetime().optional()
+  chain: z.enum(['ethereum', 'bsc', 'polygon', 'arbitrum', 'solana', 'avalanche', 'fantom', 'optimism'], { invalid_type_error: 'Invalid chain' }),
+  tokenInSymbol: z.string().min(1, 'Token in symbol is required').max(10, 'Token symbol too long'),
+  tokenOutSymbol: z.string().min(1, 'Token out symbol is required').max(10, 'Token symbol too long'),
+  tokenInAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid token in address').optional(),
+  tokenOutAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid token out address').optional(),
+  amountIn: z.string().regex(/^\d+(\.\d+)?$/, 'Invalid amount format').min(1, 'Amount in is required'),
+  expectedAmountOut: z.string().regex(/^\d+(\.\d+)?$/, 'Invalid expected amount format').optional(),
+  maxSlippage: z.number().min(0.01).max(50, 'Max slippage must be between 0.01% and 50%').optional(),
+  gasLimit: z.string().regex(/^\d+$/, 'Invalid gas limit format').optional(),
+  gasPrice: z.string().regex(/^\d+$/, 'Invalid gas price format').optional(),
+  deadline: z.string().datetime().optional(),
+  dex: z.string().min(1, 'DEX is required').optional(),
+  priority: z.enum(['low', 'medium', 'high', 'urgent']).optional().default('medium'),
+  tags: z.array(z.string()).max(10, 'Too many tags').optional(),
+  notes: z.string().max(500, 'Notes too long').optional()
 });
 
 const TradeUpdateSchema = z.object({
   tradeId: z.string().uuid('Invalid trade ID'),
   status: z.enum(['pending', 'executing', 'completed', 'failed', 'cancelled']),
-  txHash: z.string().optional(),
-  amountOut: z.string().optional(),
-  gasUsed: z.string().optional(),
-  gasPrice: z.string().optional(),
-  profitLossUsd: z.string().optional(),
-  gasFeeUsd: z.string().optional(),
-  errorMessage: z.string().optional(),
-  executedAt: z.string().datetime().optional()
+  txHash: z.string().regex(/^0x[a-fA-F0-9]{64}$/, 'Invalid transaction hash').optional(),
+  amountOut: z.string().regex(/^\d+(\.\d+)?$/, 'Invalid amount out format').optional(),
+  gasUsed: z.string().regex(/^\d+$/, 'Invalid gas used format').optional(),
+  gasPrice: z.string().regex(/^\d+$/, 'Invalid gas price format').optional(),
+  actualSlippage: z.number().min(0).max(100, 'Invalid slippage percentage').optional(),
+  executionTimeMs: z.number().min(0).max(300000, 'Execution time too long').optional(),
+  profitLossUsd: z.string().regex(/^-?\d+(\.\d+)?$/, 'Invalid profit/loss format').optional(),
+  gasFeeUsd: z.string().regex(/^\d+(\.\d+)?$/, 'Invalid gas fee format').optional(),
+  errorMessage: z.string().max(1000, 'Error message too long').optional(),
+  errorCode: z.string().max(50, 'Error code too long').optional(),
+  executedAt: z.string().datetime().optional(),
+  dex: z.string().optional(),
+  blockNumber: z.number().int().positive().optional(),
+  notes: z.string().max(500, 'Notes too long').optional()
 });
 
+// Enhanced utility functions
+async function calculateTradeMetrics(trades: any[]): Promise<TradeMetrics> {
+  const totalTrades = trades.length;
+  const completedTrades = trades.filter(t => t.status === 'completed');
+  const failedTrades = trades.filter(t => t.status === 'failed');
+  const pendingTrades = trades.filter(t => t.status === 'pending');
+  const executingTrades = trades.filter(t => t.status === 'executing');
+  const cancelledTrades = trades.filter(t => t.status === 'cancelled');
+
+  const successRate = totalTrades > 0 ? (completedTrades.length / totalTrades) * 100 : 0;
+  
+  const totalProfitLoss = completedTrades.reduce((sum, trade) => 
+    sum + parseFloat(trade.profit_loss_usd || '0'), 0);
+  
+  const totalGasFees = trades.reduce((sum, trade) => 
+    sum + parseFloat(trade.gas_fee_usd || '0'), 0);
+  
+  const netProfit = totalProfitLoss - totalGasFees;
+  const avgProfitPerTrade = completedTrades.length > 0 ? totalProfitLoss / completedTrades.length : 0;
+  
+  const profitableTrades = completedTrades.filter(t => parseFloat(t.profit_loss_usd || '0') > 0);
+  const winRate = completedTrades.length > 0 ? (profitableTrades.length / completedTrades.length) * 100 : 0;
+  
+  const executionTimes = completedTrades
+    .filter(t => t.execution_time_ms)
+    .map(t => parseFloat(t.execution_time_ms || '0'));
+  const avgExecutionTime = executionTimes.length > 0 ? 
+    executionTimes.reduce((sum, time) => sum + time, 0) / executionTimes.length : 0;
+  
+  const slippages = completedTrades
+    .filter(t => t.actual_slippage)
+    .map(t => parseFloat(t.actual_slippage || '0'));
+  const avgSlippage = slippages.length > 0 ?
+    slippages.reduce((sum, slip) => sum + slip, 0) / slippages.length : 0;
+  
+  const profits = completedTrades.map(t => parseFloat(t.profit_loss_usd || '0'));
+  const bestTrade = profits.length > 0 ? Math.max(...profits) : 0;
+  const worstTrade = profits.length > 0 ? Math.min(...profits) : 0;
+  
+  const totalVolume = trades.reduce((sum, trade) => 
+    sum + parseFloat(trade.amount_in || '0'), 0);
+  
+  const uniqueTokenPairs = new Set(
+    trades.map(t => `${t.token_in_symbol}/${t.token_out_symbol}`)
+  ).size;
+  
+  const chainsUsed = [...new Set(trades.map(t => t.chain).filter(Boolean))];
+  
+  const pairCounts = trades.reduce((acc: Record<string, any>, trade) => {
+    const pair = `${trade.token_in_symbol}/${trade.token_out_symbol}`;
+    if (!acc[pair]) {
+      acc[pair] = { count: 0, volume: 0, profitLoss: 0 };
+    }
+    acc[pair].count++;
+    acc[pair].volume += parseFloat(trade.amount_in || '0');
+    acc[pair].profitLoss += parseFloat(trade.profit_loss_usd || '0');
+    return acc;
+  }, {});
+  
+  const tradingPairs = Object.entries(pairCounts).map(([pair, data]: [string, any]) => ({
+    pair,
+    count: data.count,
+    volume: Math.round(data.volume * 100) / 100,
+    profitLoss: Math.round(data.profitLoss * 100) / 100
+  }));
+
+  return {
+    totalTrades,
+    completedTrades: completedTrades.length,
+    failedTrades: failedTrades.length,
+    pendingTrades: pendingTrades.length,
+    executingTrades: executingTrades.length,
+    cancelledTrades: cancelledTrades.length,
+    successRate: Math.round(successRate * 100) / 100,
+    avgExecutionTime: Math.round(avgExecutionTime),
+    totalProfitLoss: Math.round(totalProfitLoss * 100) / 100,
+    totalGasFees: Math.round(totalGasFees * 100) / 100,
+    netProfit: Math.round(netProfit * 100) / 100,
+    avgSlippage: Math.round(avgSlippage * 100) / 100,
+    avgProfitPerTrade: Math.round(avgProfitPerTrade * 100) / 100,
+    winRate: Math.round(winRate * 100) / 100,
+    bestTrade: Math.round(bestTrade * 100) / 100,
+    worstTrade: Math.round(worstTrade * 100) / 100,
+    totalVolume: Math.round(totalVolume * 100) / 100,
+    uniqueTokenPairs,
+    chainsUsed,
+    tradingPairs
+  };
+}
+
+function groupTradeData(trades: any[], groupBy: string) {
+  const groups: Record<string, any[]> = {};
+  
+  trades.forEach(trade => {
+    let key: string;
+    
+    switch (groupBy) {
+      case 'day':
+        key = new Date(trade.created_at).toISOString().split('T')[0] || 'unknown';
+        break;
+      case 'week':
+        const date = new Date(trade.created_at);
+        const weekStart = new Date(date);
+        weekStart.setDate(date.getDate() - date.getDay());
+        key = weekStart.toISOString().split('T')[0] || 'unknown';
+        break;
+      case 'month':
+        key = new Date(trade.created_at).toISOString().slice(0, 7) || 'unknown';
+        break;
+      case 'bot':
+        key = (Array.isArray(trade.bot_configurations) && trade.bot_configurations[0]?.name) || 'Unknown Bot';
+        break;
+      case 'chain':
+        key = trade.chain || 'unknown';
+        break;
+      case 'token_pair':
+        key = `${trade.token_in_symbol}/${trade.token_out_symbol}`;
+        break;
+      default:
+        key = 'all';
+    }
+    
+    if (!groups[key]) {
+      groups[key] = [];
+    }
+    groups[key].push(trade);
+  });
+  
+  // Calculate summary for each group
+  return Object.entries(groups).map(([key, groupTrades]) => ({
+    key,
+    count: groupTrades.length,
+    totalProfit: groupTrades.reduce((sum, t) => sum + parseFloat(t.profit_loss_usd || '0'), 0),
+    totalVolume: groupTrades.reduce((sum, t) => sum + parseFloat(t.amount_in || '0'), 0),
+    successRate: groupTrades.length > 0 ? 
+      (groupTrades.filter(t => t.status === 'completed').length / groupTrades.length) * 100 : 0,
+    trades: groupTrades
+  }));
+}
+
 export async function GET(request: NextRequest) {
+  const totalTimer = createTimer('GET Trades Request');
+  const requestId = crypto.randomUUID();
+  
   try {
     // Rate limiting
+    const rateLimitTimer = createTimer('Rate Limiting');
     const rateLimitResult = await rateLimiter.check(request);
+    endTimer(rateLimitTimer);
+    
     if (!rateLimitResult.success) {
       return NextResponse.json(
         { 
           error: 'Rate limit exceeded',
-          retryAfter: Math.ceil((rateLimitResult.resetTime - Date.now()) / 1000)
+          retryAfter: Math.ceil((rateLimitResult.resetTime - Date.now()) / 1000),
+          requestId,
+          timestamp: new Date().toISOString()
         },
         { status: 429 }
       );
     }
 
     // Authentication
+    const authTimer = createTimer('Authentication');
     const authResult = await verifyJWT(request);
+    endTimer(authTimer);
+    
     if (!authResult.success) {
       return NextResponse.json(
-        { error: 'Unauthorized', details: authResult.error },
+        { 
+          error: 'Unauthorized', 
+          details: authResult.error,
+          requestId,
+          timestamp: new Date().toISOString()
+        },
         { status: 401 }
       );
     }
@@ -82,7 +304,11 @@ export async function GET(request: NextRequest) {
     const userId = authResult.payload?.sub;
     if (!userId) {
       return NextResponse.json(
-        { error: 'Invalid token payload' },
+        { 
+          error: 'Invalid token payload',
+          requestId,
+          timestamp: new Date().toISOString()
+        },
         { status: 401 }
       );
     }
@@ -91,20 +317,44 @@ export async function GET(request: NextRequest) {
     const url = new URL(request.url);
     const queryParams = Object.fromEntries(url.searchParams.entries());
     
+    const validationTimer = createTimer('Query Validation');
     const validationResult = TradeQuerySchema.safeParse(queryParams);
+    endTimer(validationTimer);
+    
     if (!validationResult.success) {
       return NextResponse.json(
         { 
           error: 'Invalid query parameters',
-          details: validationResult.error.errors
+          details: validationResult.error.errors,
+          requestId,
+          timestamp: new Date().toISOString()
         },
         { status: 400 }
       );
     }
 
-    const { botId, status, limit, offset, startDate, endDate } = validationResult.data;
+    const { 
+      botId, 
+      status, 
+      chain,
+      tradeType,
+      tokenSymbol,
+      minProfitLoss,
+      maxProfitLoss,
+      minAmount,
+      maxAmount,
+      limit, 
+      offset, 
+      sortBy,
+      sortOrder,
+      startDate, 
+      endDate,
+      includeMetrics,
+      groupBy
+    } = validationResult.data;
 
-    // Build query for trades with bot configuration join to ensure user ownership
+    // Build optimized query for trades with bot configuration join
+    const queryTimer = createTimer('Database Query');
     const supabase = getSupabaseClient();
     let query = supabase
       .from('trade_history')
@@ -122,6 +372,8 @@ export async function GET(request: NextRequest) {
         amount_out,
         expected_amount_out,
         max_slippage,
+        actual_slippage,
+        execution_time_ms,
         tx_hash,
         gas_limit,
         gas_used,
@@ -129,92 +381,139 @@ export async function GET(request: NextRequest) {
         profit_loss_usd,
         gas_fee_usd,
         error_message,
+        error_code,
+        priority,
+        tags,
+        notes,
+        dex,
+        block_number,
         created_at,
         executed_at,
-        bot_configurations!inner(user_id, name, type)
+        updated_at,
+        bot_configurations!inner(user_id, name, type, is_active)
       `)
       .eq('bot_configurations.user_id', userId)
-      .order('created_at', { ascending: false })
+      .order(sortBy, { ascending: sortOrder === 'asc' })
       .range(offset, offset + limit - 1);
 
-    // Apply filters
-    if (botId) {
-      query = query.eq('bot_id', botId);
+    // Apply enhanced filters
+    if (botId) query = query.eq('bot_id', botId);
+    if (status) query = query.eq('status', status);
+    if (chain) query = query.eq('chain', chain);
+    if (tradeType) query = query.eq('trade_type', tradeType);
+    if (tokenSymbol) {
+      query = query.or(`token_in_symbol.ilike.%${tokenSymbol}%,token_out_symbol.ilike.%${tokenSymbol}%`);
     }
-
-    if (status) {
-      query = query.eq('status', status);
-    }
-
-    if (startDate) {
-      query = query.gte('created_at', startDate);
-    }
-
-    if (endDate) {
-      query = query.lte('created_at', endDate);
-    }
+    if (minProfitLoss !== undefined) query = query.gte('profit_loss_usd', minProfitLoss);
+    if (maxProfitLoss !== undefined) query = query.lte('profit_loss_usd', maxProfitLoss);
+    if (minAmount !== undefined) query = query.gte('amount_in', minAmount);
+    if (maxAmount !== undefined) query = query.lte('amount_in', maxAmount);
+    if (startDate) query = query.gte('created_at', startDate);
+    if (endDate) query = query.lte('created_at', endDate);
 
     const { data: trades, error, count } = await query;
+    endTimer(queryTimer);
 
     if (error) {
-      console.error('Error fetching trades:', error);
+      console.error(`[${requestId}] Error fetching trades:`, error);
       return NextResponse.json(
-        { error: 'Failed to fetch trades' },
+        { 
+          error: 'Failed to fetch trades',
+          details: error.message,
+          requestId,
+          timestamp: new Date().toISOString()
+        },
         { status: 500 }
       );
     }
 
-    // Calculate summary statistics
-    const totalTrades = trades?.length || 0;
-    const completedTrades = trades?.filter(t => t.status === 'completed') || [];
-    const failedTrades = trades?.filter(t => t.status === 'failed') || [];
-    
-    const totalProfitLoss = completedTrades.reduce((sum, trade) => 
-      sum + parseFloat(trade.profit_loss_usd || '0'), 0);
-    
-    const totalGasFees = trades?.reduce((sum, trade) => 
-      sum + parseFloat(trade.gas_fee_usd || '0'), 0) || 0;
+    // Calculate enhanced metrics if requested
+    let metrics: TradeMetrics | null = null;
+    if (includeMetrics) {
+      const metricsTimer = createTimer('Metrics Calculation');
+      metrics = await calculateTradeMetrics(trades || []);
+      endTimer(metricsTimer);
+    }
+
+    // Group data if requested
+    let groupedData = null;
+    if (groupBy && trades) {
+      const groupTimer = createTimer('Data Grouping');
+      groupedData = groupTradeData(trades, groupBy);
+      endTimer(groupTimer);
+    }
+
+    const totalDuration = endTimer(totalTimer);
 
     return NextResponse.json({
       success: true,
+      requestId,
       data: {
         trades: trades || [],
         pagination: {
           limit,
           offset,
-          total: count || totalTrades,
-          hasMore: totalTrades === limit
+          total: count || trades?.length || 0,
+          hasMore: (trades?.length || 0) === limit,
+          page: Math.floor(offset / limit) + 1,
+          totalPages: Math.ceil((count || trades?.length || 0) / limit)
         },
-        summary: {
-          totalTrades,
-          completedTrades: completedTrades.length,
-          failedTrades: failedTrades.length,
-          successRate: totalTrades > 0 ? (completedTrades.length / totalTrades * 100) : 0,
-          totalProfitLoss: Math.round(totalProfitLoss * 100) / 100,
-          totalGasFees: Math.round(totalGasFees * 100) / 100,
-          netProfit: Math.round((totalProfitLoss - totalGasFees) * 100) / 100
+        metrics,
+        groupedData,
+        filters: {
+          botId,
+          status,
+          chain,
+          tradeType,
+          tokenSymbol,
+          sortBy,
+          sortOrder,
+          dateRange: startDate && endDate ? { start: startDate, end: endDate } : null
+        },
+        metadata: {
+          requestDuration: totalDuration,
+          dataPoints: trades?.length || 0,
+          cacheable: true,
+          cacheExpiry: 60, // 1 minute for trades data
+          sortedBy: `${sortBy} ${sortOrder}`
         }
-      }
+      },
+      timestamp: new Date().toISOString()
     });
 
   } catch (error) {
-    console.error('Error in GET trades:', error);
+    endTimer(totalTimer);
+    console.error(`[${requestId}] Error in GET trades:`, error);
+    
     return NextResponse.json(
-      { error: 'Failed to fetch trades' },
+      { 
+        error: 'Internal server error',
+        message: error instanceof Error ? error.message : 'Unknown error',
+        requestId,
+        timestamp: new Date().toISOString()
+      },
       { status: 500 }
     );
   }
 }
 
 export async function POST(request: NextRequest) {
+  const totalTimer = createTimer('POST Trade Creation');
+  const requestId = crypto.randomUUID();
+  
   try {
     // Rate limiting (stricter for trade creation)
+    const rateLimitTimer = createTimer('Rate Limiting');
     const rateLimitResult = await rateLimiter.check(request, 20, 60 * 1000); // 20 per minute
+    endTimer(rateLimitTimer);
+    
     if (!rateLimitResult.success) {
       return NextResponse.json(
         { 
           error: 'Rate limit exceeded',
-          retryAfter: Math.ceil((rateLimitResult.resetTime - Date.now()) / 1000)
+          retryAfter: Math.ceil((rateLimitResult.resetTime - Date.now()) / 1000),
+          requestId,
+          timestamp: new Date().toISOString()
         },
         { status: 429 }
       );
